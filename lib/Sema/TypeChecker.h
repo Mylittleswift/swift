@@ -1129,9 +1129,6 @@ public:
   void prepareGenericParamList(GenericParamList *genericParams,
                                DeclContext *dc);
 
-  /// Revert the dependent types within a set of requirements.
-  void revertGenericRequirements(MutableArrayRef<RequirementRepr> requirements);
-
   /// Compute the generic signature, generic environment and interface type
   /// of a generic function.
   void validateGenericFuncSignature(AbstractFunctionDecl *func);
@@ -1203,17 +1200,6 @@ public:
   /// \param nominal The generic type.
   void validateGenericTypeSignature(GenericTypeDecl *nominal);
 
-  bool validateRequirement(SourceLoc whereLoc, RequirementRepr &req,
-                           TypeResolution resolution,
-                           TypeResolutionOptions options);
-
-  /// Validate the given requirements.
-  void validateRequirements(SourceLoc whereLoc,
-                            MutableArrayRef<RequirementRepr> requirements,
-                            TypeResolution resolution,
-                            TypeResolutionOptions options,
-                            GenericSignatureBuilder *builder = nullptr);
-
   /// Create a text string that describes the bindings of generic parameters
   /// that are relevant to the given set of types, e.g.,
   /// "[with T = Bar, U = Wibble]".
@@ -1256,18 +1242,6 @@ public:
       ConformanceCheckOptions conformanceOptions = ConformanceCheckFlags::Used,
       GenericRequirementsCheckListener *listener = nullptr,
       SubstOptions options = None);
-
-  /// Validate a protocol's where clause, along with the where clauses of
-  /// its associated types.
-  void validateWhereClauses(ProtocolDecl *protocol, TypeResolution resolution);
-
-  void resolveTrailingWhereClause(ProtocolDecl *proto) override;
-
-  /// Check the inheritance clause of the given declaration.
-  void checkInheritanceClause(Decl *decl, TypeResolution resolution);
-
-  /// Check the inheritance clause of the given declaration.
-  void checkInheritanceClause(Decl *decl);
 
   /// Diagnose if the class has no designated initializers.
   void maybeDiagnoseClassWithoutInitializers(ClassDecl *classDecl);
@@ -2234,6 +2208,11 @@ Type getMemberTypeForComparison(ASTContext &ctx, ValueDecl *member,
 /// information.
 bool isOverrideBasedOnType(ValueDecl *decl, Type declTy,
                            ValueDecl *parentDecl, Type parentDeclTy);
+
+/// Determine whether the given declaration is an operator defined in a
+/// protocol. If \p type is not null, check specifically whether \p decl
+/// could fulfill a protocol requirement for it.
+bool isMemberOperator(FuncDecl *decl, Type type);
 
 } // end namespace swift
 
