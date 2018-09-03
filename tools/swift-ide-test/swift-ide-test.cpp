@@ -657,6 +657,11 @@ static llvm::cl::opt<bool>
     DisableObjCInterop("disable-objc-interop",
                        llvm::cl::desc("Disable ObjC interop."),
                        llvm::cl::cat(Category), llvm::cl::init(false));
+
+static llvm::cl::opt<std::string>
+GraphVisPath("output-request-graphviz",
+             llvm::cl::desc("Emit GraphViz output visualizing the request graph."),
+             llvm::cl::cat(Category));
 } // namespace options
 
 static std::unique_ptr<llvm::MemoryBuffer>
@@ -2142,11 +2147,6 @@ public:
   ASTCommentPrinter(SourceManager &SM, XMLValidator &TheXMLValidator)
       : OS(llvm::outs()), SM(SM), TheXMLValidator(TheXMLValidator) {}
 
-  StringRef getBufferIdentifier(SourceLoc Loc) {
-    unsigned BufferID = SM.findBufferContainingLoc(Loc);
-    return SM.getIdentifierForBuffer(BufferID);
-  }
-
   void printWithEscaping(StringRef Str) {
     for (char C : Str) {
       switch (C) {
@@ -2285,7 +2285,7 @@ public:
       SourceLoc Loc = D->getLoc();
       if (Loc.isValid()) {
         auto LineAndColumn = SM.getLineAndColumn(Loc);
-        OS << getBufferIdentifier(VD->getLoc())
+        OS << SM.getDisplayNameForLoc(VD->getLoc())
            << ":" << LineAndColumn.first << ":" << LineAndColumn.second << ": ";
       }
       OS << Decl::getKindName(VD->getKind()) << "/";
@@ -2302,7 +2302,7 @@ public:
       SourceLoc Loc = D->getLoc();
       if (Loc.isValid()) {
         auto LineAndColumn = SM.getLineAndColumn(Loc);
-        OS << getBufferIdentifier(D->getLoc())
+        OS << SM.getDisplayNameForLoc(D->getLoc())
         << ":" << LineAndColumn.first << ":" << LineAndColumn.second << ": ";
       }
       OS << Decl::getKindName(D->getKind()) << "/";
@@ -3047,6 +3047,8 @@ int main(int argc, char *argv[]) {
   InitInvok.setSDKPath(options::SDK);
   InitInvok.getLangOptions().CollectParsedToken = true;
   InitInvok.getLangOptions().BuildSyntaxTree = true;
+  InitInvok.getLangOptions().RequestEvaluatorGraphVizPath =
+    options::GraphVisPath;
   if (options::DisableObjCInterop) {
     InitInvok.getLangOptions().EnableObjCInterop = false;
   } else if (options::EnableObjCInterop) {

@@ -757,22 +757,37 @@ public:
 // Match the argument of a call to the parameter.
 ConstraintSystem::TypeMatchResult
 constraints::matchCallArguments(ConstraintSystem &cs, bool isOperator,
-                                Type argType, Type paramType,
+                                ArrayRef<AnyFunctionType::Param> args,
+                                ArrayRef<AnyFunctionType::Param> params,
                                 ConstraintLocatorBuilder locator) {
+  // Extract the parameters.
+  ValueDecl *callee;
+  unsigned calleeLevel;
+  ArrayRef<Identifier> argLabels;
+  SmallVector<Identifier, 2> argLabelsScratch;
+  bool hasTrailingClosure = false;
+  std::tie(callee, calleeLevel, argLabels, hasTrailingClosure) =
+    getCalleeDeclAndArgs(cs, locator, argLabelsScratch);
 
-  if (paramType->isAny()) {
-    if (argType->is<InOutType>())
-      return cs.getTypeMatchFailure(locator);
+  llvm::SmallBitVector defaultMap =
+    computeDefaultMap(params, callee, calleeLevel);
 
-    // If the param type is Any, the function can only have one argument.
-    // Check if exactly one argument was passed to this function, otherwise
-    // we obviously have a mismatch.
-    if (auto tupleArgType = dyn_cast<TupleType>(argType.getPointer())) {
-      if (tupleArgType->getNumElements() != 1 ||
-          tupleArgType->getElement(0).hasName()) {
-        return cs.getTypeMatchFailure(locator);
-      }
-    }
+  // Apply labels to arguments.
+  SmallVector<AnyFunctionType::Param, 8> argsWithLabels;
+  argsWithLabels.append(args.begin(), args.end());
+  AnyFunctionType::relabelParams(argsWithLabels, argLabels);
+
+  // FIXME: Remove this. It's functionally identical to the real code
+  // path below, except for some behavioral differences in solution ranking
+  // that I don't understand.
+  if (params.size() == 1 &&
+      args.size() == 1 &&
+      params[0].getLabel().empty() &&
+      args[0].getLabel().empty() &&
+      !params[0].getParameterFlags().isInOut() &&
+      !args[0].getParameterFlags().isInOut() &&
+      params[0].getPlainType()->isAny()) {
+    auto argType = args[0].getPlainType();
 
     // Disallow assignment of noescape function to parameter of type
     // Any. Allowing this would allow these functions to escape.
@@ -792,28 +807,10 @@ constraints::matchCallArguments(ConstraintSystem &cs, bool isOperator,
     return cs.getTypeMatchSuccess();
   }
 
-  // Extract the parameters.
-  ValueDecl *callee;
-  unsigned calleeLevel;
-  ArrayRef<Identifier> argLabels;
-  SmallVector<Identifier, 2> argLabelsScratch;
-  bool hasTrailingClosure = false;
-  std::tie(callee, calleeLevel, argLabels, hasTrailingClosure) =
-    getCalleeDeclAndArgs(cs, locator, argLabelsScratch);
-  
-  SmallVector<AnyFunctionType::Param, 4> params;
-  AnyFunctionType::decomposeInput(paramType, params);
-  
-  llvm::SmallBitVector defaultMap =
-    computeDefaultMap(params, callee, calleeLevel);
-
-  // Extract the arguments.
-  auto args = decomposeArgType(argType, argLabels);
-  
   // Match up the call arguments to the parameters.
   ArgumentFailureTracker listener(cs, locator);
   SmallVector<ParamBinding, 4> parameterBindings;
-  if (constraints::matchCallArguments(args, params,
+  if (constraints::matchCallArguments(argsWithLabels, params,
                                       defaultMap,
                                       hasTrailingClosure,
                                       cs.shouldAttemptFixes(), listener,
@@ -842,7 +839,7 @@ constraints::matchCallArguments(ConstraintSystem &cs, bool isOperator,
       auto loc = locator.withPathElement(LocatorPathElt::
                                             getApplyArgToParam(argIdx,
                                                                paramIdx));
-      auto argTy = args[argIdx].getType();
+      auto argTy = argsWithLabels[argIdx].getType();
 
       // FIXME: This should be revisited. If one of argTy or paramTy
       // is a type variable, matchTypes() will add a constraint, and
@@ -1276,6 +1273,19 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
                                         ConstraintKind kind,
                                         TypeMatchOptions flags,
                                         ConstraintLocatorBuilder locator) {
+  // If the first type is a type variable or member thereof, there's nothing
+  // we can do now.
+  if (type1->isTypeVariableOrMember()) {
+    if (flags.contains(TMF_GenerateConstraints)) {
+      addUnsolvedConstraint(
+        Constraint::create(*this, kind, type1, type2,
+                           getConstraintLocator(locator)));
+      return getTypeMatchSuccess();
+    }
+
+    return getTypeMatchAmbiguous();
+  }
+
   // FIXME: Feels like a hack.
   if (type1->is<InOutType>())
     return getTypeMatchFailure(locator);
@@ -1298,19 +1308,6 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
     }
 
     return getTypeMatchFailure(locator);
-  }
-
-  // If the first type is a type variable or member thereof, there's nothing
-  // we can do now.
-  if (type1->isTypeVariableOrMember()) {
-    if (flags.contains(TMF_GenerateConstraints)) {
-      addUnsolvedConstraint(
-        Constraint::create(*this, kind, type1, type2,
-                           getConstraintLocator(locator)));
-      return getTypeMatchSuccess();
-    }
-
-    return getTypeMatchAmbiguous();
   }
 
   TypeMatchOptions subflags = getDefaultDecompositionOptions(flags);
@@ -2372,7 +2369,7 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
         // If we're converting an lvalue to an inout type, add the missing '&'.
         conversionsOrFixes.push_back(
           AddAddressOf::create(*this, getConstraintLocator(locator)));
-      } else if (!isTypeVarOrMember1) {
+      } else {
         // If we have a concrete type that's an rvalue, "fix" it.
         conversionsOrFixes.push_back(
           TreatRValueAsLValue::create(*this, getConstraintLocator(locator)));
@@ -2380,8 +2377,11 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
     }
   }
 
-  if (attemptFixes && type2->is<LValueType>() && !isTypeVarOrMember1) {
-      conversionsOrFixes.push_back(
+  if (attemptFixes && type2->is<LValueType>()) {
+    conversionsOrFixes.push_back(
+        TreatRValueAsLValue::create(*this, getConstraintLocator(locator)));
+  } else if (attemptFixes && kind == ConstraintKind::Bind && type1->is<LValueType>()) {
+    conversionsOrFixes.push_back(
           TreatRValueAsLValue::create(*this, getConstraintLocator(locator)));
   }
 
@@ -4420,13 +4420,15 @@ ConstraintSystem::simplifyApplicableFnConstraint(
 
     // The argument type must be convertible to the input type.
     if (::matchCallArguments(*this, isOperator,
-                             func1->getInput(), func2->getInput(),
+                             func1->getParams(),
+                             func2->getParams(),
                              outerLocator.withPathElement(
                                ConstraintLocator::ApplyArgument)).isFailure())
       return SolutionKind::Error;
 
     // The result types are equivalent.
-    if (matchTypes(func1->getResult(), func2->getResult(),
+    if (matchTypes(func1->getResult(),
+                   func2->getResult(),
                    ConstraintKind::Bind,
                    subflags,
                    locator.withPathElement(
@@ -5009,7 +5011,11 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
   }
 
   case FixKind::TreatRValueAsLValue: {
-    auto result = matchTypes(LValueType::get(type1), type2,
+    if (type2->is<LValueType>() || type2->is<InOutType>())
+      type1 = LValueType::get(type1);
+    else
+      type2 = LValueType::get(type2);
+    auto result = matchTypes(type1, type2,
                              matchKind, subflags, locator);
     if (result == SolutionKind::Solved)
       if (recordFix(fix))

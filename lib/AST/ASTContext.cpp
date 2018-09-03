@@ -518,6 +518,11 @@ ASTContext::ASTContext(LangOptions &langOpts, SearchPathOptions &SearchPathOpts,
 }
 
 ASTContext::~ASTContext() {
+  // Emit evaluator dependency graph if requested.
+  auto graphPath = LangOpts.RequestEvaluatorGraphVizPath;
+  if (!graphPath.empty()) {
+    evaluator.emitRequestEvaluatorGraphViz(graphPath);
+  }
   getImpl().~Implementation();
 }
 
@@ -3611,6 +3616,17 @@ bool AnyFunctionType::equalParams(CanParamArrayRef a, CanParamArrayRef b) {
   }
 
   return true;
+}
+
+void AnyFunctionType::relabelParams(MutableArrayRef<Param> params,
+                                    ArrayRef<Identifier> labels) {
+  assert(params.size() == labels.size());
+  for (auto i : indices(params)) {
+    auto &param = params[i];
+    param = AnyFunctionType::Param(param.getPlainType(),
+                                   labels[i],
+                                   param.getParameterFlags());
+  }
 }
 
 FunctionType *FunctionType::get(ArrayRef<AnyFunctionType::Param> params,

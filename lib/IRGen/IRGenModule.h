@@ -1144,7 +1144,16 @@ public:
   llvm::Function *getAddrOfDispatchThunk(SILDeclRef declRef,
                                          ForDefinition_t forDefinition);
 
-  llvm::Function *emitDispatchThunk(SILDeclRef declRef);
+  void emitDispatchThunk(SILDeclRef declRef);
+
+  llvm::GlobalValue *defineAlias(LinkEntity entity,
+                                 llvm::Constant *definition);
+
+  llvm::GlobalValue *defineMethodDescriptor(SILDeclRef declRef,
+                                            NominalTypeDecl *nominalDecl,
+                                            llvm::Constant *definition);
+
+
   Address getAddrOfEnumCase(EnumElementDecl *Case,
                             ForDefinition_t forDefinition);
   Address getAddrOfFieldOffset(VarDecl *D, ForDefinition_t forDefinition);
@@ -1273,10 +1282,6 @@ public:
   getAddrOfLLVMVariableOrGOTEquivalent(LinkEntity entity, Alignment alignment,
        llvm::Type *defaultType,
        ConstantReference::Directness forceIndirect = ConstantReference::Direct);
-
-  ConstantReference
-  getFunctionGOTEquivalent(LinkEntity entity,
-                           llvm::Function *func);
 
   llvm::Constant *
   emitRelativeReference(ConstantReference target,

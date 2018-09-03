@@ -1330,10 +1330,17 @@ namespace {
       }
       auto *constr = cast<ConstructorDecl>(constrs.front());
       auto constrParamType = tc.getObjectLiteralParameterType(expr, constr);
+
+      // Extract the arguments.
+      SmallVector<AnyFunctionType::Param, 8> args;
+      AnyFunctionType::decomposeInput(CS.getType(expr->getArg()), args);
+
+      // Extract the parameters.
+      SmallVector<AnyFunctionType::Param, 8> params;
+      AnyFunctionType::decomposeInput(constrParamType, params);
+
       ::matchCallArguments(
-          CS, /*isOperator=*/false,
-          CS.getType(expr->getArg()),
-          constrParamType,
+          CS, /*isOperator=*/false, args, params,
           CS.getConstraintLocator(expr,
                                   ConstraintLocator::ApplyArgument));
 
@@ -2785,7 +2792,7 @@ namespace {
         return TupleType::get(destTupleTypes, CS.getASTContext());
       } else {
         Type destTy = CS.createTypeVariable(CS.getConstraintLocator(expr));
-        CS.addConstraint(ConstraintKind::Bind, CS.getType(expr), LValueType::get(destTy),
+        CS.addConstraint(ConstraintKind::Bind, LValueType::get(destTy), CS.getType(expr),
                          CS.getConstraintLocator(expr));
         return destTy;
       }

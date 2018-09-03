@@ -555,9 +555,11 @@ public:
   SmallVector<NominalTypeDecl*, 8> DelayedCircularityChecks;
 
   // Caches whether a given declaration is "as specialized" as another.
-  llvm::DenseMap<std::pair<ValueDecl*, ValueDecl*>, bool> 
-    specializedOverloadComparisonCache;
-  
+  llvm::DenseMap<std::tuple<ValueDecl *, ValueDecl *,
+                            /*isDynamicOverloadComparison*/ unsigned>,
+                 bool>
+      specializedOverloadComparisonCache;
+
   /// A list of closures for the most recently type-checked function, which we
   /// will need to compute captures for.
   std::vector<AnyFunctionRef> ClosuresWithUncomputedCaptures;
@@ -2201,8 +2203,7 @@ bool overrideRequiresKeyword(ValueDecl *overridden);
 /// Compute the type of a member that will be used for comparison when
 /// performing override checking.
 Type getMemberTypeForComparison(ASTContext &ctx, ValueDecl *member,
-                                ValueDecl *derivedDecl = nullptr,
-                                bool stripLabels = true);
+                                ValueDecl *derivedDecl = nullptr);
 
 /// Determine whether the given declaration is an override by comparing type
 /// information.
