@@ -207,7 +207,8 @@ enum class KnownProtocolKind: uint8_t {
 };
 
 class SDKNodeRoot;
-
+class SDKNodeDeclGetter;
+class SDKNodeDeclSetter;
 struct SDKNodeInitInfo;
 
 class SDKNode {
@@ -220,7 +221,6 @@ class SDKNode {
   std::set<NodeAnnotation> Annotations;
   std::map<NodeAnnotation, StringRef> AnnotateComments;
   NodePtr Parent = nullptr;
-
 protected:
   SDKNode(SDKNodeInitInfo Info, SDKNodeKind Kind);
 
@@ -253,7 +253,7 @@ public:
   void addChild(SDKNode *Child);
   ArrayRef<SDKNode*> getChildren() const;
   bool hasSameChildren(const SDKNode &Other) const;
-  unsigned getChildIndex(NodePtr Child) const;
+  unsigned getChildIndex(const SDKNode *Child) const;
   SDKNode* getOnlyChild() const;
   SDKContext &getSDKContext() const { return Ctx; }
   SDKNodeRoot *getRootNode() const;
@@ -275,8 +275,10 @@ class SDKNodeDecl: public SDKNode {
   StringRef Location;
   StringRef ModuleName;
   std::vector<DeclAttrKind> DeclAttributes;
+  bool IsImplicit;
   bool IsStatic;
   bool IsDeprecated;
+  bool IsProtocolReq;
   uint8_t ReferenceOwnership;
   StringRef GenericSig;
 
@@ -300,7 +302,9 @@ public:
   StringRef getFullyQualifiedName() const;
   bool isSDKPrivate() const;
   bool isDeprecated() const { return IsDeprecated; };
+  bool isProtocolRequirement() const { return IsProtocolReq; }
   bool hasDeclAttribute(DeclAttrKind DAKind) const;
+  bool isImplicit() const { return IsImplicit; };
   bool isStatic() const { return IsStatic; };
   StringRef getGenericSignature() const { return GenericSig; }
   StringRef getScreenInfo() const;
@@ -403,12 +407,14 @@ public:
 
 class SDKNodeDeclType : public SDKNodeDecl {
   StringRef SuperclassUsr;
+  StringRef SuperclassName;
   std::vector<StringRef> ConformingProtocols;
   StringRef EnumRawTypeName;
 public:
   SDKNodeDeclType(SDKNodeInitInfo Info);
   static bool classof(const SDKNode *N);
   StringRef getSuperClassUsr() const { return SuperclassUsr; }
+  StringRef getSuperClassName() const { return SuperclassName; }
   ArrayRef<StringRef> getAllProtocols() const { return ConformingProtocols; }
 
 #define NOMINAL_TYPE_DECL(ID, PARENT) \
@@ -439,10 +445,25 @@ public:
   static bool classof(const SDKNode *N);
 };
 
+class SDKNodeDeclAssociatedType: public SDKNodeDecl {
+public:
+  SDKNodeDeclAssociatedType(SDKNodeInitInfo Info);
+  const SDKNodeType* getDefault() const {
+    return getChildrenCount() ? getOnlyChild()->getAs<SDKNodeType>(): nullptr;
+  }
+  static bool classof(const SDKNode *N);
+};
+
 class SDKNodeDeclVar : public SDKNodeDecl {
+  Optional<unsigned> FixedBinaryOrder;
 public:
   SDKNodeDeclVar(SDKNodeInitInfo Info);
   static bool classof(const SDKNode *N);
+  bool hasFixedBinaryOrder() const { return FixedBinaryOrder.hasValue(); }
+  unsigned getFixedBinaryOrder() const { return *FixedBinaryOrder; }
+  SDKNodeDeclGetter *getGetter() const;
+  SDKNodeDeclSetter *getSetter() const;
+  SDKNodeType *getType() const;
 };
 
 class SDKNodeDeclAbstractFunc : public SDKNodeDecl {
@@ -460,6 +481,14 @@ public:
   bool hasSelfIndex() const { return SelfIndex.hasValue(); }
   static bool classof(const SDKNode *N);
   static StringRef getTypeRoleDescription(SDKContext &Ctx, unsigned Index);
+};
+
+class SDKNodeDeclSubscript: public SDKNodeDeclAbstractFunc {
+  bool HasSetter;
+public:
+  SDKNodeDeclSubscript(SDKNodeInitInfo Info);
+  static bool classof(const SDKNode *N);
+  bool hasSetter() const { return HasSetter; }
 };
 
 class SDKNodeDeclFunction: public SDKNodeDeclAbstractFunc {
@@ -491,7 +520,7 @@ class SwiftDeclCollector: public VisibleDeclConsumer {
   SDKContext &Ctx;
   std::vector<std::unique_ptr<llvm::MemoryBuffer>> OwnedBuffers;
   SDKNode *RootNode;
-  llvm::DenseSet<Decl*> KnownDecls;
+  llvm::SetVector<Decl*> KnownDecls;
   // Collected and sorted after we get all of them.
   std::vector<ValueDecl *> ClangMacros;
   std::set<ExtensionDecl*> HandledExtensions;
@@ -515,6 +544,20 @@ public:
 
   void printTopLevelNames();
 
+  bool shouldIgnore(Decl *D, const Decl* Parent);
+  void addMembersToRoot(SDKNode *Root, IterableDeclContext *Context);
+  SDKNode *constructSubscriptDeclNode(SubscriptDecl *SD);
+  SDKNode *constructAssociatedTypeNode(AssociatedTypeDecl *ATD);
+  SDKNode *constructTypeAliasNode(TypeAliasDecl *TAD);
+  SDKNode *constructVarNode(ValueDecl *VD);
+  SDKNode *constructExternalExtensionNode(NominalTypeDecl *NTD,
+                                          ArrayRef<ExtensionDecl*> AllExts);
+  SDKNode *constructTypeDeclNode(NominalTypeDecl *NTD);
+  SDKNode *constructInitNode(ConstructorDecl *CD);
+  SDKNode *constructFunctionNode(FuncDecl* FD, SDKNodeKind Kind);
+  std::vector<SDKNode*> createParameterNodes(ParameterList *PL);
+  SDKNode *constructTypeNode(Type T, bool IsImplicitlyUnwrappedOptional = false,
+    bool hasDefaultArgument = false);
 public:
   void lookupVisibleDecls(ArrayRef<ModuleDecl *> Modules);
   void processDecl(ValueDecl *VD);
@@ -538,6 +581,10 @@ int deserializeSDKDump(StringRef dumpPath, StringRef OutputPath,
                        CheckerOptions Opts);
 
 int findDeclUsr(StringRef dumpPath, CheckerOptions Opts);
+
+void stringSetDifference(ArrayRef<StringRef> Left, ArrayRef<StringRef> Right,
+  std::vector<StringRef> &LeftMinusRight, std::vector<StringRef> &RightMinusLeft);
+
 } // end of abi namespace
 } // end of ide namespace
 } // end of Swift namespace

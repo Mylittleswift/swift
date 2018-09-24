@@ -168,6 +168,12 @@ bool swift::Demangle::isSwiftSymbol(const char *mangledName) {
   return isSwiftSymbol(mangledNameRef);
 }
 
+bool swift::Demangle::isObjCSymbol(llvm::StringRef mangledName) {
+  StringRef nameWithoutPrefix = dropSwiftManglingPrefix(mangledName);
+  return nameWithoutPrefix.startswith("So") ||
+         nameWithoutPrefix.startswith("SC");
+}
+
 bool swift::Demangle::isOldFunctionTypeMangling(llvm::StringRef mangledName) {
   return mangledName.startswith("_T");
 }
@@ -185,7 +191,7 @@ static bool isAliasNode(Demangle::NodePointer Node) {
   default:
     return false;
   }
-  llvm_unreachable("Unhandled node kind!");
+  assert(0 && "unknown node kind");
 }
 
 bool swift::Demangle::isAlias(llvm::StringRef mangledName) {
@@ -203,7 +209,7 @@ static bool isClassNode(Demangle::NodePointer Node) {
   default:
     return false;
   }
-  llvm_unreachable("Unhandled node kind!");
+  assert(0 && "unknown node kind");
 }
 
 bool swift::Demangle::isClass(llvm::StringRef mangledName) {
@@ -221,7 +227,7 @@ static bool isEnumNode(Demangle::NodePointer Node) {
   default:
     return false;
   }
-  llvm_unreachable("Unhandled node kind!");
+  assert(0 && "unknown node kind");
 }
 
 bool swift::Demangle::isEnum(llvm::StringRef mangledName) {
@@ -238,7 +244,7 @@ static bool isProtocolNode(Demangle::NodePointer Node) {
   default:
     return false;
   }
-  llvm_unreachable("Unhandled node kind!");
+  assert(0 && "unknown node kind");
 }
 
 bool swift::Demangle::isProtocol(llvm::StringRef mangledName) {
@@ -256,7 +262,7 @@ static bool isStructNode(Demangle::NodePointer Node) {
   default:
     return false;
   }
-  llvm_unreachable("Unhandled node kind!");
+  assert(0 && "unknown node kind");
 }
 
 bool swift::Demangle::isStruct(llvm::StringRef mangledName) {
@@ -1660,10 +1666,10 @@ NodePointer Demangler::popAssocTypePath() {
   bool firstElem = false;
   do {
     firstElem = (popNode(Node::Kind::FirstElementMarker) != nullptr);
-    NodePointer AssocTyName = popNode(isDeclName);
-    if (!AssocTyName)
+    NodePointer AssocTy = popAssocTypeName();
+    if (!AssocTy)
       return nullptr;
-    AssocTypePath->addChild(AssocTyName, *this);
+    AssocTypePath->addChild(AssocTy, *this);
   } while (!firstElem);
   AssocTypePath->reverseChildren();
   return AssocTypePath;
@@ -1812,6 +1818,38 @@ NodePointer Demangler::demangleThunkOrSpecialization() {
       }
       return result;
     }
+    case 'l': {
+      auto assocTypeName = popAssocTypeName();
+      if (!assocTypeName)
+        return nullptr;
+
+      return createWithChild(Node::Kind::AssociatedTypeDescriptor,
+                             assocTypeName);
+    }
+    case 'L':
+      return createWithChild(Node::Kind::ProtocolRequirementsBaseDescriptor,
+                             popProtocol());
+    case 'M':
+      return createWithChild(Node::Kind::DefaultAssociatedTypeMetadataAccessor,
+                             popAssocTypeName());
+
+    case 'n': {
+      NodePointer requirementTy = popProtocol();
+      auto assocTypePath = popAssocTypePath();
+      NodePointer protoTy = popNode(Node::Kind::Type);
+      return createWithChildren(Node::Kind::AssociatedConformanceDescriptor,
+                                protoTy, assocTypePath, requirementTy);
+    }
+
+    case 'N': {
+      NodePointer requirementTy = popProtocol();
+      auto assocTypePath = popAssocTypePath();
+      NodePointer protoTy = popNode(Node::Kind::Type);
+      return createWithChildren(
+                            Node::Kind::DefaultAssociatedConformanceAccessor,
+                            protoTy, assocTypePath, requirementTy);
+    }
+
     case 'H':
     case 'h': {
       auto nodeKind = c == 'H' ? Node::Kind::KeyPathEqualsThunkHelper

@@ -139,7 +139,7 @@ static bool needsSingletonMetadataInitialization(IRGenModule &IGM,
   // Non-generic classes use singleton initialization if they have anything
   // non-trivial about their metadata.
   if (auto *classDecl = dyn_cast<ClassDecl>(typeDecl))
-    return doesClassMetadataRequireInitialization(IGM, classDecl);
+    return doesClassMetadataRequireUpdate(IGM, classDecl);
 
   assert(isa<StructDecl>(typeDecl) || isa<EnumDecl>(typeDecl));
 
@@ -637,12 +637,24 @@ namespace {
 
       if (entry.isAssociatedType()) {
         auto flags = Flags(Flags::Kind::AssociatedTypeAccessFunction);
-        return { flags, nullptr };
+
+        // Look for a default witness.
+        llvm::Constant *defaultImpl =
+          findDefaultTypeWitness(entry.getAssociatedType());
+
+        return { flags, defaultImpl };
       }
 
       if (entry.isAssociatedConformance()) {
         auto flags = Flags(Flags::Kind::AssociatedConformanceAccessFunction);
-        return { flags, nullptr };
+
+        // Look for a default witness.
+        llvm::Constant *defaultImpl =
+          findDefaultAssociatedConformanceWitness(
+            entry.getAssociatedConformancePath(),
+            entry.getAssociatedConformanceRequirement());
+
+        return { flags, defaultImpl };
       }
 
       assert(entry.isFunction());
@@ -667,14 +679,53 @@ namespace {
       B.fillPlaceholderWithInt(*NumRequirements, IGM.Int32Ty,
                                pi.getNumWitnesses());
 
+      if (pi.getNumWitnesses() > 0) {
+        // Define the protocol requirements "base" descriptor, which references
+        // the beginning of the protocol requirements, offset so that
+        // subtracting this address from the address of a given protocol
+        // requirements gives the corresponding offset into the witness
+        // table.
+        auto address =
+          B.getAddrOfCurrentPosition(IGM.ProtocolRequirementStructTy);
+        int offset = WitnessTableFirstRequirementOffset;
+        auto firstReqAdjustment = llvm::ConstantInt::get(IGM.Int32Ty, -offset);
+        address = llvm::ConstantExpr::getGetElementPtr(nullptr, address,
+                                                       firstReqAdjustment);
+
+        IGM.defineProtocolRequirementsBaseDescriptor(Proto, address);
+      }
+
       for (auto &entry : pi.getWitnessEntries()) {
-        if (Resilient && entry.isFunction()) {
-          // Define the method descriptor.
-          SILDeclRef func(entry.getFunction());
-          auto *descriptor =
-            B.getAddrOfCurrentPosition(
-              IGM.ProtocolRequirementStructTy);
-          IGM.defineMethodDescriptor(func, Proto, descriptor);
+        if (Resilient) {
+          if (entry.isFunction()) {
+            // Define the method descriptor.
+            SILDeclRef func(entry.getFunction());
+            auto *descriptor =
+              B.getAddrOfCurrentPosition(
+                IGM.ProtocolRequirementStructTy);
+            IGM.defineMethodDescriptor(func, Proto, descriptor);
+          }
+        }
+
+        if (entry.isAssociatedType()) {
+          auto assocType = entry.getAssociatedType();
+          // Define the associated type descriptor to point to the current
+          // position in the protocol descriptor.
+          IGM.defineAssociatedTypeDescriptor(
+              assocType,
+              B.getAddrOfCurrentPosition(IGM.ProtocolRequirementStructTy));
+        }
+
+        if (entry.isAssociatedConformance()) {
+          // Define the associated conformance descriptor to point to the
+          // current position in the protocol descriptor.
+          AssociatedConformance conformance(
+                                  Proto,
+                                  entry.getAssociatedConformancePath(),
+                                  entry.getAssociatedConformanceRequirement());
+          IGM.defineAssociatedConformanceDescriptor(
+              conformance,
+              B.getAddrOfCurrentPosition(IGM.ProtocolRequirementStructTy));
         }
 
         auto reqt = B.beginStruct(IGM.ProtocolRequirementStructTy);
@@ -695,12 +746,150 @@ namespace {
       if (!DefaultWitnesses) return nullptr;
 
       for (auto &entry : DefaultWitnesses->getEntries()) {
-        if (!entry.isValid() || entry.getRequirement() != func)
+        if (!entry.isValid() || entry.getKind() != SILWitnessTable::Method ||
+            entry.getMethodWitness().Requirement != func)
           continue;
-        return IGM.getAddrOfSILFunction(entry.getWitness(), NotForDefinition);
+        return IGM.getAddrOfSILFunction(entry.getMethodWitness().Witness,
+                                        NotForDefinition);
       }
 
       return nullptr;
+    }
+
+    llvm::Constant *findDefaultTypeWitness(AssociatedTypeDecl *assocType) {
+      if (!DefaultWitnesses) return nullptr;
+
+      for (auto &entry : DefaultWitnesses->getEntries()) {
+        if (!entry.isValid() ||
+            entry.getKind() != SILWitnessTable::AssociatedType ||
+            entry.getAssociatedTypeWitness().Requirement != assocType)
+          continue;
+
+        auto witness = entry.getAssociatedTypeWitness().Witness;
+        return getDefaultAssociatedTypeMetadataAccessFunction(
+                 AssociatedType(assocType), witness);
+      }
+
+      return nullptr;
+    }
+
+    /// Create an associated type metadata access function for the default
+    /// associated type witness.
+    llvm::Constant *getDefaultAssociatedTypeMetadataAccessFunction(
+                      AssociatedType requirement, CanType witness) {
+      auto accessor =
+        IGM.getAddrOfDefaultAssociatedTypeMetadataAccessFunction(requirement);
+
+      IRGenFunction IGF(IGM, accessor);
+      if (IGM.DebugInfo)
+        IGM.DebugInfo->emitArtificialFunction(IGF, accessor);
+
+      Explosion parameters = IGF.collectParameters();
+      auto request = DynamicMetadataRequest(parameters.claimNext());
+
+      llvm::Value *self = parameters.claimNext();
+      llvm::Value *wtable = parameters.claimNext();
+
+      CanType selfInContext =
+          Proto->mapTypeIntoContext(Proto->getProtocolSelfType())
+            ->getCanonicalType();
+
+      // Bind local Self type data from the metadata argument.
+      IGF.bindLocalTypeDataFromTypeMetadata(selfInContext, IsExact, self,
+                                            MetadataState::Abstract);
+      IGF.setUnscopedLocalTypeData(
+          selfInContext,
+          LocalTypeDataKind::forAbstractProtocolWitnessTable(Proto),
+          wtable);
+
+      // Emit a reference to the type metadata.
+      auto response = IGF.emitTypeMetadataRef(witness, request);
+      response.ensureDynamicState(IGF);
+      auto returnValue = response.combine(IGF);
+      IGF.Builder.CreateRet(returnValue);
+      return accessor;
+    }
+
+    llvm::Constant *findDefaultAssociatedConformanceWitness(
+                                                  CanType association,
+                                                  ProtocolDecl *requirement) {
+      if (!DefaultWitnesses) return nullptr;
+
+      for (auto &entry : DefaultWitnesses->getEntries()) {
+        if (!entry.isValid() ||
+            entry.getKind() != SILWitnessTable::AssociatedTypeProtocol ||
+            entry.getAssociatedTypeProtocolWitness().Protocol != requirement ||
+            entry.getAssociatedTypeProtocolWitness().Requirement != association)
+          continue;
+
+        auto witness = entry.getAssociatedTypeProtocolWitness().Witness;
+        return getDefaultAssociatedConformanceAccessFunction(
+                 AssociatedConformance(Proto, association, requirement),
+                 witness);
+      }
+
+      return nullptr;
+    }
+
+    llvm::Constant *getDefaultAssociatedConformanceAccessFunction(
+                      AssociatedConformance requirement,
+                      ProtocolConformanceRef conformance) {
+      auto accessor =
+        IGM.getAddrOfDefaultAssociatedConformanceAccessor(requirement);
+
+      IRGenFunction IGF(IGM, accessor);
+      if (IGM.DebugInfo)
+        IGM.DebugInfo->emitArtificialFunction(IGF, accessor);
+
+      Explosion parameters = IGF.collectParameters();
+
+      llvm::Value *associatedTypeMetadata = parameters.claimNext();
+      llvm::Value *self = parameters.claimNext();
+      llvm::Value *wtable = parameters.claimNext();
+
+      bool hasArchetype =
+        !conformance.isConcrete() ||
+        conformance.getConcrete()->getType()->hasArchetype();
+      if (hasArchetype) {
+        // Bind local Self type data from the metadata argument.
+        CanType selfInContext =
+            Proto->mapTypeIntoContext(Proto->getProtocolSelfType())
+              ->getCanonicalType();
+        IGF.bindLocalTypeDataFromTypeMetadata(selfInContext, IsExact, self,
+                                              MetadataState::Abstract);
+        IGF.setUnscopedLocalTypeData(
+            selfInContext,
+            LocalTypeDataKind::forAbstractProtocolWitnessTable(Proto),
+            wtable);
+
+        // Bind the associated type metadata.
+        IGF.bindLocalTypeDataFromTypeMetadata(requirement.getAssociation(),
+                                              IsExact,
+                                              associatedTypeMetadata,
+                                              MetadataState::Abstract);
+      }
+
+      // For a concrete witness table, call it.
+      ProtocolDecl *associatedProtocol = requirement.getAssociatedRequirement();
+      if (conformance.isConcrete()) {
+        auto conformanceI = &IGM.getConformanceInfo(associatedProtocol,
+                                                    conformance.getConcrete());
+        auto returnValue = conformanceI->getTable(IGF, &associatedTypeMetadata);
+        IGF.Builder.CreateRet(returnValue);
+        return accessor;
+      }
+
+      // For an abstract table, emit a reference to the witness table.
+      CanType associatedTypeInContext
+        = Proto->mapTypeIntoContext(requirement.getAssociation())
+            ->getCanonicalType();
+      auto returnValue =
+          emitArchetypeWitnessTableRef(
+            IGF,
+            cast<ArchetypeType>(associatedTypeInContext),
+            associatedProtocol);
+      IGF.Builder.CreateRet(returnValue);
+      return accessor;
     }
 
     void addAssociatedTypeNames() {
@@ -1602,6 +1791,8 @@ static void emitInitializeFieldOffsetVector(IRGenFunction &IGF,
                                             llvm::Value *metadata,
                                             bool isVWTMutable,
                                        MetadataDependencyCollector *collector) {
+  auto &IGM = IGF.IGM;
+
   auto *target = T.getNominalOrBoundGenericNominal();
   llvm::Value *fieldVector
     = emitAddressOfFieldOffsetVector(IGF, metadata, target)
@@ -1615,11 +1806,11 @@ static void emitInitializeFieldOffsetVector(IRGenFunction &IGF,
 
   // Fill out an array with the field type metadata records.
   Address fields = IGF.createAlloca(
-                   llvm::ArrayType::get(IGF.IGM.Int8PtrPtrTy,
+                   llvm::ArrayType::get(IGM.Int8PtrPtrTy,
                                         storedProperties.size()),
-                   IGF.IGM.getPointerAlignment(), "classFields");
+                   IGM.getPointerAlignment(), "classFields");
   IGF.Builder.CreateLifetimeStart(fields,
-                  IGF.IGM.getPointerSize() * storedProperties.size());
+                  IGM.getPointerSize() * storedProperties.size());
   fields = IGF.Builder.CreateStructGEP(fields, 0, Size(0));
 
   unsigned index = 0;
@@ -1627,18 +1818,18 @@ static void emitInitializeFieldOffsetVector(IRGenFunction &IGF,
     auto propTy = T.getFieldType(prop, IGF.getSILModule());
     llvm::Value *metadata = emitTypeLayoutRef(IGF, propTy, collector);
     Address field = IGF.Builder.CreateConstArrayGEP(fields, index,
-                                                    IGF.IGM.getPointerSize());
+                                                    IGM.getPointerSize());
     IGF.Builder.CreateStore(metadata, field);
     ++index;
   }
 
   // Ask the runtime to lay out the struct or class.
-  auto numFields = IGF.IGM.getSize(Size(storedProperties.size()));
+  auto numFields = IGM.getSize(Size(storedProperties.size()));
 
   if (auto *classDecl = dyn_cast<ClassDecl>(target)) {
     // Compute class layout flags.
     ClassLayoutFlags flags = ClassLayoutFlags::Swift5Algorithm;
-    if (!doesClassMetadataRequireRelocation(IGF.IGM, classDecl))
+    if (!doesClassMetadataRequireRelocation(IGM, classDecl))
       flags |= ClassLayoutFlags::HasStaticVTable;
 
     // Get the superclass metadata, if the class has one.
@@ -1656,14 +1847,27 @@ static void emitInitializeFieldOffsetVector(IRGenFunction &IGF,
                                  /*allowUninit*/ false);
     } else {
       superclassMetadata =
-        llvm::ConstantPointerNull::get(IGF.IGM.TypeMetadataPtrTy);
+        llvm::ConstantPointerNull::get(IGM.TypeMetadataPtrTy);
     }
 
-    // Call swift_initClassMetadata().
-    IGF.Builder.CreateCall(IGF.IGM.getInitClassMetadataFn(),
-                           {metadata, superclassMetadata,
-                            IGF.IGM.getSize(Size(uintptr_t(flags))),
-                            numFields, fields.getAddress(), fieldVector});
+    if (doesClassMetadataRequireInitialization(IGM, classDecl)) {
+      // Call swift_initClassMetadata().
+      IGF.Builder.CreateCall(IGM.getInitClassMetadataFn(),
+                             {metadata, superclassMetadata,
+                              IGM.getSize(Size(uintptr_t(flags))),
+                              numFields, fields.getAddress(), fieldVector});
+    } else {
+      assert(doesClassMetadataRequireUpdate(IGM, classDecl));
+      assert(IGM.Context.LangOpts.EnableObjCInterop);
+
+      // Call swift_updateClassMetadata(). Note that the static metadata
+      // already references the superclass in this case, but we still want
+      // to ensure the superclass metadata is initialized first.
+      IGF.Builder.CreateCall(IGM.getUpdateClassMetadataFn(),
+                             {metadata, superclassMetadata,
+                              IGM.getSize(Size(uintptr_t(flags))),
+                              numFields, fields.getAddress(), fieldVector});
+    }
   } else {
     assert(isa<StructDecl>(target));
 
@@ -1673,13 +1877,13 @@ static void emitInitializeFieldOffsetVector(IRGenFunction &IGF,
       flags |= StructLayoutFlags::IsVWTMutable;
 
     // Call swift_initStructMetadata().
-    IGF.Builder.CreateCall(IGF.IGM.getInitStructMetadataFn(),
-                           {metadata, IGF.IGM.getSize(Size(uintptr_t(flags))),
+    IGF.Builder.CreateCall(IGM.getInitStructMetadataFn(),
+                           {metadata, IGM.getSize(Size(uintptr_t(flags))),
                             numFields, fields.getAddress(), fieldVector});
   }
 
   IGF.Builder.CreateLifetimeEnd(fields,
-                  IGF.IGM.getPointerSize() * storedProperties.size());
+                  IGM.getPointerSize() * storedProperties.size());
 }
 
 static void emitInitializeValueMetadata(IRGenFunction &IGF,
@@ -1711,7 +1915,7 @@ static void emitInitializeClassMetadata(IRGenFunction &IGF,
                                         MetadataDependencyCollector *collector) {
   auto &IGM = IGF.IGM;
 
-  assert(doesClassMetadataRequireInitialization(IGM, classDecl));
+  assert(doesClassMetadataRequireUpdate(IGM, classDecl));
 
   auto loweredTy =
     IGM.getLoweredType(classDecl->getDeclaredTypeInContext());
@@ -2269,6 +2473,8 @@ namespace {
     }
 
     void addSuperclass() {
+      // If we might have generic ancestry, leave a placeholder since
+      // swift_initClassMetdata() will fill in the superclass.
       if (doesClassMetadataRequireInitialization(IGM, Target)) {
         // Leave a null pointer placeholder to be filled at runtime
         B.addNullPointer(IGM.TypeMetadataPtrTy);
@@ -2445,7 +2651,7 @@ namespace {
       emitClassMetadataBaseOffset(IGM, Target);
       createNonGenericMetadataAccessFunction(IGM, Target);
 
-      if (!doesClassMetadataRequireInitialization(IGM, Target))
+      if (!doesClassMetadataRequireUpdate(IGM, Target))
         return;
 
       emitMetadataCompletionFunction(
@@ -2459,7 +2665,8 @@ namespace {
   };
 
   /// A builder for non-generic class metadata which does not require any
-  /// runtime initialization.
+  /// runtime initialization, or that only requires runtime initialization
+  /// on newer Objective-C runtimes.
   class FixedClassMetadataBuilder :
       public ClassMetadataBuilderBase<FixedClassMetadataBuilder> {
     using super = ClassMetadataBuilderBase<FixedClassMetadataBuilder>;
@@ -2907,11 +3114,10 @@ void irgen::emitClassMetadata(IRGenModule &IGM, ClassDecl *classDecl,
   auto var = IGM.defineTypeMetadata(declaredType, isPattern, canBeConstant,
                                     init.finishAndCreateFuture(), section);
 
-  // Add classes that don't require dynamic initialization to the
-  // ObjC class list.
-  //
-  // FIXME: This is where we check the completely fragile layout.
-  if (IGM.ObjCInterop && !isPattern &&
+  // If the class does not require dynamic initialization, or if it only
+  // requires dynamic initialization on a newer Objective-C runtime, add it
+  // to the Objctive-C class list.
+  if (IGM.ObjCInterop &&
       !doesClassMetadataRequireInitialization(IGM, classDecl)) {
     // Emit the ObjC class symbol to make the class visible to ObjC.
     if (classDecl->isObjC()) {

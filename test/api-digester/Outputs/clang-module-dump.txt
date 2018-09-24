@@ -12,6 +12,7 @@
       "location": "",
       "moduleName": "Foo",
       "superclassUsr": "c:objc(cs)NSObject",
+      "superclassName": "NSObject",
       "conformingProtocols": [
         "ObjcProt",
         "NSObjectProtocol"
@@ -54,6 +55,7 @@
           "usr": "c:objc(cs)NSObject(im)init",
           "location": "",
           "moduleName": "Foo",
+          "implicit": true,
           "declAttributes": [
             "Override",
             "ObjC"
@@ -90,6 +92,7 @@
           "location": "",
           "moduleName": "Foo",
           "genericSig": "<Self where Self : ObjcProt>",
+          "protocolReq": true,
           "declAttributes": [
             "ObjC"
           ],

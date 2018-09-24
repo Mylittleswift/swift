@@ -299,6 +299,8 @@ enum class NameLookupFlags {
   /// Whether to include results from outside the innermost scope that has a
   /// result.
   IncludeOuterResults = 0x20,
+  /// Whether to consider synonyms declared through @_implements().
+  IncludeAttributeImplements = 0x40,
 };
 
 /// A set of options that control name lookup.
@@ -1105,8 +1107,6 @@ public:
   virtual void resolveProtocolEnvironment(ProtocolDecl *proto) override {
     validateDecl(proto);
   }
-
-  virtual void bindExtension(ExtensionDecl *ext) override;
 
   virtual void resolveExtension(ExtensionDecl *ext) override {
     validateExtension(ext);
@@ -2160,7 +2160,7 @@ class EncodedDiagnosticMessage {
 public:
   /// \param S A string with an encoded message
   EncodedDiagnosticMessage(StringRef S)
-      : Message(Lexer::getEncodedStringSegment(S, Buf)) {}
+      : Message(Lexer::getEncodedStringSegment(S, Buf, true, true, ~0U)) {}
 
   /// The unescaped message to display to the user.
   const StringRef Message;
@@ -2172,26 +2172,6 @@ public:
 bool isAcceptableDynamicMemberLookupSubscript(SubscriptDecl *decl,
                                               DeclContext *DC,
                                               TypeChecker &TC);
-
-/// Determine whether this is a "pass-through" typealias, which has the
-/// same type parameters as the nominal type it references and specializes
-/// the underlying nominal type with exactly those type parameters.
-/// For example, the following typealias \c GX is a pass-through typealias:
-///
-/// \code
-/// struct X<T, U> { }
-/// typealias GX<A, B> = X<A, B>
-/// \endcode
-///
-/// whereas \c GX2 and \c GX3 are not pass-through because \c GX2 has
-/// different type parameters and \c GX3 doesn't pass its type parameters
-/// directly through.
-///
-/// \code
-/// typealias GX2<A> = X<A, A>
-/// typealias GX3<A, B> = X<B, A>
-/// \endcode
-bool isPassThroughTypealias(TypeAliasDecl *typealias);
 
 /// Whether an overriding declaration requires the 'override' keyword.
 enum class OverrideRequiresKeyword {
