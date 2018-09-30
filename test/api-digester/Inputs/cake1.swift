@@ -90,4 +90,38 @@ public protocol RequiementChanges {
   var removedVar: Int {get}
 }
 
+/// This protocol shouldn't be complained because its requirements are all derived.
+public protocol DerivedProtocolRequiementChanges: RequiementChanges {}
+
 public class SuperClassRemoval: C3 {}
+
+public class ClassToStruct {}
+public protocol ProtocolToEnum {}
+
+public class SuperClassChange: C7 {}
+
+public class GenericClass<T> {}
+
+public class SubGenericClass: GenericClass<P1> {}
+
+@objc
+public protocol ObjCProtocol {
+  @objc
+  optional func removeOptional()
+  @objc
+  func addOptional()
+}
+
+public let GlobalLetChangedToVar = 1
+public var GlobalVarChangedToLet = 1
+
+public class ClassWithOpenMember {
+  open class func foo() {}
+  open var property: Int {get { return 1}}
+  open func bar() {}
+}
+
+public class EscapingFunctionType {
+  public func removedEscaping(_ a: @escaping ()->()) {}
+  public func addedEscaping(_ a: ()->()) {}
+}

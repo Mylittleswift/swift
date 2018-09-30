@@ -66,7 +66,7 @@ set(SWIFTLIB_ESSENTIAL
   FixedArray.swift.gyb
   FlatMap.swift
   Flatten.swift
-  FloatingPoint.swift.gyb
+  FloatingPoint.swift
   FloatingPointParsing.swift.gyb
   FloatingPointTypes.swift.gyb
   Hashable.swift
@@ -86,6 +86,7 @@ set(SWIFTLIB_ESSENTIAL
   IntegerTypes.swift.gyb
   Join.swift
   KeyPath.swift
+  KeyValuePairs.swift
   LazyCollection.swift
   LazySequence.swift
   LifetimeManager.swift

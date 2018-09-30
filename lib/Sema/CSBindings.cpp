@@ -333,7 +333,7 @@ ConstraintSystem::getPotentialBindingForRelationalConstraint(
   // should be allowed to escape. As a result we allow anything
   // passed in to escape.
   if (auto *fnTy = type->getAs<AnyFunctionType>())
-    if (typeVar->getImpl().getArchetype() && !shouldAttemptFixes())
+    if (typeVar->getImpl().getGenericParameter() && !shouldAttemptFixes())
       type = fnTy->withExtInfo(fnTy->getExtInfo().withNoEscape(false));
 
   // Check whether we can perform this binding.
@@ -365,6 +365,11 @@ ConstraintSystem::getPotentialBindingForRelationalConstraint(
         otherTypeVar->getImpl().canBindToLValue())
       return None;
   }
+
+  if (type->is<InOutType>() && !typeVar->getImpl().canBindToInOut())
+    type = LValueType::get(type->getInOutObjectType());
+  if (type->is<LValueType>() && !typeVar->getImpl().canBindToLValue())
+    type = type->getRValueType();
 
   // BindParam constraints are not reflexive and must be treated specially.
   if (constraint->getKind() == ConstraintKind::BindParam) {

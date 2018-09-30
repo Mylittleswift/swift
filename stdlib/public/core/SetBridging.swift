@@ -34,7 +34,7 @@ internal func _stdlib_NSSet_allObjects(
 
 extension _NativeSet { // Bridging
   @usableFromInline
-  internal func bridged() -> _NSSet {
+  internal __consuming func bridged() -> _NSSet {
     // We can zero-cost bridge if our keys are verbatim
     // or if we're the empty singleton.
 
@@ -63,37 +63,37 @@ final internal class _SwiftSetNSEnumerator<Element: Hashable>
 
   @nonobjc internal var base: _NativeSet<Element>
   @nonobjc internal var bridgedElements: _BridgingHashBuffer?
-  @nonobjc internal var nextIndex: _NativeSet<Element>.Index
-  @nonobjc internal var endIndex: _NativeSet<Element>.Index
+  @nonobjc internal var nextBucket: _NativeSet<Element>.Bucket
+  @nonobjc internal var endBucket: _NativeSet<Element>.Bucket
 
   @objc
   internal override required init() {
     _sanityCheckFailure("don't call this designated initializer")
   }
 
-  internal init(_ base: _NativeSet<Element>) {
+  internal init(_ base: __owned _NativeSet<Element>) {
     _sanityCheck(_isBridgedVerbatimToObjectiveC(Element.self))
     self.base = base
     self.bridgedElements = nil
-    self.nextIndex = base.startIndex
-    self.endIndex = base.endIndex
+    self.nextBucket = base.hashTable.startBucket
+    self.endBucket = base.hashTable.endBucket
   }
 
   @nonobjc
-  internal init(_ deferred: _SwiftDeferredNSSet<Element>) {
+  internal init(_ deferred: __owned _SwiftDeferredNSSet<Element>) {
     _sanityCheck(!_isBridgedVerbatimToObjectiveC(Element.self))
     self.base = deferred.native
     self.bridgedElements = deferred.bridgeElements()
-    self.nextIndex = base.startIndex
-    self.endIndex = base.endIndex
+    self.nextBucket = base.hashTable.startBucket
+    self.endBucket = base.hashTable.endBucket
   }
 
-  private func bridgedElement(at index: _HashTable.Index) -> AnyObject {
-    _sanityCheck(base.hashTable.isOccupied(index))
+  private func bridgedElement(at bucket: _HashTable.Bucket) -> AnyObject {
+    _sanityCheck(base.hashTable.isOccupied(bucket))
     if let bridgedElements = self.bridgedElements {
-      return bridgedElements[index]
+      return bridgedElements[bucket]
     }
-    return _bridgeAnythingToObjectiveC(base.element(at: index))
+    return _bridgeAnythingToObjectiveC(base.uncheckedElement(at: bucket))
   }
 
   //
@@ -104,12 +104,12 @@ final internal class _SwiftSetNSEnumerator<Element: Hashable>
 
   @objc
   internal func nextObject() -> AnyObject? {
-    if nextIndex == endIndex {
+    if nextBucket == endBucket {
       return nil
     }
-    let index = nextIndex
-    nextIndex = base.index(after: nextIndex)
-    return self.bridgedElement(at: index)
+    let bucket = nextBucket
+    nextBucket = base.hashTable.occupiedBucket(after: nextBucket)
+    return self.bridgedElement(at: bucket)
   }
 
   @objc(countByEnumeratingWithState:objects:count:)
@@ -125,7 +125,7 @@ final internal class _SwiftSetNSEnumerator<Element: Hashable>
       theState.mutationsPtr = _fastEnumerationStorageMutationsPtr
     }
 
-    if nextIndex == endIndex {
+    if nextBucket == endBucket {
       state.pointee = theState
       return 0
     }
@@ -133,8 +133,8 @@ final internal class _SwiftSetNSEnumerator<Element: Hashable>
     // Return only a single element so that code can start iterating via fast
     // enumeration, terminate it, and continue via NSEnumerator.
     let unmanagedObjects = _UnmanagedAnyObjectArray(objects)
-    unmanagedObjects[0] = self.bridgedElement(at: nextIndex)
-    nextIndex = base.index(after: nextIndex)
+    unmanagedObjects[0] = self.bridgedElement(at: nextBucket)
+    nextBucket = base.hashTable.occupiedBucket(after: nextBucket)
     state.pointee = theState
     return 1
   }
@@ -158,7 +158,7 @@ final internal class _SwiftDeferredNSSet<Element: Hashable>
   /// The unbridged elements.
   internal var native: _NativeSet<Element>
 
-  internal init(_ native: _NativeSet<Element>) {
+  internal init(_ native: __owned _NativeSet<Element>) {
     _sanityCheck(native.count > 0)
     _sanityCheck(!_isBridgedVerbatimToObjectiveC(Element.self))
     self.native = native
@@ -198,9 +198,10 @@ final internal class _SwiftDeferredNSSet<Element: Hashable>
     let bridged = _BridgingHashBuffer.allocate(
       owner: native._storage,
       hashTable: native.hashTable)
-    for index in native.hashTable {
-      let object = _bridgeAnythingToObjectiveC(native.element(at: index))
-      bridged.initialize(at: index, to: object)
+    for bucket in native.hashTable {
+      let object = _bridgeAnythingToObjectiveC(
+        native.uncheckedElement(at: bucket))
+      bridged.initialize(at: bucket, to: object)
     }
 
     // Atomically put the bridged elements in place.
@@ -225,10 +226,10 @@ final internal class _SwiftDeferredNSSet<Element: Hashable>
     guard let element = _conditionallyBridgeFromObjectiveC(object, Element.self)
     else { return nil }
 
-    let (index, found) = native.find(element)
+    let (bucket, found) = native.find(element)
     guard found else { return nil }
     let bridged = bridgeElements()
-    return bridged[index]
+    return bridged[bucket]
   }
 
   @objc
@@ -247,12 +248,15 @@ final internal class _SwiftDeferredNSSet<Element: Hashable>
     objects: UnsafeMutablePointer<AnyObject>?,
     count: Int
   ) -> Int {
+    defer { _fixLifetime(self) }
+    let hashTable = native.hashTable
+
     var theState = state.pointee
     if theState.state == 0 {
       theState.state = 1 // Arbitrary non-zero value.
       theState.itemsPtr = AutoreleasingUnsafeMutablePointer(objects)
       theState.mutationsPtr = _fastEnumerationStorageMutationsPtr
-      theState.extra.0 = CUnsignedLong(native.startIndex.bucket)
+      theState.extra.0 = CUnsignedLong(hashTable.startBucket.offset)
     }
 
     // Test 'objects' rather than 'count' because (a) this is very rare anyway,
@@ -263,21 +267,22 @@ final internal class _SwiftDeferredNSSet<Element: Hashable>
     }
 
     let unmanagedObjects = _UnmanagedAnyObjectArray(objects!)
-    var index = _NativeSet<Element>.Index(bucket: Int(theState.extra.0))
-    let endIndex = native.endIndex
-    _precondition(index == endIndex || native.hashTable.isValid(index))
+    var bucket = _HashTable.Bucket(offset: Int(theState.extra.0))
+    let endBucket = hashTable.endBucket
+    _precondition(bucket == endBucket || hashTable.isOccupied(bucket),
+      "Invalid fast enumeration state")
 
     // Only need to bridge once, so we can hoist it out of the loop.
     let bridgedElements = bridgeElements()
 
     var stored = 0
     for i in 0..<count {
-      if index == endIndex { break }
-      unmanagedObjects[i] = bridgedElements[index]
+      if bucket == endBucket { break }
+      unmanagedObjects[i] = bridgedElements[bucket]
       stored += 1
-      index = native.index(after: index)
+      bucket = hashTable.occupiedBucket(after: bucket)
     }
-    theState.extra.0 = CUnsignedLong(index.bucket)
+    theState.extra.0 = CUnsignedLong(bucket.offset)
     state.pointee = theState
     return stored
   }
@@ -290,7 +295,7 @@ internal struct _CocoaSet {
   internal let object: _NSSet
 
   @inlinable
-  internal init(_ object: _NSSet) {
+  internal init(_ object: __owned _NSSet) {
     self.object = object
   }
 }
@@ -299,7 +304,7 @@ extension _CocoaSet {
   @usableFromInline
   @_effects(releasenone)
   internal func member(for index: Index) -> AnyObject {
-    return index.allKeys[index.currentKeyIndex]
+    return index.element
   }
 
   @inlinable
@@ -319,33 +324,49 @@ extension _CocoaSet: _SetBuffer {
   @usableFromInline
   internal typealias Element = AnyObject
 
-  @inlinable
+  @usableFromInline // FIXME(cocoa-index): Should be inlinable
   internal var startIndex: Index {
-    return Index(self, startIndex: ())
+    @_effects(releasenone)
+    get {
+      let allKeys = _stdlib_NSSet_allObjects(self.object)
+      return Index(Index.Storage(self, allKeys, 0))
+    }
   }
 
-  @inlinable
+  @usableFromInline // FIXME(cocoa-index): Should be inlinable
   internal var endIndex: Index {
-    return Index(self, endIndex: ())
+    @_effects(releasenone)
+    get {
+      let allKeys = _stdlib_NSSet_allObjects(self.object)
+      return Index(Index.Storage(self, allKeys, allKeys.value))
+    }
   }
 
-  @inlinable
-  internal func index(after i: Index) -> Index {
-    var i = i
-    formIndex(after: &i)
-    return i
-  }
-
-  @usableFromInline
+  @usableFromInline // FIXME(cocoa-index): Should be inlinable
   @_effects(releasenone)
-  internal func formIndex(after i: inout Index) {
-    _precondition(i.base.object === self.object, "Invalid index")
-    _precondition(i.currentKeyIndex < i.allKeys.value,
-      "Cannot increment endIndex")
-    i.currentKeyIndex += 1
+  internal func index(after index: Index) -> Index {
+    var result = index.copy()
+    formIndex(after: &result, isUnique: true)
+    return result
   }
 
-  @usableFromInline
+  internal func validate(_ index: Index) {
+    _precondition(index.storage.base.object === self.object,
+      "Invalid index")
+    _precondition(index.storage.currentKeyIndex < index.storage.allKeys.value,
+      "Attempt to access endIndex")
+  }
+
+  @usableFromInline // FIXME(cocoa-index): Should be inlinable
+  internal func formIndex(after index: inout Index, isUnique: Bool) {
+    validate(index)
+    if !isUnique { index = index.copy() }
+    let storage = index.storage // FIXME: rdar://problem/44863751
+    storage.currentKeyIndex += 1
+  }
+
+  @usableFromInline // FIXME(cocoa-index): Should be inlinable
+  @_effects(releasenone)
   internal func index(for element: AnyObject) -> Index? {
     // Fast path that does not involve creating an array of all keys.  In case
     // the key is present, this lookup is a penalty for the slow path, but the
@@ -356,16 +377,13 @@ extension _CocoaSet: _SetBuffer {
     }
 
     let allKeys = _stdlib_NSSet_allObjects(object)
-    var keyIndex = -1
     for i in 0..<allKeys.value {
       if _stdlib_NSObject_isEqual(element, allKeys[i]) {
-        keyIndex = i
-        break
+        return Index(Index.Storage(self, allKeys, i))
       }
     }
-    _sanityCheck(keyIndex >= 0,
-        "Key was found in fast path, but not found later?")
-    return Index(self, allKeys, keyIndex)
+    _sanityCheckFailure(
+      "An NSSet member wasn't listed amongst its enumerated contents")
   }
 
   @inlinable
@@ -378,18 +396,49 @@ extension _CocoaSet: _SetBuffer {
     return object.member(element) != nil
   }
 
-  @usableFromInline
+  @usableFromInline // FIXME(cocoa-index): Make inlinable
+  @_effects(releasenone)
   internal func element(at i: Index) -> AnyObject {
-    let value: AnyObject? = i.allKeys[i.currentKeyIndex]
-    _sanityCheck(value != nil, "Item not found in underlying NSSet")
-    return value!
+    let element: AnyObject? = i.element
+    _sanityCheck(element != nil, "Item not found in underlying NSSet")
+    return element!
   }
 }
 
 extension _CocoaSet {
-  @_fixed_layout // FIXME(sil-serialize-all)
+  @_fixed_layout
   @usableFromInline
   internal struct Index {
+    @usableFromInline
+    internal var _object: Builtin.BridgeObject
+    @usableFromInline
+    internal var _storage: Builtin.BridgeObject
+
+    internal var object: AnyObject {
+      @inline(__always)
+      get {
+        return _bridgeObject(toNonTaggedObjC: _object)
+      }
+    }
+
+    internal var storage: Storage {
+      @inline(__always)
+      get {
+        let storage = _bridgeObject(toNative: _storage)
+        return unsafeDowncast(storage, to: Storage.self)
+      }
+    }
+
+    internal init(_ storage: __owned Storage) {
+      self._object = _bridgeObject(fromNonTaggedObjC: storage.base.object)
+      self._storage = _bridgeObject(fromNative: storage)
+    }
+  }
+}
+
+extension _CocoaSet.Index {
+  // FIXME(cocoa-index): Try using an NSEnumerator to speed this up.
+  internal class Storage {
     // Assumption: we rely on NSDictionary.getObjects when being
     // repeatedly called on the same NSDictionary, returning items in the same
     // order every time.
@@ -397,38 +446,20 @@ extension _CocoaSet {
 
     /// A reference to the NSSet, which owns members in `allObjects`,
     /// or `allKeys`, for NSSet and NSDictionary respectively.
-    @usableFromInline // FIXME(sil-serialize-all)
     internal let base: _CocoaSet
     // FIXME: swift-3-indexing-model: try to remove the cocoa reference, but
     // make sure that we have a safety check for accessing `allKeys`.  Maybe
     // move both into the dictionary/set itself.
 
     /// An unowned array of keys.
-    @usableFromInline // FIXME(sil-serialize-all)
     internal var allKeys: _HeapBuffer<Int, AnyObject>
 
     /// Index into `allKeys`
-    @usableFromInline // FIXME(sil-serialize-all)
     internal var currentKeyIndex: Int
 
-    @inlinable // FIXME(sil-serialize-all)
-    internal init(_ base: _CocoaSet, startIndex: ()) {
-      self.base = base
-      self.allKeys = _stdlib_NSSet_allObjects(base.object)
-      self.currentKeyIndex = 0
-    }
-
-    @inlinable // FIXME(sil-serialize-all)
-    internal init(_ base: _CocoaSet, endIndex: ()) {
-      self.base = base
-      self.allKeys = _stdlib_NSSet_allObjects(base.object)
-      self.currentKeyIndex = allKeys.value
-    }
-
-    @inlinable // FIXME(sil-serialize-all)
     internal init(
-      _ base: _CocoaSet,
-      _ allKeys: _HeapBuffer<Int, AnyObject>,
+      _ base: __owned _CocoaSet,
+      _ allKeys: __owned _HeapBuffer<Int, AnyObject>,
       _ currentKeyIndex: Int
     ) {
       self.base = base
@@ -438,21 +469,63 @@ extension _CocoaSet {
   }
 }
 
+extension _CocoaSet.Index {
+  @usableFromInline
+  internal var handleBitPattern: UInt {
+    @_effects(readonly)
+    get {
+      return unsafeBitCast(storage, to: UInt.self)
+    }
+  }
+
+  internal func copy() -> _CocoaSet.Index {
+    let storage = self.storage
+    return _CocoaSet.Index(Storage(
+        storage.base,
+        storage.allKeys,
+        storage.currentKeyIndex))
+  }
+}
+
+extension _CocoaSet.Index {
+  @usableFromInline // FIXME(cocoa-index): Make inlinable
+  @nonobjc
+  internal var element: AnyObject {
+    @_effects(readonly)
+    get {
+      _precondition(storage.currentKeyIndex < storage.allKeys.value,
+        "Attempting to access Set elements using an invalid index")
+      return storage.allKeys[storage.currentKeyIndex]
+    }
+  }
+
+  @usableFromInline // FIXME(cocoa-index): Make inlinable
+  @nonobjc
+  internal var age: Int32 {
+    @_effects(releasenone)
+    get {
+      return _HashTable.age(for: object)
+    }
+  }
+}
+
 extension _CocoaSet.Index: Equatable {
-  @inlinable
+  @usableFromInline // FIXME(cocoa-index): Make inlinable
+  @_effects(readonly)
   internal static func == (lhs: _CocoaSet.Index, rhs: _CocoaSet.Index) -> Bool {
-    _precondition(lhs.base.object === rhs.base.object,
+    _precondition(lhs.storage.base.object === rhs.storage.base.object,
       "Comparing indexes from different sets")
-    return lhs.currentKeyIndex == rhs.currentKeyIndex
+    return lhs.storage.currentKeyIndex == rhs.storage.currentKeyIndex
   }
 }
 
 extension _CocoaSet.Index: Comparable {
-  @inlinable
+  @usableFromInline // FIXME(cocoa-index): Make inlinable
+  @_effects(readonly)
   internal static func < (lhs: _CocoaSet.Index, rhs: _CocoaSet.Index) -> Bool {
-    _precondition(lhs.base.object === rhs.base.object,
+    _precondition(lhs.storage.base.object === rhs.storage.base.object,
       "Comparing indexes from different sets")
-    return lhs.currentKeyIndex < rhs.currentKeyIndex
+    return lhs.storage.currentKeyIndex < rhs.storage.currentKeyIndex
   }
 }
 
@@ -493,13 +566,13 @@ extension _CocoaSet: Sequence {
     internal var itemIndex: Int = 0
     internal var itemCount: Int = 0
 
-    internal init(_ base: _CocoaSet) {
+    internal init(_ base: __owned _CocoaSet) {
       self.base = base
     }
   }
 
   @usableFromInline
-  __consuming internal func makeIterator() -> Iterator {
+  internal __consuming func makeIterator() -> Iterator {
     return Iterator(self)
   }
 }
@@ -545,7 +618,7 @@ extension _CocoaSet.Iterator: IteratorProtocol {
 
 extension Set {
   @inlinable
-  public func _bridgeToObjectiveCImpl() -> _NSSetCore {
+  public __consuming func _bridgeToObjectiveCImpl() -> _NSSetCore {
     switch _variant {
     case .native(let nativeSet):
       return nativeSet.bridged()
@@ -557,7 +630,7 @@ extension Set {
   /// Returns the native Dictionary hidden inside this NSDictionary;
   /// returns nil otherwise.
   public static func _bridgeFromObjectiveCAdoptingNativeStorageOf(
-    _ s: AnyObject
+    _ s: __owned AnyObject
   ) -> Set<Element>? {
 
     // Try all three NSSet impls that we currently provide.

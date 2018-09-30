@@ -1302,14 +1302,14 @@ extension Array: CustomReflectable {
 extension Array: CustomStringConvertible, CustomDebugStringConvertible {
   /// A textual representation of the array and its elements.
   public var description: String {
-    return _makeCollectionDescription(for: self, withTypeName: nil)
+    return _makeCollectionDescription()
   }
 
   /// A textual representation of the array and its elements, suitable for
   /// debugging.
   public var debugDescription: String {
     // Always show sugared representation for Arrays.
-    return _makeCollectionDescription(for: self, withTypeName: nil)
+    return _makeCollectionDescription()
   }
 }
 
@@ -1620,20 +1620,6 @@ extension Array: Equatable where Element: Equatable {
 
     return true
   }
-
-  /// Returns a Boolean value indicating whether two arrays are not equal.
-  ///
-  /// Two arrays are equal if they contain the same elements in the same order.
-  /// You can use the not-equal-to operator (`!=`) to compare any two arrays
-  /// that store the same, `Equatable`-conforming element type.
-  ///
-  /// - Parameters:
-  ///   - lhs: An array to compare.
-  ///   - rhs: Another array to compare.
-  @inlinable
-  public static func !=(lhs: Array<Element>, rhs: Array<Element>) -> Bool {
-    return !(lhs == rhs)
-  }
 }
 
 extension Array: Hashable where Element: Hashable {
@@ -1784,7 +1770,7 @@ extension Array {
 
 extension Array: _HasCustomAnyHashableRepresentation
   where Element: Hashable {
-  public func _toCustomAnyHashable() -> AnyHashable? {
+  public __consuming func _toCustomAnyHashable() -> AnyHashable? {
     return AnyHashable(_box: _ArrayAnyHashableBox(self))
   }
 }

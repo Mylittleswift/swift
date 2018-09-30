@@ -216,7 +216,7 @@ bool MissingConformanceFailure::diagnoseAsError() {
     if (auto *fnType = ownerType->getAs<AnyFunctionType>()) {
       auto parameters = fnType->getParams();
       for (auto index : indices(parameters)) {
-        if (parameters[index].getType()->isEqual(nonConformingType)) {
+        if (parameters[index].getOldType()->isEqual(nonConformingType)) {
           atParameterPos = index;
           break;
         }
@@ -271,12 +271,12 @@ bool NoEscapeFuncToTypeConversionFailure::diagnoseAsError() {
     return false;
 
   auto &last = path.back();
-  if (last.getKind() != ConstraintLocator::Archetype)
+  if (last.getKind() != ConstraintLocator::GenericParameter)
     return false;
 
-  auto *archetype = last.getArchetype();
+  auto *paramTy = last.getGenericParameter();
   emitDiagnostic(anchor->getLoc(), diag::converting_noescape_to_type,
-                 archetype);
+                 paramTy);
   return true;
 }
 

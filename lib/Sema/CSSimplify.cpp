@@ -756,11 +756,9 @@ public:
 };
 
 // Match the argument of a call to the parameter.
-ConstraintSystem::TypeMatchResult
-constraints::matchCallArguments(ConstraintSystem &cs, bool isOperator,
-                                ArrayRef<AnyFunctionType::Param> args,
-                                ArrayRef<AnyFunctionType::Param> params,
-                                ConstraintLocatorBuilder locator) {
+ConstraintSystem::TypeMatchResult constraints::matchCallArguments(
+    ConstraintSystem &cs, ArrayRef<AnyFunctionType::Param> args,
+    ArrayRef<AnyFunctionType::Param> params, ConstraintLocatorBuilder locator) {
   // Extract the parameters.
   ValueDecl *callee;
   unsigned calleeLevel;
@@ -821,6 +819,15 @@ constraints::matchCallArguments(ConstraintSystem &cs, bool isOperator,
   // Check the argument types for each of the parameters.
   ConstraintSystem::TypeMatchOptions subflags =
     ConstraintSystem::TMF_GenerateConstraints;
+
+  // If this application is part of an operator, then we allow an implicit
+  // lvalue to be compatible with inout arguments.  This is used by
+  // assignment operators.
+  auto *anchor = locator.getAnchor();
+  assert(anchor && "locator without anchor expression?");
+  bool isOperator = (isa<PrefixUnaryExpr>(anchor) ||
+                     isa<PostfixUnaryExpr>(anchor) || isa<BinaryExpr>(anchor));
+
   ConstraintKind subKind = (isOperator
                             ? ConstraintKind::OperatorArgumentConversion
                             : ConstraintKind::ArgumentConversion);
@@ -833,23 +840,14 @@ constraints::matchCallArguments(ConstraintSystem &cs, bool isOperator,
 
     // Determine the parameter type.
     const auto &param = params[paramIdx];
-    auto paramTy = param.getType();
+    auto paramTy = param.getOldType();
 
     // Compare each of the bound arguments for this parameter.
     for (auto argIdx : parameterBindings[paramIdx]) {
       auto loc = locator.withPathElement(LocatorPathElt::
                                             getApplyArgToParam(argIdx,
                                                                paramIdx));
-      auto argTy = argsWithLabels[argIdx].getType();
-
-      // FIXME: This should be revisited. If one of argTy or paramTy
-      // is a type variable, matchTypes() will add a constraint, and
-      // when the constraint is later solved, we will have lost the
-      // value of 'subflags'.
-      if (isOperator) {
-        subflags |= ConstraintSystem::TMF_ApplyingOperatorParameter;
-      }
-
+      auto argTy = argsWithLabels[argIdx].getOldType();
       auto result = cs.matchTypes(argTy, paramTy, subKind, subflags, loc);
       if (result.isFailure())
         return result;
@@ -1191,7 +1189,7 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
     if (last != path.rend()) {
       if (last->getKind() == ConstraintLocator::ApplyArgToParam) {
         if (isSingleParam(func1Params) &&
-            func1Params[0].getType()->isVoid()) {
+            func1Params[0].getOldType()->isVoid()) {
           if (func2Params.empty()) {
             func2Params.emplace_back(getASTContext().TheEmptyTupleType);
           }
@@ -1227,8 +1225,8 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
     // trivial because of inout-to-pointer conversions.
 
     // Compare the parameter types.
-    auto result = matchTypes(func2Param.getType(),
-                             func1Param.getType(),
+    auto result = matchTypes(func2Param.getOldType(),
+                             func1Param.getOldType(),
                              subKind, subflags,
                              (func1Params.size() == 1
                               ? argumentLocator
@@ -1534,7 +1532,7 @@ ConstraintSystem::matchTypesBindTypeVar(
   // represent an opened archetype. If we allowed this it would allow
   // the noescape function to potentially escape.
   if (auto *fnTy = type->getAs<FunctionType>()) {
-    if (fnTy->isNoEscape() && typeVar->getImpl().getArchetype()) {
+    if (fnTy->isNoEscape() && typeVar->getImpl().getGenericParameter()) {
       if (shouldAttemptFixes()) {
         auto *fix = MarkExplicitlyEscaping::create(
             *this, getConstraintLocator(locator));
@@ -2196,11 +2194,9 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
                   ConversionRestrictionKind::InoutToPointer);
             }
           }
-          
-          if (!flags.contains(TMF_ApplyingOperatorParameter) &&
-              // Operators cannot use these implicit conversions.
-              kind == ConstraintKind::ArgumentConversion) {
 
+          // Operators cannot use these implicit conversions.
+          if (kind == ConstraintKind::ArgumentConversion) {
             // We can potentially convert from an UnsafeMutablePointer
             // of a different type, if we're a void pointer.
             Type unwrappedType1 = type1;
@@ -2515,7 +2511,9 @@ ConstraintSystem::simplifyConstructionConstraint(
 
   case TypeKind::Tuple: {
     // Tuple construction is simply tuple conversion.
-    Type argType = fnType->getInput();
+    Type argType = AnyFunctionType::composeInput(getASTContext(),
+                                                 fnType->getParams(),
+                                                 /*canonicalVararg=*/false);
     Type resultType = fnType->getResult();
 
     if (matchTypes(resultType, desugarValueType,
@@ -2700,6 +2698,11 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyConformsToConstraint(
     }
     return result;
   }
+
+  // Let's not try to fix missing conformance for Void
+  // and Never because that doesn't really make sense.
+  if (type->isVoid() || type->isUninhabited())
+    return SolutionKind::Error;
 
   // If this is a generic requirement let's try to record that
   // conformance is missing and consider this a success, which
@@ -2923,35 +2926,37 @@ ConstraintSystem::simplifyFunctionComponentConstraint(
                                         Type first, Type second,
                                         TypeMatchOptions flags,
                                         ConstraintLocatorBuilder locator) {
-  auto funcTy = simplifyType(first);
+  auto simplified = simplifyType(first);
 
   unsigned unwrapCount = 0;
   if (shouldAttemptFixes()) {
-    while (auto objectTy = funcTy->getOptionalObjectType()) {
-      funcTy = objectTy;
+    while (auto objectTy = simplified->getOptionalObjectType()) {
+      simplified = objectTy;
 
       // Track how many times we do this so that we can record a fix for each.
       ++unwrapCount;
     }
   }
 
-  if (funcTy->isTypeVariableOrMember()) {
+  if (simplified->isTypeVariableOrMember()) {
     if (!flags.contains(TMF_GenerateConstraints))
       return SolutionKind::Unsolved;
 
     addUnsolvedConstraint(
-      Constraint::create(*this, kind, funcTy, second,
+      Constraint::create(*this, kind, simplified, second,
                          getConstraintLocator(locator)));
-  } else if (funcTy->is<FunctionType>()) {
+  } else if (auto *funcTy = simplified->getAs<FunctionType>()) {
     // Equate it to the other type in the constraint.
     Type type;
     ConstraintLocator::PathElementKind locKind;
 
     if (kind == ConstraintKind::FunctionInput) {
-      type = funcTy->castTo<FunctionType>()->getInput();
+      type = AnyFunctionType::composeInput(getASTContext(),
+                                           funcTy->getParams(),
+                                           /*canonicalVararg=*/false);
       locKind = ConstraintLocator::FunctionArgument;
     } else if (kind == ConstraintKind::FunctionResult) {
-      type = funcTy->castTo<FunctionType>()->getResult();
+      type = funcTy->getResult();
       locKind = ConstraintLocator::FunctionResult;
     } else {
       llvm_unreachable("Bad function component constraint kind");
@@ -3330,7 +3335,10 @@ performMemberLookup(ConstraintKind constraintKind, DeclName memberName,
 
       // Only try and favor monomorphic initializers.
       if (!ctor->isGenericContext()) {
-        auto argType = ctor->getArgumentInterfaceType();
+        auto args = ctor->getMethodInterfaceType()
+                        ->castTo<FunctionType>()->getParams();
+        auto argType = AnyFunctionType::composeInput(getASTContext(), args,
+                                                     /*canonicalVarargs=*/false);
         if (argType->isEqual(favoredType))
           if (!decl->getAttrs().isUnavailable(getASTContext()))
             result.FavoredChoice = result.ViableCandidates.size();
@@ -3834,7 +3842,6 @@ ConstraintSystem::simplifyBridgingConstraint(Type type1,
 
   // Explicit bridging from a value type to an Objective-C class type.
   if (unwrappedFromType->isPotentiallyBridgedValueType() &&
-      !flags.contains(TMF_ApplyingOperatorParameter) &&
       (unwrappedToType->isBridgeableObjectType() ||
        (unwrappedToType->isExistentialType() &&
         !unwrappedToType->isAny()))) {
@@ -4438,19 +4445,11 @@ ConstraintSystem::simplifyApplicableFnConstraint(
   // For a function, bind the output and convert the argument to the input.
   auto func1 = type1->castTo<FunctionType>();
   if (auto func2 = dyn_cast<FunctionType>(desugar2)) {
-    // If this application is part of an operator, then we allow an implicit
-    // lvalue to be compatible with inout arguments.  This is used by
-    // assignment operators.
-    bool isOperator = (isa<PrefixUnaryExpr>(anchor) ||
-                       isa<PostfixUnaryExpr>(anchor) ||
-                       isa<BinaryExpr>(anchor));
-
     // The argument type must be convertible to the input type.
-    if (::matchCallArguments(*this, isOperator,
-                             func1->getParams(),
-                             func2->getParams(),
-                             outerLocator.withPathElement(
-                               ConstraintLocator::ApplyArgument)).isFailure())
+    if (::matchCallArguments(
+            *this, func1->getParams(), func2->getParams(),
+            outerLocator.withPathElement(ConstraintLocator::ApplyArgument))
+            .isFailure())
       return SolutionKind::Error;
 
     // The result types are equivalent.
@@ -4552,12 +4551,6 @@ ConstraintSystem::simplifyRestrictedConstraintImpl(
     
     return SolutionKind::Unsolved;
   };
-
-  // We'll apply user conversions for operator arguments at the application
-  // site.
-  if (matchKind == ConstraintKind::OperatorArgumentConversion) {
-    flags |= TMF_ApplyingOperatorParameter;
-  }
 
   TypeMatchOptions subflags = getDefaultDecompositionOptions(flags);
 

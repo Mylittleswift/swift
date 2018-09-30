@@ -15,7 +15,9 @@ extension S1: P2 {}
 
 public class C0<T1, T2, T3> {}
 
-public class C1: C0<S1, S1, S1> {
+public typealias C0Alias = C0<S1, S1, S1>
+
+public class C1: C0Alias {
 	open class func foo1() {}
 	public weak var Ins : C1?
 	public unowned var Ins2 : C1 = C1()
@@ -65,4 +67,20 @@ public extension ProWithAssociatedType {
   func NonReqFunc() {}
   var NonReqVar: Int { return 1 }
   typealias NonReqAlias = Int
+}
+
+public protocol PSuper {
+  associatedtype T
+  func foo()
+}
+
+public protocol PSub: PSuper {
+  associatedtype T
+  func foo()
+}
+
+public let GlobalVar = 1
+
+public extension P1 {
+  static func +(lhs: P1, rhs: P1) -> P1 { return lhs }
 }

@@ -3772,7 +3772,7 @@ findProtocolSelfReferences(const ProtocolDecl *proto, Type type,
   if (auto funcTy = type->getAs<AnyFunctionType>()) {
     auto inputKind = SelfReferenceKind::None();
     for (auto &elt : funcTy->getParams()) {
-      inputKind |= findProtocolSelfReferences(proto, elt.getType(),
+      inputKind |= findProtocolSelfReferences(proto, elt.getOldType(),
                                               skipAssocTypes);
     }
     auto resultKind = findProtocolSelfReferences(proto, funcTy->getResult(),
@@ -3882,7 +3882,7 @@ ProtocolDecl::findProtocolSelfReferences(const ValueDecl *value,
     if (!allowCovariantParameters) {
       auto inputKind = SelfReferenceKind::None();
       for (auto &elt : type->castTo<AnyFunctionType>()->getParams()) {
-        inputKind |= ::findProtocolSelfReferences(this, elt.getType(),
+        inputKind |= ::findProtocolSelfReferences(this, elt.getOldType(),
                                                   skipAssocTypes);
       }
 
@@ -5562,6 +5562,30 @@ AccessorDecl *AccessorDecl::create(ASTContext &ctx,
   return D;
 }
 
+bool AccessorDecl::isAssumedNonMutating() const {
+  switch (getAccessorKind()) {
+  case AccessorKind::Get:
+  case AccessorKind::Address:
+  case AccessorKind::Read:
+    return true;
+
+  case AccessorKind::Set:
+  case AccessorKind::WillSet:
+  case AccessorKind::DidSet:
+  case AccessorKind::MutableAddress:
+  case AccessorKind::Modify:
+    return false;
+  }
+  llvm_unreachable("bad accessor kind");
+}
+
+bool AccessorDecl::isExplicitNonMutating() const {
+  return !isMutating() &&
+    !isAssumedNonMutating() &&
+    isInstanceMember() &&
+    !getDeclContext()->getDeclaredInterfaceType()->hasReferenceSemantics();
+}
+
 StaticSpellingKind FuncDecl::getCorrectStaticSpelling() const {
   assert(getDeclContext()->isTypeContext());
   if (!isStatic())
@@ -5570,16 +5594,6 @@ StaticSpellingKind FuncDecl::getCorrectStaticSpelling() const {
     return getStaticSpelling();
 
   return getCorrectStaticSpellingForDecl(this);
-}
-
-bool FuncDecl::isExplicitNonMutating() const {
-  if (auto accessor = dyn_cast<AccessorDecl>(this)) {
-    return !isMutating() &&
-         !accessor->isGetter() &&
-         isInstanceMember() &&
-         !getDeclContext()->getDeclaredInterfaceType()->hasReferenceSemantics();
-  }
-  return false;
 }
 
 Type FuncDecl::getResultInterfaceType() const {
@@ -5751,7 +5765,9 @@ Type EnumElementDecl::getArgumentInterfaceType() const {
 
   auto funcTy = interfaceType->castTo<AnyFunctionType>();
   funcTy = funcTy->getResult()->castTo<FunctionType>();
-  return funcTy->getInput();
+  return AnyFunctionType::composeInput(funcTy->getASTContext(),
+                                       funcTy->getParams(),
+                                       /*canonicalVararg=*/false);
 }
 
 EnumCaseDecl *EnumElementDecl::getParentCase() const {
@@ -5785,13 +5801,6 @@ SourceRange ConstructorDecl::getSourceRange() const {
     End = getSignatureSourceRange().End;
 
   return { getConstructorLoc(), End };
-}
-
-Type ConstructorDecl::getArgumentInterfaceType() const {
-  Type ArgTy = getInterfaceType();
-  ArgTy = ArgTy->castTo<AnyFunctionType>()->getResult();
-  ArgTy = ArgTy->castTo<AnyFunctionType>()->getInput();
-  return ArgTy;
 }
 
 Type ConstructorDecl::getResultInterfaceType() const {

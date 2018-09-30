@@ -547,7 +547,7 @@ namespace {
       if (wantsRValueInstanceType)
         return base.getPlainType()->getMetatypeInstanceType();
 
-      return base.getType();
+      return base.getOldType();
     }
 
   public:
@@ -639,20 +639,6 @@ namespace {
                               /*isDynamic=*/false);
       }
 
-      auto type = solution.simplifyType(openedType);
-
-      // If we've ended up trying to assign an inout type here, it means we're
-      // missing an ampersand in front of the ref.
-      //
-      // FIXME: This is the wrong place for this diagnostic.
-      if (auto inoutType = type->getAs<InOutType>()) {
-        auto &tc = cs.getTypeChecker();
-        tc.diagnose(loc.getBaseNameLoc(), diag::missing_address_of,
-                    inoutType->getInOutObjectType())
-          .fixItInsert(loc.getBaseNameLoc(), "&");
-        return nullptr;
-      }
-
       SubstitutionMap substitutions;
 
       // Due to a SILGen quirk, unqualified property references do not
@@ -664,6 +650,7 @@ namespace {
             locator);
       }
 
+      auto type = solution.simplifyType(openedType);
       auto declRefExpr =
         new (ctx) DeclRefExpr(ConcreteDeclRef(decl, substitutions),
                               loc, implicit, semantics, type);
@@ -1454,7 +1441,7 @@ namespace {
         // Dig the key path expression out of the arguments.
         auto indexKP = cast<TupleExpr>(index)->getElement(0);
         auto keyPathExprTy = cs.getType(indexKP);
-        auto keyPathTy = applicationTy->getParams().front().getType();
+        auto keyPathTy = applicationTy->getParams().front().getOldType();
 
         Type valueTy;
         Type baseTy;
@@ -3413,8 +3400,11 @@ namespace {
       // If the destination value type is 'AnyObject' when performing a
       // bridging operation, or if the destination value type could dynamically
       // be an optional type, leave any extra optionals on the source in place.
-      if (isBridgeToAnyObject || destValueType->canDynamicallyBeOptionalType(
-                                              /* includeExistential */ false)) {
+      // Only apply the latter condition in Swift 5 mode to best preserve
+      // compatibility with Swift 4.1's casting behaviour.
+      if (isBridgeToAnyObject || (tc.Context.isSwiftVersionAtLeast(5) &&
+                                  destValueType->canDynamicallyBeOptionalType(
+                                      /*includeExistential*/ false))) {
         auto destOptionalsCount = destOptionals.size() - destExtraOptionals;
         if (srcOptionals.size() > destOptionalsCount) {
           srcType = srcOptionals[destOptionalsCount];
@@ -5594,7 +5584,7 @@ Expr *ExprRewriter::coerceCallArguments(
         return nullptr;
 
       // Record this parameter.
-      auto paramBaseType = param.getType();
+      auto paramBaseType = param.getOldType();
       assert(sliceType.isNull() && "Multiple variadic parameters?");
       sliceType = tc.getArraySliceType(arg->getLoc(), paramBaseType);
       toSugarFields.push_back(
@@ -5642,8 +5632,8 @@ Expr *ExprRewriter::coerceCallArguments(
       toSugarFields.push_back(TupleTypeElt(
                                 param.isVariadic()
                                   ? tc.getArraySliceType(arg->getLoc(),
-                                                         param.getType())
-                                  : param.getType(),
+                                                         param.getOldType())
+                                  : param.getOldType(),
                                 param.getLabel(),
                                 param.getParameterFlags()));
 
@@ -5667,7 +5657,7 @@ Expr *ExprRewriter::coerceCallArguments(
     sources.push_back(argIdx);
 
     // If the types exactly match, this is easy.
-    auto paramType = param.getType();
+    auto paramType = param.getOldType();
     if (argType->isEqual(paramType)) {
       toSugarFields.push_back(
           TupleTypeElt(param.getPlainType(), getArgLabel(argIdx),
@@ -6308,7 +6298,7 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
 
             // This handles situations like argument: (()), parameter: ().
             if (params1.size() == 1 && params2.empty()) {
-              auto tupleTy = params1.front().getType()->getAs<TupleType>();
+              auto tupleTy = params1.front().getOldType()->getAs<TupleType>();
               if (tupleTy && tupleTy->getNumElements() == 0)
                 break;
             }
@@ -7137,7 +7127,7 @@ Expr *ExprRewriter::finishApply(ApplyExpr *apply, Type openedType,
         
         auto escapable = new (tc.Context)
           OpaqueValueExpr(apply->getFn()->getLoc(), Type());
-        cs.setType(escapable, escapableParams[0].getType());
+        cs.setType(escapable, escapableParams[0].getOldType());
 
         auto getType = [&](const Expr *E) -> Type {
           return cs.getType(E);
@@ -7926,11 +7916,8 @@ Expr *TypeChecker::callWitness(Expr *base, DeclContext *dc,
   // Add the conversion from the argument to the function parameter type.
   auto openedFuncType = openedType->castTo<FunctionType>();
   ::matchCallArguments(
-      cs, /*isOperator=*/false,
-      args,
-      openedFuncType->getParams(),
-      cs.getConstraintLocator(call,
-                              ConstraintLocator::ApplyArgument));
+      cs, args, openedFuncType->getParams(),
+      cs.getConstraintLocator(call, ConstraintLocator::ApplyArgument));
 
   // Solve the system.
   SmallVector<Solution, 1> solutions;

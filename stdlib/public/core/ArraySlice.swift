@@ -1121,13 +1121,13 @@ extension ArraySlice: CustomReflectable {
 extension ArraySlice: CustomStringConvertible, CustomDebugStringConvertible {
   /// A textual representation of the array and its elements.
   public var description: String {
-    return _makeCollectionDescription(for: self, withTypeName: nil)
+    return _makeCollectionDescription()
   }
 
   /// A textual representation of the array and its elements, suitable for
   /// debugging.
   public var debugDescription: String {
-    return _makeCollectionDescription(for: self, withTypeName: "ArraySlice")
+    return _makeCollectionDescription(withTypeName: "ArraySlice")
   }
 }
 
@@ -1391,20 +1391,6 @@ extension ArraySlice: Equatable where Element: Equatable {
 
 
     return true
-  }
-
-  /// Returns a Boolean value indicating whether two arrays are not equal.
-  ///
-  /// Two arrays are equal if they contain the same elements in the same order.
-  /// You can use the not-equal-to operator (`!=`) to compare any two arrays
-  /// that store the same, `Equatable`-conforming element type.
-  ///
-  /// - Parameters:
-  ///   - lhs: An array to compare.
-  ///   - rhs: Another array to compare.
-  @inlinable
-  public static func !=(lhs: ArraySlice<Element>, rhs: ArraySlice<Element>) -> Bool {
-    return !(lhs == rhs)
   }
 }
 

@@ -467,13 +467,13 @@ public:
 } // end anonymous namespace
 
 /// Emit all the top-level code in the source file.
-void IRGenModule::emitSourceFile(SourceFile &SF, unsigned StartElem) {
+void IRGenModule::emitSourceFile(SourceFile &SF) {
   PrettySourceFileEmission StackEntry(SF);
   llvm::SaveAndRestore<SourceFile *> SetCurSourceFile(CurSourceFile, &SF);
 
   // Emit types and other global decls.
-  for (unsigned i = StartElem, e = SF.Decls.size(); i != e; ++i)
-    emitGlobalDecl(SF.Decls[i]);
+  for (auto *decl : SF.Decls)
+    emitGlobalDecl(decl);
   for (auto *localDecl : SF.LocalTypeDecls)
     emitGlobalDecl(localDecl);
 
@@ -680,10 +680,7 @@ void IRGenModule::emitRuntimeRegistration() {
   }
 
   // Register Swift protocol conformances if we added any.
-  if (!ProtocolConformances.empty()) {
-
-    llvm::Constant *conformances = emitProtocolConformances();
-
+  if (llvm::Constant *conformances = emitProtocolConformances()) {
     llvm::Constant *beginIndices[] = {
       llvm::ConstantInt::get(Int32Ty, 0),
       llvm::ConstantInt::get(Int32Ty, 0),
@@ -2461,18 +2458,29 @@ void IRGenModule::addProtocolConformance(
 
 /// Emit the protocol conformance list and return it.
 llvm::Constant *IRGenModule::emitProtocolConformances() {
-  // Do nothing if the list is empty.
-  if (ProtocolConformances.empty())
+  // Emit the conformances.
+  bool anyReflectedConformances = false;
+  for (auto *conformance : ProtocolConformances) {
+    // Emit the protocol conformance now.
+    emitProtocolConformance(conformance);
+
+    if (conformance->isBehaviorConformance())
+      continue;
+
+    anyReflectedConformances = true;
+  }
+
+  if (!anyReflectedConformances)
     return nullptr;
 
   // Define the global variable for the conformance list.
-
   ConstantInitBuilder builder(*this);
   auto descriptorArray = builder.beginArray(RelativeAddressTy);
 
   for (auto *conformance : ProtocolConformances) {
-    // Emit the protocol conformance now.
-    emitProtocolConformance(conformance);
+    // Behavior conformances cannot be reflected.
+    if (conformance->isBehaviorConformance())
+      continue;
 
     auto entity = LinkEntity::forProtocolConformanceDescriptor(conformance);
     auto descriptor =
