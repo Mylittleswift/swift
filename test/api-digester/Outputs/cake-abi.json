@@ -231,8 +231,7 @@
           "declKind": "Func",
           "usr": "s:4cake2C1C4foo1yyFZ",
           "moduleName": "cake",
-          "static": true,
-          "isOpen": true
+          "static": true
         },
         {
           "kind": "Var",
@@ -840,6 +839,49 @@
           "hasStorage": true
         },
         {
+          "kind": "Var",
+          "name": "unavailableProperty",
+          "printedName": "unavailableProperty",
+          "children": [
+            {
+              "kind": "TypeNominal",
+              "name": "Int",
+              "printedName": "Int",
+              "usr": "s:Si"
+            },
+            {
+              "kind": "Getter",
+              "name": "_",
+              "printedName": "_()",
+              "children": [
+                {
+                  "kind": "TypeNominal",
+                  "name": "Int",
+                  "printedName": "Int",
+                  "usr": "s:Si"
+                }
+              ],
+              "declKind": "Accessor",
+              "usr": "s:4cake17fixedLayoutStructV19unavailablePropertySivg",
+              "moduleName": "cake",
+              "implicit": true,
+              "declAttributes": [
+                "Transparent"
+              ]
+            }
+          ],
+          "declKind": "Var",
+          "usr": "s:4cake17fixedLayoutStructV19unavailablePropertySivp",
+          "moduleName": "cake",
+          "declAttributes": [
+            "HasInitialValue",
+            "Available"
+          ],
+          "fixedbinaryorder": 3,
+          "isLet": true,
+          "hasStorage": true
+        },
+        {
           "kind": "Constructor",
           "name": "init",
           "printedName": "init(a:b:c:)",
@@ -1146,6 +1188,47 @@
       ],
       "isLet": true,
       "hasStorage": true
+    },
+    {
+      "kind": "OperatorDecl",
+      "name": "..*..",
+      "printedName": "..*..",
+      "declKind": "InfixOperator",
+      "moduleName": "cake",
+      "declAttributes": [
+        "Infix"
+      ]
+    },
+    {
+      "kind": "TypeDecl",
+      "name": "UsableFromInlineClass",
+      "printedName": "UsableFromInlineClass",
+      "children": [
+        {
+          "kind": "Constructor",
+          "name": "init",
+          "printedName": "init()",
+          "children": [
+            {
+              "kind": "TypeNominal",
+              "name": "UsableFromInlineClass",
+              "printedName": "UsableFromInlineClass",
+              "usr": "s:4cake21UsableFromInlineClassC"
+            }
+          ],
+          "declKind": "Constructor",
+          "usr": "s:4cake21UsableFromInlineClassCACycfc",
+          "moduleName": "cake",
+          "implicit": true,
+          "isInternal": true
+        }
+      ],
+      "declKind": "Class",
+      "usr": "s:4cake21UsableFromInlineClassC",
+      "moduleName": "cake",
+      "declAttributes": [
+        "UsableFromInline"
+      ]
     },
     {
       "kind": "TypeDecl",

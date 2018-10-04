@@ -316,7 +316,13 @@ extension _NativeDictionary: _DictionaryBuffer {
 
   @inlinable
   internal func index(after index: Index) -> Index {
-    // Note that _asNative forces this not to work on Cocoa indices.
+#if _runtime(_ObjC)
+    guard _fastPath(index._isNative) else {
+      let _ = validatedBucket(for: index)
+      let i = index._asCocoa
+      return Index(_cocoa: i.dictionary.index(after: i))
+    }
+#endif
     let bucket = validatedBucket(for: index._asNative)
     let next = hashTable.occupiedBucket(after: bucket)
     return Index(_native: _HashTable.Index(bucket: next, age: age))
@@ -540,6 +546,7 @@ extension _NativeDictionary: _HashTableDelegate {
 
 extension _NativeDictionary { // Deletion
   @inlinable
+  @_effects(releasenone)
   internal func _delete(at bucket: Bucket) {
     hashTable.delete(at: bucket, with: self)
     _storage._count -= 1
@@ -613,9 +620,8 @@ extension _NativeDictionary { // High-level operations
       isUnique = true
       if found {
         do {
-          let v = (_values + bucket.offset).move()
-          let newValue = try combine(v, value)
-          (_values + bucket.offset).initialize(to: newValue)
+          let newValue = try combine(uncheckedValue(at: bucket), value)
+          _values[bucket.offset] = newValue
         } catch _MergeError.keyCollision {
           fatalError("Duplicate values for key: '\(key)'")
         }
@@ -656,6 +662,7 @@ extension _NativeDictionary: Sequence {
     internal var iterator: _HashTable.Iterator
 
     @inlinable
+    @inline(__always)
     init(_ base: __owned _NativeDictionary) {
       self.base = base
       self.iterator = base.hashTable.makeIterator()
@@ -673,18 +680,21 @@ extension _NativeDictionary.Iterator: IteratorProtocol {
   internal typealias Element = (key: Key, value: Value)
 
   @inlinable
+  @inline(__always)
   internal mutating func nextKey() -> Key? {
     guard let index = iterator.next() else { return nil }
     return base.uncheckedKey(at: index)
   }
 
   @inlinable
+  @inline(__always)
   internal mutating func nextValue() -> Value? {
     guard let index = iterator.next() else { return nil }
     return base.uncheckedValue(at: index)
   }
 
   @inlinable
+  @inline(__always)
   internal mutating func next() -> Element? {
     guard let index = iterator.next() else { return nil }
     let key = base.uncheckedKey(at: index)

@@ -55,6 +55,13 @@ public struct fixedLayoutStruct {
   public var a = 1
 }
 
+@usableFromInline
+@_fixed_layout
+struct fixedLayoutStruct2 {
+  public private(set) var NoLongerWithFixedBinaryOrder = 1
+  public var BecomeFixedBinaryOrder: Int { return 1 }
+}
+
 @_frozen
 public enum FrozenKind {
   case Unchanged
@@ -125,3 +132,5 @@ public class EscapingFunctionType {
   public func removedEscaping(_ a: @escaping ()->()) {}
   public func addedEscaping(_ a: ()->()) {}
 }
+
+infix operator ..*..

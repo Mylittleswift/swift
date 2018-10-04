@@ -10,6 +10,7 @@ cake1: AssociatedType RequiementChanges.removedType has been removed
 cake1: Class C3 has been removed
 cake1: Constructor Somestruct2.init(_:) has been removed
 cake1: Constructor fixedLayoutStruct.init(b:a:) has been removed
+cake1: Constructor fixedLayoutStruct2.init(NoLongerWithFixedBinaryOrder:) has been removed
 cake1: Func C4.foo() has been removed
 cake1: Func RequiementChanges.removedFunc() has been removed
 cake1: Subscript RemoveSetters.subscript(_:) has removed its setter
@@ -19,6 +20,7 @@ cake1: Var RequiementChanges.removedVar has been removed
 
 /* Moved Decls */
 cake1: Class ClassToStruct has been changed to a Struct
+cake1: InfixOperator ..*.. has been changed to a PrefixOperator
 cake1: Protocol ProtocolToEnum has been changed to a Enum
 
 /* Renamed Decls */
@@ -53,6 +55,8 @@ cake1: EnumElement FrozenKind.Fixed in a non-resilient type changes position fro
 cake1: EnumElement FrozenKind.Rigid in a non-resilient type changes position from 2 to 1
 cake1: Var fixedLayoutStruct.a in a non-resilient type changes position from 1 to 0
 cake1: Var fixedLayoutStruct.b in a non-resilient type changes position from 0 to 1
+cake1: Var fixedLayoutStruct2.BecomeFixedBinaryOrder is now a stored property
+cake1: Var fixedLayoutStruct2.NoLongerWithFixedBinaryOrder is no longer a stored property
 cake2: EnumElement FrozenKind.AddedCase is added to a non-resilient type
 cake2: Var fixedLayoutStruct.c is added to a non-resilient type
 cake2: Var fixedLayoutStruct.lazy_d.storage is added to a non-resilient type
@@ -74,6 +78,3 @@ cake2: Var RequiementChanges.addedVar has been added as a protocol requirement
 cake1: Class C4 has changed its super class from OldType to NewType
 cake1: Class SubGenericClass has changed its super class from GenericClass<P1> to GenericClass<P2>
 cake1: Class SuperClassRemoval has removed its super class C3
-cake1: Func ClassWithOpenMember.bar() is no longer open for subclassing
-cake1: Func ClassWithOpenMember.foo() is no longer open for subclassing
-cake1: Var ClassWithOpenMember.property is no longer open for subclassing

@@ -442,6 +442,7 @@ extension _NativeSet: _HashTableDelegate {
 
 extension _NativeSet { // Deletion
   @inlinable
+  @_effects(releasenone)
   internal mutating func _delete(at bucket: Bucket) {
     hashTable.delete(at: bucket, with: self)
     _storage._count -= 1
@@ -493,6 +494,7 @@ extension _NativeSet: Sequence {
     internal var iterator: _HashTable.Iterator
 
     @inlinable
+    @inline(__always)
     init(_ base: __owned _NativeSet) {
       self.base = base
       self.iterator = base.hashTable.makeIterator()
@@ -500,6 +502,7 @@ extension _NativeSet: Sequence {
   }
 
   @inlinable
+  @inline(__always)
   internal __consuming func makeIterator() -> Iterator {
     return Iterator(self)
   }
@@ -507,6 +510,7 @@ extension _NativeSet: Sequence {
 
 extension _NativeSet.Iterator: IteratorProtocol {
   @inlinable
+  @inline(__always)
   internal mutating func next() -> Element? {
     guard let index = iterator.next() else { return nil }
     return base.uncheckedElement(at: index)

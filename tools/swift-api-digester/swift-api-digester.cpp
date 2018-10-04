@@ -667,8 +667,8 @@ void swift::ide::api::SDKNodeDeclType::diagnose(SDKNode *Right) {
   auto &Diags = Ctx.getDiags();
 
   if (getDeclKind() != R->getDeclKind()) {
-    Diags.diagnose(SourceLoc(), diag::nominal_type_kind_changed,
-      getScreenInfo(), getDeclKindStr(R->getDeclKind()));
+    Diags.diagnose(SourceLoc(), diag::decl_kind_changed, getScreenInfo(),
+                   getDeclKindStr(R->getDeclKind()));
     return;
   }
 
@@ -798,6 +798,17 @@ void swift::ide::api::SDKNodeDecl::diagnose(SDKNode *Right) {
   }
 }
 
+void swift::ide::api::SDKNodeDeclOperator::diagnose(SDKNode *Right) {
+  SDKNodeDecl::diagnose(Right);
+  auto *RO = dyn_cast<SDKNodeDeclOperator>(Right);
+  if (!RO)
+    return;
+  if (getDeclKind() != RO->getDeclKind()) {
+    Ctx.getDiags().diagnose(SourceLoc(), diag::decl_kind_changed, getScreenInfo(),
+                            getDeclKindStr(RO->getDeclKind()));
+  }
+}
+
 void swift::ide::api::SDKNodeDeclVar::diagnose(SDKNode *Right) {
   SDKNodeDecl::diagnose(Right);
   auto *RV = dyn_cast<SDKNodeDeclVar>(Right);
@@ -808,6 +819,10 @@ void swift::ide::api::SDKNodeDeclVar::diagnose(SDKNode *Right) {
                             getScreenInfo());
   }
   if (Ctx.checkingABI()) {
+    if (hasFixedBinaryOrder() != RV->hasFixedBinaryOrder()) {
+      Ctx.getDiags().diagnose(SourceLoc(), diag::decl_has_fixed_order_change,
+                              getScreenInfo(), hasFixedBinaryOrder());
+    }
     if (hasFixedBinaryOrder() && RV->hasFixedBinaryOrder() &&
         getFixedBinaryOrder() != RV->getFixedBinaryOrder()) {
       Ctx.getDiags().diagnose(SourceLoc(), diag::decl_reorder,
@@ -1000,6 +1015,7 @@ public:
       break;
     }
 
+    case SDKNodeKind::DeclOperator:
     case SDKNodeKind::DeclSubscript:
     case SDKNodeKind::DeclAssociatedType:
     case SDKNodeKind::DeclFunction:

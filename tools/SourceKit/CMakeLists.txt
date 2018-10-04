@@ -34,6 +34,11 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin" AND NOT CMAKE_CROSSCOMPILING)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "")
 endif()
 
+# If we were don't have XPC, just build inproc.
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin" AND NOT HAVE_XPC_H)
+  set(SWIFT_SOURCEKIT_USE_INPROC_LIBRARY TRUE)
+endif()
+
 # Now include AddSwiftSourceKit
 include(AddSwiftSourceKit)
 
@@ -45,7 +50,7 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin")
     execute_process(COMMAND sw_vers -productVersion
                     OUTPUT_VARIABLE SOURCEKIT_DEPLOYMENT_TARGET
                     OUTPUT_STRIP_TRAILING_WHITESPACE)
-    string(REGEX MATCH "[0-9]+\\.[0-9]+" SOURCEKIT_DEPLOYMENT_TARGET ${SOURCEKIT_DEPLOYMENT_TARGET})
+    string(REGEX MATCH "[0-9]+\\.[0-9]+" SOURCEKIT_DEPLOYMENT_TARGET "${SOURCEKIT_DEPLOYMENT_TARGET}")
   endif()
 
   # Sadly there are two OS naming conventions.
@@ -93,6 +98,12 @@ include_directories(BEFORE
 if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
   set(SOURCEKIT_DEFAULT_TARGET_SDK "LINUX")
   if(SWIFT_BUILD_SOURCEKIT)
+    if(SWIFT_BUILD_STDLIB)
+      set(SOURCEKIT_LIBDISPATCH_ENABLE_SWIFT YES)
+    else()
+      set(SOURCEKIT_LIBDISPATCH_ENABLE_SWIFT NO)
+    endif()
+
     include(ExternalProject)
     ExternalProject_Add(libdispatch
                         SOURCE_DIR
@@ -106,7 +117,7 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
                           -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
                           -DCMAKE_SWIFT_COMPILER=$<TARGET_FILE:swift>c
                           -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
-                          -DENABLE_SWIFT=YES
+                          -DENABLE_SWIFT=${SOURCEKIT_LIBDISPATCH_ENABLE_SWIFT}
                         BUILD_BYPRODUCTS
                           ${SWIFT_PATH_TO_LIBDISPATCH_BUILD}/src/${CMAKE_SHARED_LIBRARY_PREFIX}dispatch${CMAKE_SHARED_LIBRARY_SUFFIX}
                           ${SWIFT_PATH_TO_LIBDISPATCH_BUILD}/${CMAKE_STATIC_LIBRARY_PREFIX}BlocksRuntime${CMAKE_STATIC_LIBRARY_SUFFIX}
@@ -126,13 +137,16 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     include_directories(AFTER
                           ${SWIFT_PATH_TO_LIBDISPATCH_SOURCE}/src/BlocksRuntime
                           ${SWIFT_PATH_TO_LIBDISPATCH_SOURCE})
-    add_dependencies(libdispatch
-                       swift
-                       copy_shim_headers
-                       swiftCore-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH}
-                       swiftSwiftOnoneSupport-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH}
-                       swiftCore-swiftmodule-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH}
-                       swiftSwiftOnoneSupport-swiftmodule-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH})
+
+    if(SWIFT_BUILD_STDLIB)
+      add_dependencies(libdispatch
+                         swift
+                         copy_shim_headers
+                         swiftCore-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH}
+                         swiftSwiftOnoneSupport-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH}
+                         swiftCore-swiftmodule-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH}
+                         swiftSwiftOnoneSupport-swiftmodule-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH})
+    endif()
   endif()
 
   ExternalProject_Get_Property(libdispatch install_dir)
@@ -142,9 +156,13 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
                           IMPORTED_LOCATION
                             ${SWIFT_PATH_TO_LIBDISPATCH_BUILD}/src/${CMAKE_SHARED_LIBRARY_PREFIX}dispatch${CMAKE_SHARED_LIBRARY_SUFFIX}
                           INTERFACE_INCLUDE_DIRECTORIES
-                            ${install_dir}/include
-                          IMPORTED_LINK_INTERFACE_LIBRARIES
-                            swiftCore-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH})
+                            ${install_dir}/include)
+  if(SWIFT_BUILD_STDLIB)
+    set_target_properties(dispatch
+                          PROPERTIES
+                            IMPORTED_LINK_INTERFACE_LIBRARIES
+                              swiftCore-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH})
+  endif()
 
   add_library(BlocksRuntime STATIC IMPORTED)
   set_target_properties(BlocksRuntime

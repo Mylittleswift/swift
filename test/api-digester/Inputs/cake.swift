@@ -49,6 +49,8 @@ public struct fixedLayoutStruct {
   public var a = 1
   private var b = 2
   var c = 3
+  @available(*, unavailable)
+  public let unavailableProperty = 1
 }
 
 extension Int: P1 { public func bar() {} }
@@ -84,3 +86,8 @@ public let GlobalVar = 1
 public extension P1 {
   static func +(lhs: P1, rhs: P1) -> P1 { return lhs }
 }
+
+infix operator ..*..
+
+@usableFromInline
+class UsableFromInlineClass {}
