@@ -100,6 +100,11 @@ static llvm::cl::opt<bool>
 Abi("abi", llvm::cl::desc("Dumping ABI interface"),  llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
+SwiftOnly("swift-only",
+          llvm::cl::desc("Only include APIs defined from Swift source"),
+          llvm::cl::init(false));
+
+static llvm::cl::opt<bool>
 PrintModule("print-module", llvm::cl::desc("Print module names in diagnostics"));
 
 static llvm::cl::opt<ActionType>
@@ -721,9 +726,23 @@ void swift::ide::api::SDKNodeDeclAbstractFunc::diagnose(SDKNode *Right) {
     Diags.diagnose(SourceLoc(), diag::decl_new_attr, getScreenInfo(),
                    Ctx.buffer("throwing"));
   }
-  if (!isMutating() && R->isMutating()) {
-    Diags.diagnose(SourceLoc(), diag::decl_new_attr, getScreenInfo(),
-                   Ctx.buffer("mutating"));
+}
+
+void swift::ide::api::SDKNodeDeclFunction::diagnose(SDKNode *Right) {
+  SDKNodeDeclAbstractFunc::diagnose(Right);
+  auto *R = dyn_cast<SDKNodeDeclFunction>(Right);
+  if (!R)
+    return;
+  auto &Diags = Ctx.getDiags();
+  if (getSelfAccessKind() != R->getSelfAccessKind()) {
+    Diags.diagnose(SourceLoc(), diag::func_self_access_change, getScreenInfo(),
+                   getSelfAccessKind(), R->getSelfAccessKind());
+  }
+  if (Ctx.checkingABI()) {
+    if (hasFixedBinaryOrder() != R->hasFixedBinaryOrder()) {
+      Ctx.getDiags().diagnose(SourceLoc(), diag::func_has_fixed_order_change,
+                              getScreenInfo(), hasFixedBinaryOrder());
+    }
   }
 }
 
@@ -784,16 +803,24 @@ void swift::ide::api::SDKNodeDecl::diagnose(SDKNode *Right) {
     }
   }
 
+  // Check if some attributes with ABI/API-impact have been added/removed.
+  for (auto &Info: Ctx.getBreakingAttributeInfo()) {
+    if (hasDeclAttribute(Info.Kind) != RD->hasDeclAttribute(Info.Kind)) {
+      auto Desc = hasDeclAttribute(Info.Kind) ?
+      Ctx.buffer((llvm::Twine("without ") + Info.Content).str()):
+      Ctx.buffer((llvm::Twine("with ") + Info.Content).str());
+      Diags.diagnose(SourceLoc(), diag::decl_new_attr, getScreenInfo(),
+                     Desc);
+    }
+  }
+
   if (Ctx.checkingABI()) {
-    // Check if some attributes with ABI-impact have been added/removed.
-    for (auto &Info: Ctx.getABIAttributeInfo()) {
-      if (hasDeclAttribute(Info.Kind) != RD->hasDeclAttribute(Info.Kind)) {
-        auto Desc = hasDeclAttribute(Info.Kind) ?
-        Ctx.buffer((llvm::Twine("without ") + Info.Content).str()):
-        Ctx.buffer((llvm::Twine("with ") + Info.Content).str());
-        Diags.diagnose(SourceLoc(), diag::decl_new_attr, getScreenInfo(),
-                       Desc);
-      }
+    if (hasFixedBinaryOrder() && RD->hasFixedBinaryOrder() &&
+        getFixedBinaryOrder() != RD->getFixedBinaryOrder()) {
+      Ctx.getDiags().diagnose(SourceLoc(), diag::decl_reorder,
+                              getScreenInfo(),
+                              getFixedBinaryOrder(),
+                              RD->getFixedBinaryOrder());
     }
   }
 }
@@ -820,15 +847,8 @@ void swift::ide::api::SDKNodeDeclVar::diagnose(SDKNode *Right) {
   }
   if (Ctx.checkingABI()) {
     if (hasFixedBinaryOrder() != RV->hasFixedBinaryOrder()) {
-      Ctx.getDiags().diagnose(SourceLoc(), diag::decl_has_fixed_order_change,
+      Ctx.getDiags().diagnose(SourceLoc(), diag::var_has_fixed_order_change,
                               getScreenInfo(), hasFixedBinaryOrder());
-    }
-    if (hasFixedBinaryOrder() && RV->hasFixedBinaryOrder() &&
-        getFixedBinaryOrder() != RV->getFixedBinaryOrder()) {
-      Ctx.getDiags().diagnose(SourceLoc(), diag::decl_reorder,
-                              getScreenInfo(),
-                              getFixedBinaryOrder(),
-                              RV->getFixedBinaryOrder());
     }
     if (isLet() != RV->isLet()) {
       Ctx.getDiags().diagnose(SourceLoc(), diag::var_let_changed,
@@ -862,6 +882,13 @@ void swift::ide::api::SDKNodeType::diagnose(SDKNode *Right) {
   if (hasDefaultArgument() && !RT->hasDefaultArgument()) {
     Diags.diagnose(SourceLoc(), diag::default_arg_removed,
                    LParent->getScreenInfo(), Descriptor);
+  }
+  if (getParamValueOwnership() != RT->getParamValueOwnership()) {
+    Diags.diagnose(SourceLoc(), diag::param_ownership_change,
+                   getParent()->getAs<SDKNodeDecl>()->getScreenInfo(),
+                   getTypeRoleDescription(),
+                   getParamValueOwnership(),
+                   RT->getParamValueOwnership());
   }
 }
 
@@ -944,10 +971,11 @@ public:
       assert(!Left);
       Right->annotate(NodeAnnotation::Added);
       if (Ctx.checkingABI()) {
-        if (auto *VAD = dyn_cast<SDKNodeDeclVar>(Right)) {
-          if (VAD->hasFixedBinaryOrder()) {
+        // Any order-important decl added to a non-resilient type breaks ABI.
+        if (auto *D = dyn_cast<SDKNodeDecl>(Right)) {
+          if (D->hasFixedBinaryOrder()) {
             Ctx.getDiags().diagnose(SourceLoc(), diag::decl_added,
-                                    VAD->getScreenInfo());
+                                    D->getScreenInfo());
           }
         }
       }
@@ -1913,6 +1941,8 @@ class RenameDetectorForMemberDiff : public MatchedNodeListener {
 public:
   RenameDetectorForMemberDiff(): LeftDetector(true), RightDetector(false) {}
   void foundMatch(NodePtr Left, NodePtr Right, NodeMatchReason Reason) override {
+    if (!Left || !Right)
+      return;
     detectRename(Left, Right);
     LeftDetector.detect(Left, Right);
     RightDetector.detect(Right, Left);
@@ -2263,6 +2293,7 @@ static CheckerOptions getCheckOpts() {
   Opts.AbortOnModuleLoadFailure = options::AbortOnModuleLoadFailure;
   Opts.LocationFilter = options::LocationFilter;
   Opts.PrintModule = options::PrintModule;
+  Opts.SwiftOnly = options::SwiftOnly;
   return Opts;
 }
 

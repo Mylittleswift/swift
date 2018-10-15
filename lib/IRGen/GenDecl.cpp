@@ -1788,7 +1788,7 @@ Address IRGenModule::getAddrOfSILGlobalVariable(SILGlobalVariable *var,
     // FIXME: Once lldb can make use of remote mirrors to calculate layouts
     // at runtime, this should be removed.
     {
-      CompletelyFragileScope Scope(*this);
+      LoweringModeScope Scope(*this, TypeConverter::Mode::CompletelyFragile);
 
       SILType loweredTy = var->getLoweredType();
       auto &nonResilientTI = cast<FixedTypeInfo>(getTypeInfo(loweredTy));
@@ -2451,20 +2451,20 @@ llvm::Constant *IRGenModule::emitSwiftProtocols() {
 }
 
 void IRGenModule::addProtocolConformance(
-                                const NormalProtocolConformance *conformance) {
+                                ConformanceDescription record) {
   // Add this protocol conformance.
-  ProtocolConformances.push_back(conformance);
+  ProtocolConformances.push_back(std::move(record));
 }
 
 /// Emit the protocol conformance list and return it.
 llvm::Constant *IRGenModule::emitProtocolConformances() {
   // Emit the conformances.
   bool anyReflectedConformances = false;
-  for (auto *conformance : ProtocolConformances) {
+  for (const auto &record : ProtocolConformances) {
     // Emit the protocol conformance now.
-    emitProtocolConformance(conformance);
+    emitProtocolConformance(record);
 
-    if (conformance->isBehaviorConformance())
+    if (record.conformance->isBehaviorConformance())
       continue;
 
     anyReflectedConformances = true;
@@ -2477,7 +2477,9 @@ llvm::Constant *IRGenModule::emitProtocolConformances() {
   ConstantInitBuilder builder(*this);
   auto descriptorArray = builder.beginArray(RelativeAddressTy);
 
-  for (auto *conformance : ProtocolConformances) {
+  for (const auto &record : ProtocolConformances) {
+    auto conformance = record.conformance;
+
     // Behavior conformances cannot be reflected.
     if (conformance->isBehaviorConformance())
       continue;
@@ -3602,7 +3604,7 @@ llvm::Constant *IRGenModule::getAddrOfGlobalUTF16String(StringRef utf8) {
 ///   of stored properties
 bool IRGenModule::isResilient(NominalTypeDecl *D, ResilienceExpansion expansion) {
   if (expansion == ResilienceExpansion::Maximal &&
-      Types.isCompletelyFragile()) {
+      Types.getLoweringMode() == TypeConverter::Mode::CompletelyFragile) {
     return false;
   }
   return D->isResilient(getSwiftModule(), expansion);
@@ -3621,7 +3623,7 @@ IRGenModule::getResilienceExpansionForAccess(NominalTypeDecl *decl) {
 // layout. Calling isResilient() with this scope will always return false.
 ResilienceExpansion
 IRGenModule::getResilienceExpansionForLayout(NominalTypeDecl *decl) {
-  if (Types.isCompletelyFragile())
+  if (Types.getLoweringMode() == TypeConverter::Mode::CompletelyFragile)
     return ResilienceExpansion::Minimal;
 
   if (isResilient(decl, ResilienceExpansion::Minimal))
@@ -3646,14 +3648,6 @@ getAddrOfGenericWitnessTableCache(const NormalProtocolConformance *conf,
   auto expectedTy = getGenericWitnessTableCacheTy();
   return getAddrOfLLVMVariable(entity, getPointerAlignment(), forDefinition,
                                expectedTy, DebugTypeInfo());
-}
-
-llvm::Constant *IRGenModule::
-getAddrOfResilientWitnessTable(const NormalProtocolConformance *conf,
-                               ConstantInit definition) {
-  auto entity = LinkEntity::forResilientProtocolWitnessTable(conf);
-  return getAddrOfLLVMVariable(entity, getPointerAlignment(), definition,
-                               definition.getType(), DebugTypeInfo());
 }
 
 llvm::Function *
@@ -3687,11 +3681,7 @@ llvm::StructType *IRGenModule::getGenericWitnessTableCacheTy() {
       Int16Ty,
       // WitnessTablePrivateSizeInWords + RequiresInstantiation bit
       Int16Ty,
-      // Protocol
-      RelativeAddressTy,
       // Pattern
-      RelativeAddressTy,
-      // ResilientWitnesses
       RelativeAddressTy,
       // Instantiator
       RelativeAddressTy,

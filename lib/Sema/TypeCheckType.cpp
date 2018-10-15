@@ -841,11 +841,15 @@ static void diagnoseUnboundGenericType(Type ty, SourceLoc loc) {
 static void maybeDiagnoseBadConformanceRef(DeclContext *dc,
                                            Type parentTy,
                                            SourceLoc loc,
-                                           AssociatedTypeDecl *assocType) {
+                                           TypeDecl *typeDecl) {
+  auto protocol = dyn_cast<ProtocolDecl>(typeDecl->getDeclContext());
+  if (!protocol)
+    return;
+
   // If we weren't given a conformance, go look it up.
   ProtocolConformance *conformance = nullptr;
   if (auto conformanceRef = TypeChecker::conformsToProtocol(
-          parentTy, assocType->getProtocol(), dc,
+          parentTy, protocol, dc,
           (ConformanceCheckFlags::InExpression |
            ConformanceCheckFlags::SuppressDependencyTracking |
            ConformanceCheckFlags::AllowUnavailableConditionalRequirements))) {
@@ -864,7 +868,7 @@ static void maybeDiagnoseBadConformanceRef(DeclContext *dc,
           ? diag::unsupported_recursion_in_associated_type_reference
           : diag::broken_associated_type_witness;
 
-  ctx.Diags.diagnose(loc, diagCode, assocType->getFullName(), parentTy);
+  ctx.Diags.diagnose(loc, diagCode, isa<TypeAliasDecl>(typeDecl), typeDecl->getFullName(), parentTy);
 }
 
 /// \brief Returns a valid type or ErrorType in case of an error.
@@ -910,10 +914,11 @@ static Type resolveTypeDecl(TypeDecl *typeDecl, SourceLoc loc,
     return ErrorType::get(ctx);
   }
 
-  if (type->hasError() && isa<AssociatedTypeDecl>(typeDecl)) {
+  if (type->hasError() && foundDC &&
+      (isa<AssociatedTypeDecl>(typeDecl) || isa<TypeAliasDecl>(typeDecl))) {
     maybeDiagnoseBadConformanceRef(fromDC,
                                    foundDC->getDeclaredInterfaceType(),
-                                   loc, cast<AssociatedTypeDecl>(typeDecl));
+                                   loc, typeDecl);
   }
 
   if (generic) {
@@ -1477,14 +1482,7 @@ static bool diagnoseAvailability(IdentTypeRepr *IdType,
   auto componentRange = IdType->getComponentRange();
   for (auto comp : componentRange) {
     if (auto *typeDecl = comp->getBoundDecl()) {
-      // In Swift 3, components other than the last one were not properly
-      // checked for availability.
-      // FIXME: We should try to downgrade these errors to warnings, not just
-      // skip diagnosing them.
-      if (ctx.LangOpts.isSwiftVersion3() && comp != componentRange.back())
-        continue;
-
-      // FIXME: Need to eliminate the type checker argument.
+      assert(ctx.getLazyResolver() && "Must have a type checker!");
       TypeChecker &tc = static_cast<TypeChecker &>(*ctx.getLazyResolver());
       if (diagnoseDeclAvailability(typeDecl, tc, DC, comp->getIdLoc(),
                                    AllowPotentiallyUnavailableProtocol,
@@ -3090,9 +3088,12 @@ Type TypeChecker::substMemberTypeWithBase(ModuleDecl *module,
   Type sugaredBaseTy = baseTy;
 
   // For type members of a base class, make sure we use the right
-  // derived class as the parent type.
-  if (auto *ownerClass = member->getDeclContext()->getSelfClassDecl()) {
-    baseTy = baseTy->getSuperclassForDecl(ownerClass, useArchetypes);
+  // derived class as the parent type. If the base type is an error
+  // type, we have an invalid extension, so do nothing.
+  if (!baseTy->is<ErrorType>()) {
+    if (auto *ownerClass = member->getDeclContext()->getSelfClassDecl()) {
+      baseTy = baseTy->getSuperclassForDecl(ownerClass, useArchetypes);
+    }
   }
 
   if (baseTy->is<ModuleType>()) {

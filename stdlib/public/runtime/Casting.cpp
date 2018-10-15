@@ -2550,8 +2550,10 @@ MetadataResponse _getBridgedObjectiveCType(
   assert(assocTypeRequirement->Flags.getKind() ==
          ProtocolRequirementFlags::Kind::AssociatedTypeAccessFunction);
   auto mutableWTable = (WitnessTable *)wtable;
-  return swift_getAssociatedTypeWitness(request, mutableWTable, conformingType,
-                                        assocTypeRequirement);
+  return swift_getAssociatedTypeWitness(
+                                      request, mutableWTable, conformingType,
+                                      protocol->getRequirementBaseDescriptor(),
+                                      assocTypeRequirement);
 }
   
 } // unnamed namespace
@@ -3107,7 +3109,7 @@ bool _swift_isOptional(OpaqueValue *src, const Metadata *type) {
   return swift_isOptionalType(type);
 }
 
-SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_INTERNAL
+SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_SPI
 HeapObject *_swift_extractDynamicValue(OpaqueValue *value, const Metadata *self) {
   OpaqueValue *outValue;
   const Metadata *outType;

@@ -1,3 +1,5 @@
+@_exported import cake
+
 public protocol P1 {}
 public protocol P2 {}
 
@@ -47,7 +49,7 @@ public extension Int {
 @_fixed_layout
 public struct fixedLayoutStruct {
   public var a = 1
-  private var b = 2
+  private var b = 2 { didSet {} willSet(value) {} }
   var c = 3
   @available(*, unavailable)
   public let unavailableProperty = 1
@@ -90,4 +92,7 @@ public extension P1 {
 infix operator ..*..
 
 @usableFromInline
-class UsableFromInlineClass {}
+@_fixed_layout
+class UsableFromInlineClass {
+  private var Prop = 1
+}

@@ -129,9 +129,9 @@ public:
   }
 };
 
-// Describing some attributes with ABI impact. The addition or removal of these
-// attributes is considerred ABI-breaking.
-struct ABIAttributeInfo {
+// Describing some attributes with ABI/API impact. The addition or removal of these
+// attributes is considerred breakage.
+struct BreakingAttributeInfo {
   const DeclAttrKind Kind;
   const StringRef Content;
 };
@@ -142,6 +142,7 @@ struct CheckerOptions {
   bool Verbose;
   bool AbortOnModuleLoadFailure;
   bool PrintModule;
+  bool SwiftOnly;
   StringRef LocationFilter;
 };
 
@@ -156,7 +157,7 @@ class SDKContext {
   TypeMemberDiffVector TypeMemberDiffs;
 
   CheckerOptions Opts;
-  std::vector<ABIAttributeInfo> ABIAttrs;
+  std::vector<BreakingAttributeInfo> BreakingAttrs;
   /// This is to cache the equal comparison results between nodes.
   llvm::DenseMap<const SDKNode*, llvm::DenseMap<const SDKNode*, bool>> EqualCache;
 
@@ -190,8 +191,9 @@ public:
   bool checkingABI() const { return Opts.ABI; }
   AccessLevel getAccessLevel(const ValueDecl *VD) const;
   const CheckerOptions &getOpts() const { return Opts; }
-  ArrayRef<ABIAttributeInfo> getABIAttributeInfo() const { return ABIAttrs; }
-
+  bool shouldIgnore(Decl *D, const Decl* Parent = nullptr) const;
+  ArrayRef<BreakingAttributeInfo> getBreakingAttributeInfo() const { return BreakingAttrs; }
+  Optional<uint8_t> getFixedBinaryOrder(ValueDecl *VD) const;
   template<class YAMLNodeTy, typename ...ArgTypes>
   void diagnose(YAMLNodeTy node, Diag<ArgTypes...> ID,
                 typename detail::PassArgument<ArgTypes>::type... args) {
@@ -297,6 +299,7 @@ class SDKNodeDecl: public SDKNode {
   bool IsInternal;
   uint8_t ReferenceOwnership;
   StringRef GenericSig;
+  Optional<uint8_t> FixedBinaryOrder;
 
 protected:
   SDKNodeDecl(SDKNodeInitInfo Info, SDKNodeKind Kind);
@@ -328,6 +331,8 @@ public:
   bool isInternal() const { return IsInternal; }
   StringRef getGenericSignature() const { return GenericSig; }
   StringRef getScreenInfo() const;
+  bool hasFixedBinaryOrder() const { return FixedBinaryOrder.hasValue(); }
+  uint8_t getFixedBinaryOrder() const { return *FixedBinaryOrder; }
   virtual void jsonize(json::Output &Out) override;
   virtual void diagnose(SDKNode *Right) override;
 };
@@ -350,6 +355,9 @@ class SDKNodeType: public SDKNode {
   std::vector<TypeAttrKind> TypeAttributes;
   bool HasDefaultArg;
 
+  // Empty() implies "Default"
+  StringRef ParamValueOwnership;
+
 protected:
   SDKNodeType(SDKNodeInitInfo Info, SDKNodeKind Kind);
   ~SDKNodeType() = default;
@@ -365,6 +373,7 @@ public:
   bool hasDefaultArgument() const { return HasDefaultArg; }
   bool isTopLevelType() const { return !isa<SDKNodeType>(getParent()); }
   StringRef getTypeRoleDescription() const;
+  StringRef getParamValueOwnership() const;
   static bool classof(const SDKNode *N);
   virtual void jsonize(json::Output &Out) override;
   virtual void diagnose(SDKNode *Right) override;
@@ -490,14 +499,13 @@ public:
 };
 
 class SDKNodeDeclVar : public SDKNodeDecl {
-  Optional<uint8_t> FixedBinaryOrder;
   bool IsLet;
   bool HasStorage;
+  bool HasDidSet;
+  bool HasWillSet;
 public:
   SDKNodeDeclVar(SDKNodeInitInfo Info);
   static bool classof(const SDKNode *N);
-  bool hasFixedBinaryOrder() const { return FixedBinaryOrder.hasValue(); }
-  uint8_t getFixedBinaryOrder() const { return *FixedBinaryOrder; }
   SDKNodeDeclGetter *getGetter() const;
   SDKNodeDeclSetter *getSetter() const;
   SDKNodeType *getType() const;
@@ -505,11 +513,12 @@ public:
   void jsonize(json::Output &Out) override;
   void diagnose(SDKNode *Right) override;
   bool hasStorage() const { return HasStorage; }
+  bool hasDidSet() const { return HasDidSet; }
+  bool hasWillSet() const { return HasWillSet; }
 };
 
 class SDKNodeDeclAbstractFunc : public SDKNodeDecl {
   bool IsThrowing;
-  bool IsMutating;
   Optional<uint8_t> SelfIndex;
 
 protected:
@@ -517,7 +526,6 @@ protected:
   virtual ~SDKNodeDeclAbstractFunc() = default;
 public:
   bool isThrowing() const { return IsThrowing; }
-  bool isMutating() const { return IsMutating; }
   uint8_t getSelfIndex() const { return SelfIndex.getValue(); }
   Optional<uint8_t> getSelfIndexOptional() const { return SelfIndex; }
   bool hasSelfIndex() const { return SelfIndex.hasValue(); }
@@ -530,6 +538,8 @@ public:
 class SDKNodeDeclSubscript: public SDKNodeDeclAbstractFunc {
   bool HasSetter;
   bool HasStorage;
+  bool HasDidSet;
+  bool HasWillSet;
 public:
   SDKNodeDeclSubscript(SDKNodeInitInfo Info);
   static bool classof(const SDKNode *N);
@@ -537,13 +547,19 @@ public:
   bool hasStorage() const { return HasStorage; }
   void jsonize(json::Output &Out) override;
   void diagnose(SDKNode *Right) override;
+  bool hasDidSet() const { return HasDidSet; }
+  bool hasWillSet() const { return HasWillSet; }
 };
 
 class SDKNodeDeclFunction: public SDKNodeDeclAbstractFunc {
+  StringRef FuncSelfKind;
 public:
   SDKNodeDeclFunction(SDKNodeInitInfo Info);
   SDKNode *getReturnType() { return *getChildBegin(); }
+  StringRef getSelfAccessKind() const { return FuncSelfKind; }
   static bool classof(const SDKNode *N);
+  void jsonize(json::Output &Out) override;
+  void diagnose(SDKNode *Right) override;
 };
 
 class SDKNodeDeclConstructor: public SDKNodeDeclAbstractFunc {
@@ -562,6 +578,15 @@ class SDKNodeDeclSetter: public SDKNodeDeclAbstractFunc {
 public:
   SDKNodeDeclSetter(SDKNodeInitInfo Info);
   static bool classof(const SDKNode *N);
+};
+
+// The additional information we need for a type node in the digest.
+// We use type node to represent entities more than types, e.g. parameters, so
+// this struct is necessary to pass down to create a type node.
+struct TypeInitInfo {
+  bool IsImplicitlyUnwrappedOptional = false;
+  bool hasDefaultArgument = false;
+  StringRef ValueOwnership;
 };
 
 class SwiftDeclCollector: public VisibleDeclConsumer {
@@ -592,7 +617,6 @@ public:
 
   void printTopLevelNames();
 
-  bool shouldIgnore(Decl *D, const Decl* Parent);
   void addMembersToRoot(SDKNode *Root, IterableDeclContext *Context);
   SDKNode *constructSubscriptDeclNode(SubscriptDecl *SD);
   SDKNode *constructAssociatedTypeNode(AssociatedTypeDecl *ATD);
@@ -605,8 +629,7 @@ public:
   SDKNode *constructFunctionNode(FuncDecl* FD, SDKNodeKind Kind);
   SDKNode *constructOperatorDeclNode(OperatorDecl *OD);
   std::vector<SDKNode*> createParameterNodes(ParameterList *PL);
-  SDKNode *constructTypeNode(Type T, bool IsImplicitlyUnwrappedOptional = false,
-    bool hasDefaultArgument = false);
+  SDKNode *constructTypeNode(Type T, TypeInitInfo Info = TypeInitInfo());
   void processValueDecl(ValueDecl *VD);
   void foundDecl(ValueDecl *VD, DeclVisibilityKind Reason) override;
   void processDecl(Decl *D);

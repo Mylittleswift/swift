@@ -43,10 +43,12 @@ static StringRef getCategoryName(uint32_t ID) {
   case LocalDiagID::decl_attr_change:
   case LocalDiagID::decl_new_attr:
   case LocalDiagID::var_let_changed:
+  case LocalDiagID::func_self_access_change:
     return "/* Decl Attribute changes */";
   case LocalDiagID::default_arg_removed:
   case LocalDiagID::decl_type_change:
   case LocalDiagID::func_type_escaping_changed:
+  case LocalDiagID::param_ownership_change:
     return "/* Type Changes */";
   case LocalDiagID::raw_type_change:
     return "/* RawRepresentable Changes */";
@@ -54,7 +56,8 @@ static StringRef getCategoryName(uint32_t ID) {
     return "/* Generic Signature Changes */";
   case LocalDiagID::decl_added:
   case LocalDiagID::decl_reorder:
-  case LocalDiagID::decl_has_fixed_order_change:
+  case LocalDiagID::var_has_fixed_order_change:
+  case LocalDiagID::func_has_fixed_order_change:
     return "/* Fixed-layout Type Changes */";
   case LocalDiagID::conformance_added:
   case LocalDiagID::conformance_removed:
