@@ -1293,7 +1293,7 @@ class InterfaceTypeChangeDetector {
     if (IsVisitingLeft &&
         Node->getPrintedName() != Counter->getPrintedName() &&
         (Node->getName() != Counter->getName() ||
-        Node->getChildrenCount() != Counter->getChildrenCount())) {
+         Node->getChildrenCount() != Counter->getChildrenCount())) {
       Node->annotate(NodeAnnotation::TypeRewritten);
       Node->annotate(NodeAnnotation::TypeRewrittenLeft, Node->getPrintedName());
       Node->annotate(NodeAnnotation::TypeRewrittenRight, 
@@ -2006,6 +2006,7 @@ static void findTypeMemberDiffs(NodePtr leftSDKRoot, NodePtr rightSDKRoot,
 }
 
 static int diagnoseModuleChange(StringRef LeftPath, StringRef RightPath,
+                                StringRef OutputPath,
                                 CheckerOptions Opts) {
   if (!fs::exists(LeftPath)) {
     llvm::errs() << LeftPath << " does not exist\n";
@@ -2015,7 +2016,14 @@ static int diagnoseModuleChange(StringRef LeftPath, StringRef RightPath,
     llvm::errs() << RightPath << " does not exist\n";
     return 1;
   }
-  ModuleDifferDiagsConsumer PDC(true);
+  llvm::raw_ostream *OS = &llvm::errs();
+  std::unique_ptr<llvm::raw_ostream> FileOS;
+  if (!OutputPath.empty()) {
+    std::error_code EC;
+    FileOS.reset(new llvm::raw_fd_ostream(OutputPath, EC, llvm::sys::fs::F_None));
+    OS = FileOS.get();
+  }
+  ModuleDifferDiagsConsumer PDC(true, *OS);
   SDKContext Ctx(Opts);
   Ctx.getDiags().addConsumer(PDC);
 
@@ -2304,9 +2312,6 @@ int main(int argc, char *argv[]) {
   llvm::cl::ParseCommandLineOptions(argc, argv, "Swift SDK Digester\n");
   CompilerInvocation InitInvok;
 
-  ClangImporterOptions &ImporterOpts = InitInvok.getClangImporterOptions();
-  ImporterOpts.DetailedPreprocessingRecord = true;
-
   llvm::StringSet<> Modules;
   std::vector<std::string> PrintApis;
   llvm::StringSet<> IgnoredUsrs;
@@ -2333,7 +2338,8 @@ int main(int argc, char *argv[]) {
                          options::OutputFile, IgnoredUsrs, Opts);
     else
       return diagnoseModuleChange(options::SDKJsonPaths[0],
-                                  options::SDKJsonPaths[1], Opts);
+                                  options::SDKJsonPaths[1],
+                                  options::OutputFile, Opts);
   case ActionType::DeserializeSDK:
   case ActionType::DeserializeDiffItems: {
     if (options::SDKJsonPaths.size() != 1) {

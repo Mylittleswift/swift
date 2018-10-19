@@ -1166,12 +1166,6 @@ private:
     /// \brief Maximum depth reached so far in exploring solutions.
     unsigned maxDepth = 0;
 
-    /// \brief Count of the number of leaf scopes we've created. These
-    /// either result in a failure to solve, or in a solution, unlike
-    /// all the intermediate scopes. They are interesting to track as
-    /// part of a metric of whether an expression is too complex.
-    unsigned leafScopes = 0;
-
     /// \brief Whether to record failures or not.
     bool recordFixes = false;
 
@@ -1268,7 +1262,7 @@ private:
 
       unsigned countScopesExplored = NumStatesExplored - scope->scopeNumber;
       if (countScopesExplored == 1)
-        ++leafScopes;
+        CS.incrementLeafScopes();
 
       SolverScope *savedScope;
       // The position of last retired constraint before given scope.
@@ -1307,6 +1301,10 @@ private:
     /// current path, this list is used in LIFO fashion when constraints
     /// are added back to the circulation.
     ConstraintList retiredConstraints;
+
+    /// The set of constraints which were active at the time of this state
+    /// creating, it's used to re-activate them on destruction.
+    SmallVector<Constraint *, 4> activeConstraints;
 
     /// The current set of generated constraints.
     SmallVector<Constraint *, 4> generatedConstraints;
@@ -1434,6 +1432,7 @@ private:
   }
 
   void incrementScopeCounter();
+  void incrementLeafScopes();
 
 public:
   /// \brief Introduces a new solver scope, which any changes to the

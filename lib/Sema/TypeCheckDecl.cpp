@@ -2057,7 +2057,7 @@ static NominalTypeDecl *resolveSingleNominalTypeDecl(
 
   TypeResolutionOptions options = TypeResolverContext::TypeAliasDecl;
   options |= flags;
-  if (tc.validateType(typeLoc, TypeResolution::forContextual(DC), options))
+  if (tc.validateType(typeLoc, TypeResolution::forInterface(DC), options))
     return nullptr;
 
   return typeLoc.getType()->getAnyNominal();
@@ -2308,7 +2308,7 @@ static void checkProtocolSelfRequirements(ProtocolDecl *proto,
         case RequirementKind::Layout:
         case RequirementKind::Superclass:
           if (reqRepr &&
-              req.getFirstType()->isEqual(proto->getProtocolSelfType())) {
+              req.getFirstType()->isEqual(proto->getSelfInterfaceType())) {
             auto &diags = proto->getASTContext().Diags;
             diags.diagnose(reqRepr->getSubjectLoc().getLoc(),
                            diag::protocol_where_clause_self_requirement);
@@ -3469,7 +3469,7 @@ static void validateTypealiasType(TypeChecker &tc, TypeAliasDecl *typeAlias) {
   }
 
   if (tc.validateType(typeAlias->getUnderlyingTypeLoc(),
-                      TypeResolution::forContextual(typeAlias), options)) {
+                      TypeResolution::forInterface(typeAlias), options)) {
     typeAlias->setInvalid();
     typeAlias->getUnderlyingTypeLoc().setInvalidType(tc.Context);
   }

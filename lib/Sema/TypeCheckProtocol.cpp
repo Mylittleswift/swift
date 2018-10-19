@@ -1969,7 +1969,17 @@ static void addOptionalityFixIts(
 /// \brief Diagnose a requirement match, describing what went wrong (or not).
 static void
 diagnoseMatch(ModuleDecl *module, NormalProtocolConformance *conformance,
-              ValueDecl *req, const RequirementMatch &match){
+              ValueDecl *req, const RequirementMatch &match) {
+
+  // If the name doesn't match and that's not the only problem,
+  // it is likely this witness wasn't intended to be a match at all, so omit
+  // diagnosis.
+  if (match.Kind != MatchKind::RenamedMatch &&
+      !match.Witness->getAttrs().hasAttribute<ImplementsAttr>() &&
+      match.Witness->getFullName() &&
+      req->getFullName() != match.Witness->getFullName())
+    return;
+
   // Form a string describing the associated type deductions.
   // FIXME: Determine which associated types matter, and only print those.
   llvm::SmallString<128> withAssocTypes;
@@ -3441,7 +3451,7 @@ void ConformanceChecker::ensureRequirementsAreSatisfied(
       DC, Loc, Loc,
       // FIXME: maybe this should be the conformance's type
       proto->getDeclaredInterfaceType(),
-      { Type(proto->getProtocolSelfType()) },
+      { proto->getSelfInterfaceType() },
       proto->getRequirementSignature(),
       QuerySubstitutionMap{substitutions},
       TypeChecker::LookUpConformance(DC),
@@ -3966,7 +3976,7 @@ Optional<ProtocolConformanceRef> TypeChecker::conformsToProtocol(
 
     auto conditionalCheckResult = checkGenericArguments(
         DC, ComplainLoc, noteLoc, T,
-        {Type(lookupResult->getRequirement()->getProtocolSelfType())},
+        {lookupResult->getRequirement()->getSelfInterfaceType()},
         *condReqs,
         [](SubstitutableType *dependentType) { return Type(dependentType); },
         LookUpConformance(DC), options);
@@ -5328,7 +5338,7 @@ void TypeChecker::inferDefaultWitnesses(ProtocolDecl *proto) {
   for (const auto &req : proto->getRequirementSignature()) {
     if (req.getKind() != RequirementKind::Conformance)
       continue;
-    if (req.getFirstType()->isEqual(proto->getProtocolSelfType()))
+    if (req.getFirstType()->isEqual(proto->getSelfInterfaceType()))
       continue;
 
     // Find the innermost dependent member type (e.g., Self.AssocType), so
@@ -5341,7 +5351,7 @@ void TypeChecker::inferDefaultWitnesses(ProtocolDecl *proto) {
              depMemTy->getBase()->getAs<DependentMemberType>())
       depMemTy = innerDepMemTy;
 
-    if (!depMemTy->getBase()->isEqual(proto->getProtocolSelfType()))
+    if (!depMemTy->getBase()->isEqual(proto->getSelfInterfaceType()))
       continue;
 
     auto assocType = depMemTy->getAssocType();
