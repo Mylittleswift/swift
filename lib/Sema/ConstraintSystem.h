@@ -3053,10 +3053,13 @@ public:
   /// \param allowFreeTypeVariables How to bind free type variables in
   /// the solution.
   ///
+  /// \param allowFixes Whether to allow fixes in the solution.
+  ///
   /// \returns a solution if a single unambiguous one could be found, or None if
   /// ambiguous or unsolvable.
   Optional<Solution> solveSingle(FreeTypeVariableBinding allowFreeTypeVariables
-                                    = FreeTypeVariableBinding::Disallow);
+                                 = FreeTypeVariableBinding::Disallow,
+                                 bool allowFixes = false);
 
 private:
   /// \brief Solve the system of constraints.
@@ -3221,6 +3224,25 @@ public:
 
   bool haveTypeInformationForAllArguments(FunctionType *fnType);
 
+  typedef std::function<bool(unsigned index, Constraint *)> ConstraintMatcher;
+  typedef std::function<void(ArrayRef<Constraint *>, ConstraintMatcher)>
+      ConstraintMatchLoop;
+  typedef std::function<void(SmallVectorImpl<unsigned> &options)>
+      PartitionAppendCallback;
+
+  // Attempt to sort nominalTypes based on what we can discover about
+  // calls into the overloads in the disjunction that bindOverload is
+  // a part of.
+  void sortDesignatedTypes(SmallVectorImpl<NominalTypeDecl *> &nominalTypes,
+                           Constraint *bindOverload);
+
+  // Partition the choices in a disjunction based on those that match
+  // the designated types for the operator that the disjunction was
+  // formed for.
+  void partitionForDesignatedTypes(ArrayRef<Constraint *> Choices,
+                                   ConstraintMatchLoop forEachChoice,
+                                   PartitionAppendCallback appendPartition);
+
   // Partition the choices in the disjunction into groups that we will
   // iterate over in an order appropriate to attempt to stop before we
   // have to visit all of the options.
@@ -3365,7 +3387,7 @@ matchCallArguments(ConstraintSystem &cs,
 /// given parameter depth cannot be used with the given value.
 /// If this cannot be proven, conservatively returns true.
 bool areConservativelyCompatibleArgumentLabels(ValueDecl *decl,
-                                               unsigned parameterDepth,
+                                               bool hasCurriedSelf,
                                                ArrayRef<Identifier> labels,
                                                bool hasTrailingClosure);
 

@@ -741,22 +741,28 @@ forwardIntoSubtree(SILGenFunction &SGF, SILLocation loc,
 
   auto consumptionKind = outerCMV.getFinalConsumption();
   (void)consumptionKind;
+
+  // If we have an object and it is take always, we need to borrow the value
+  // since we do not own the value at this point.
+  if (outerMV.getType().isObject()) {
+    assert(consumptionKind == CastConsumptionKind::TakeAlways &&
+           "Object without cleanup that is not take_always?!");
+    return {outerMV.borrow(SGF, loc), CastConsumptionKind::BorrowAlways};
+  }
+
+  // Only address only values use TakeOnSuccess.
+  assert(outerMV.getType().isAddressOnly(SGF.getModule()) &&
+         "TakeOnSuccess can only be used with address only values");
+
   assert((consumptionKind == CastConsumptionKind::TakeAlways ||
           consumptionKind == CastConsumptionKind::TakeOnSuccess) &&
          "non-+1 consumption with a cleanup?");
   scope.pushCleanupState(outerMV.getCleanup(),
                          CleanupState::PersistentlyActive);
 
-  // If SILOwnership is enabled and we have an object, borrow instead of take on
-  // success.
-  if (SGF.F.getModule().getOptions().EnableSILOwnership &&
-      outerMV.getType().isObject()) {
-    return {outerMV.borrow(SGF, loc), CastConsumptionKind::BorrowAlways};
-  }
-
   // Success means that we won't end up in the other branch,
   // but failure doesn't.
-  return { outerMV, CastConsumptionKind::TakeOnSuccess };
+  return {outerMV, CastConsumptionKind::TakeOnSuccess};
 }
 
 /// Forward a value down into an irrefutable branch of the decision tree.
@@ -1463,12 +1469,38 @@ emitTupleDispatch(ArrayRef<RowToSpecialize> rows, ConsumableManagedValue src,
     auto &fieldTL = SGF.getTypeLowering(fieldTy);
 
     SILValue member = SGF.B.createTupleElementAddr(loc, v, i, fieldTy);
-    if (!fieldTL.isAddressOnly()) {
-      member =
-          fieldTL.emitLoad(SGF.B, loc, member, LoadOwnershipQualifier::Take);
+    ConsumableManagedValue memberCMV;
+
+    // If we have a loadable sub-type of our tuple...
+    if (fieldTL.isLoadable()) {
+      switch (src.getFinalConsumption()) {
+      case CastConsumptionKind::TakeAlways: {
+        // and our consumption is take always, perform a load [take] and
+        // continue.
+        auto memberMV = ManagedValue::forUnmanaged(member);
+        memberCMV = {SGF.B.createLoadTake(loc, memberMV),
+                     CastConsumptionKind::TakeAlways};
+        break;
+      }
+      case CastConsumptionKind::TakeOnSuccess:
+      case CastConsumptionKind::CopyOnSuccess: {
+        // otherwise we have take on success or copy on success perform a
+        // load_borrow.
+        auto memberMV = ManagedValue::forUnmanaged(member);
+        memberCMV = {SGF.B.createLoadBorrow(loc, memberMV),
+                     CastConsumptionKind::BorrowAlways};
+        break;
+      }
+      case CastConsumptionKind::BorrowAlways:
+        llvm_unreachable("Borrow always can not be used on objects");
+      }
+    } else {
+      // Otherwise, if we have an address only type, just get the managed
+      // subobject.
+      memberCMV =
+          getManagedSubobject(SGF, member, fieldTL, src.getFinalConsumption());
     }
-    auto memberCMV = getManagedSubobject(SGF, member, fieldTL,
-                                         src.getFinalConsumption());
+
     destructured.push_back(memberCMV);
   }
 
@@ -2580,7 +2612,7 @@ static void emitDiagnoseOfUnexpectedEnumCase(SILGenFunction &SGF,
 
 void SILGenFunction::emitSwitchStmt(SwitchStmt *S) {
   LLVM_DEBUG(llvm::dbgs() << "emitting switch stmt\n";
-             S->print(llvm::dbgs());
+             S->dump(llvm::dbgs());
              llvm::dbgs() << '\n');
   // If the subject expression is uninhabited, we're already dead.
   // Emit an unreachable in place of the switch statement.
@@ -2702,9 +2734,39 @@ void SILGenFunction::emitSwitchStmt(SwitchStmt *S) {
   PatternMatchContext switchContext = { emission };
   SwitchStack.push_back(&switchContext);
 
-  // Emit the subject value. Dispatching will consume it.
-  ManagedValue subjectMV = emitRValueAsSingleValue(S->getSubjectExpr());
-  auto subject = ConsumableManagedValue::forOwned(subjectMV);
+  // Emit the subject value. If at +1, dispatching will consume it. If it is at
+  // +0, we just forward down borrows.
+  ManagedValue subjectMV = emitRValueAsSingleValue(
+      S->getSubjectExpr(), SGFContext::AllowGuaranteedPlusZero);
+
+  // Inline constructor for subject.
+  auto subject = ([&]() -> ConsumableManagedValue {
+    // If we have a plus one value...
+    if (subjectMV.isPlusOne(*this)) {
+      // And we have an address that is loadable, perform a load [take].
+      if (subjectMV.getType().isAddress() &&
+          subjectMV.getType().isLoadable(getModule())) {
+        subjectMV = B.createLoadTake(S, subjectMV);
+      }
+      return {subjectMV, CastConsumptionKind::TakeAlways};
+    }
+
+    // If we have a loadable address and +0, perform a load borrow.
+    if (subjectMV.getType().isAddress() &&
+        subjectMV.getType().isLoadable(getModule())) {
+      subjectMV = B.createLoadBorrow(S, subjectMV);
+    }
+
+    // If then we have an object, return it at +0.
+    if (subjectMV.getType().isObject()) {
+      return {subjectMV, CastConsumptionKind::BorrowAlways};
+    }
+
+    // If we have an address only type returned without a cleanup, we
+    // need to do a copy just to be safe. So for efficiency we pass it
+    // down take_always.
+    return {subjectMV.copy(*this, S), CastConsumptionKind::TakeAlways};
+  }());
 
   auto failure = [&](SILLocation location) {
     // If we fail to match anything, we trap. This can happen with a switch
@@ -2829,13 +2891,14 @@ void SILGenFunction::emitCatchDispatch(DoCatchStmt *S, ManagedValue exn,
 
   // Set up an initial clause matrix.
   ClauseMatrix clauseMatrix(clauseRows);
-  ConsumableManagedValue subject;
-  if (F.getModule().getOptions().EnableSILOwnership &&
-      exn.getType().isObject()) {
-    subject = {exn.borrow(*this, S), CastConsumptionKind::BorrowAlways};
-  } else {
-    subject = {exn, CastConsumptionKind::TakeOnSuccess};
-  }
+
+  assert(exn.getType().isObject() &&
+         "Error is special and should always be an object");
+  // Our model is that sub-cases get the exception at +0 and the throw (if we
+  // need to rethrow the exception) gets the exception at +1 since we need to
+  // trampoline it's ownership to our caller.
+  ConsumableManagedValue subject = {exn.borrow(*this, S),
+                                    CastConsumptionKind::BorrowAlways};
 
   auto failure = [&](SILLocation location) {
     // If we fail to match anything, just rethrow the exception.
@@ -2848,7 +2911,10 @@ void SILGenFunction::emitCatchDispatch(DoCatchStmt *S, ManagedValue exn,
       return;
     }
 
-    // Don't actually kill the exception's cleanup.
+    // Since we borrowed exn before sending it to our subcases, we know that it
+    // must be at +1 at this point. That being said, SILGenPattern will
+    // potentially invoke this for each of the catch statements, so we need to
+    // copy before we pass it into the throw.
     CleanupStateRestorationScope scope(Cleanups);
     if (exn.hasCleanup()) {
       scope.pushCleanupState(exn.getCleanup(),

@@ -560,10 +560,17 @@ ConstraintSystem::SolverScope::~SolverScope() {
 /// \returns a solution if a single unambiguous one could be found, or None if
 /// ambiguous or unsolvable.
 Optional<Solution>
-ConstraintSystem::solveSingle(FreeTypeVariableBinding allowFreeTypeVariables) {
+ConstraintSystem::solveSingle(FreeTypeVariableBinding allowFreeTypeVariables,
+                              bool allowFixes) {
+
+  SolverState state(nullptr, *this, allowFreeTypeVariables);
+  state.recordFixes = allowFixes;
+
   SmallVector<Solution, 4> solutions;
-  if (solve(nullptr, solutions, allowFreeTypeVariables) ||
-      solutions.size() != 1)
+  solve(solutions);
+  filterSolutions(solutions, state.ExprWeights);
+
+  if (solutions.size() != 1)
     return Optional<Solution>();
 
   return std::move(solutions[0]);
@@ -628,7 +635,7 @@ bool ConstraintSystem::Candidate::solve(
     }
     log << " ---\n";
 
-    E->print(log);
+    E->dump(log);
     log << '\n';
     cs.print(log);
   }
@@ -1218,7 +1225,7 @@ ConstraintSystem::solveImpl(Expr *&expr,
     auto &log = getASTContext().TypeCheckerDebug->getStream();
     log << "---Initial constraints for the given expression---\n";
 
-    expr->print(log, getTypeOfExpr, getTypeOfTypeLoc);
+    expr->dump(log, getTypeOfExpr, getTypeOfTypeLoc);
     log << "\n";
     print(log);
   }
@@ -1683,6 +1690,145 @@ getOperatorDesignatedNominalTypes(Constraint *bindOverload) {
   return operatorDecl->getDesignatedNominalTypes();
 }
 
+void ConstraintSystem::sortDesignatedTypes(
+    SmallVectorImpl<NominalTypeDecl *> &nominalTypes,
+    Constraint *bindOverload) {
+  auto *tyvar = bindOverload->getFirstType()->castTo<TypeVariableType>();
+  llvm::SetVector<Constraint *> applicableFns;
+  getConstraintGraph().gatherConstraints(
+      tyvar, applicableFns, ConstraintGraph::GatheringKind::EquivalenceClass,
+      [](Constraint *match) {
+        return match->getKind() == ConstraintKind::ApplicableFunction;
+      });
+
+  // FIXME: This is not true when we run the constraint optimizer.
+  // assert(applicableFns.size() <= 1);
+
+  // We have a disjunction for an operator but no application of it,
+  // so it's being passed as an argument.
+  if (applicableFns.size() == 0)
+    return;
+
+  // FIXME: We have more than one applicable per disjunction as a
+  //        result of merging disjunction type variables. We may want
+  //        to rip that out at some point.
+  Constraint *foundApplicable = nullptr;
+  SmallVector<Optional<Type>, 2> argumentTypes;
+  for (auto *applicableFn : applicableFns) {
+    argumentTypes.clear();
+    auto *fnTy = applicableFn->getFirstType()->castTo<FunctionType>();
+    ArgumentInfoCollector argInfo(*this, fnTy);
+    // Stop if we hit anything with concrete types or conformances to
+    // literals.
+    if (!argInfo.getTypes().empty() || !argInfo.getLiteralProtocols().empty()) {
+      foundApplicable = applicableFn;
+      break;
+    }
+  }
+
+  if (!foundApplicable)
+    return;
+
+  // FIXME: It would be good to avoid this redundancy.
+  auto *fnTy = foundApplicable->getFirstType()->castTo<FunctionType>();
+  ArgumentInfoCollector argInfo(*this, fnTy);
+
+  size_t nextType = 0;
+  for (auto argType : argInfo.getTypes()) {
+    auto *nominal = argType->getAnyNominal();
+    for (size_t i = nextType + 1; i < nominalTypes.size(); ++i) {
+      if (nominal == nominalTypes[i]) {
+        std::swap(nominalTypes[nextType], nominalTypes[i]);
+        ++nextType;
+        break;
+      }
+    }
+  }
+
+  if (nextType + 1 >= nominalTypes.size())
+    return;
+
+  for (auto *protocol : argInfo.getLiteralProtocols()) {
+    auto defaultType = TC.getDefaultType(protocol, DC);
+    auto *nominal = defaultType->getAnyNominal();
+    for (size_t i = nextType + 1; i < nominalTypes.size(); ++i) {
+      if (nominal == nominalTypes[i]) {
+        std::swap(nominalTypes[nextType], nominalTypes[i]);
+        ++nextType;
+        break;
+      }
+    }
+  }
+}
+
+void ConstraintSystem::partitionForDesignatedTypes(
+    ArrayRef<Constraint *> Choices, ConstraintMatchLoop forEachChoice,
+    PartitionAppendCallback appendPartition) {
+
+  auto types = getOperatorDesignatedNominalTypes(Choices[0]);
+  if (types.empty())
+    return;
+
+  SmallVector<NominalTypeDecl *, 4> designatedNominalTypes(types.begin(),
+                                                           types.end());
+
+  if (designatedNominalTypes.size() > 1)
+    sortDesignatedTypes(designatedNominalTypes, Choices[0]);
+
+  SmallVector<SmallVector<unsigned, 4>, 4> definedInDesignatedType;
+  SmallVector<SmallVector<unsigned, 4>, 4> definedInExtensionOfDesignatedType;
+
+  auto examineConstraint =
+    [&](unsigned constraintIndex, Constraint *constraint) -> bool {
+    auto *decl = constraint->getOverloadChoice().getDecl();
+    auto *funcDecl = cast<FuncDecl>(decl);
+
+    auto *parentDC = funcDecl->getParent();
+    auto *parentDecl = parentDC->getAsDecl();
+
+    if (parentDC->isExtensionContext())
+      parentDecl = cast<ExtensionDecl>(parentDecl)->getExtendedNominal();
+
+    for (auto designatedTypeIndex : indices(designatedNominalTypes)) {
+      auto *designatedNominal =
+        designatedNominalTypes[designatedTypeIndex];
+
+      if (parentDecl != designatedNominal)
+        continue;
+
+      auto &constraints =
+          parentDC->isExtensionContext()
+              ? definedInExtensionOfDesignatedType[designatedTypeIndex]
+              : definedInDesignatedType[designatedTypeIndex];
+
+      constraints.push_back(constraintIndex);
+      return true;
+    }
+
+    return false;
+  };
+
+  definedInDesignatedType.resize(designatedNominalTypes.size());
+  definedInExtensionOfDesignatedType.resize(designatedNominalTypes.size());
+
+  forEachChoice(Choices, examineConstraint);
+
+  // Now collect the overload choices that are defined within the type
+  // that was designated in the operator declaration.
+  // Add partitions for each of the overloads we found in types that
+  // were designated as part of the operator declaration.
+  for (auto designatedTypeIndex : indices(designatedNominalTypes)) {
+    if (designatedTypeIndex < definedInDesignatedType.size()) {
+      auto &primary = definedInDesignatedType[designatedTypeIndex];
+      appendPartition(primary);
+    }
+    if (designatedTypeIndex < definedInExtensionOfDesignatedType.size()) {
+      auto &secondary = definedInExtensionOfDesignatedType[designatedTypeIndex];
+      appendPartition(secondary);
+    }
+  }
+}
+
 void ConstraintSystem::partitionDisjunction(
     ArrayRef<Constraint *> Choices, SmallVectorImpl<unsigned> &Ordering,
     SmallVectorImpl<unsigned> &PartitionBeginning) {
@@ -1702,20 +1848,14 @@ void ConstraintSystem::partitionDisjunction(
     return;
   }
 
-  SmallVector<unsigned, 4> disabled;
-  SmallVector<unsigned, 4> unavailable;
-  SmallVector<unsigned, 4> globalScope;
-  SmallVector<SmallVector<unsigned, 4>, 4> definedInDesignatedType;
-  SmallVector<SmallVector<unsigned, 4>, 4> definedInExtensionOfDesignatedType;
-  SmallVector<unsigned, 4> everythingElse;
   SmallSet<Constraint *, 16> taken;
 
   // Local function used to iterate over the untaken choices from the
   // disjunction and use a higher-order function to determine if they
   // should be part of a partition.
-  auto forEachChoice =
+  ConstraintMatchLoop forEachChoice =
       [&](ArrayRef<Constraint *>,
-          llvm::function_ref<bool(unsigned index, Constraint *)> fn) {
+          std::function<bool(unsigned index, Constraint *)> fn) {
         for (auto index : indices(Choices)) {
           auto *constraint = Choices[index];
           if (taken.count(constraint))
@@ -1728,6 +1868,13 @@ void ConstraintSystem::partitionDisjunction(
             taken.insert(constraint);
         }
       };
+
+  // First collect some things that we'll generally put near the end
+  // of the partitioning.
+
+  SmallVector<unsigned, 4> disabled;
+  SmallVector<unsigned, 4> unavailable;
+  SmallVector<unsigned, 4> globalScope;
 
   // First collect disabled constraints.
   forEachChoice(Choices, [&](unsigned index, Constraint *constraint) -> bool {
@@ -1765,77 +1912,27 @@ void ConstraintSystem::partitionDisjunction(
     return true;
   });
 
-  // Now collect the overload choices that are defined within the type
-  // that was designated in the operator declaration.
-  auto designatedNominalTypes = getOperatorDesignatedNominalTypes(Choices[0]);
-  if (!designatedNominalTypes.empty()) {
-    forEachChoice(
-        Choices, [&](unsigned constraintIndex, Constraint *constraint) -> bool {
-          auto *decl = constraint->getOverloadChoice().getDecl();
-          auto *funcDecl = cast<FuncDecl>(decl);
+  // Local function to create the next partition based on the options
+  // passed in.
+  PartitionAppendCallback appendPartition =
+      [&](SmallVectorImpl<unsigned> &options) {
+        if (options.size()) {
+          PartitionBeginning.push_back(Ordering.size());
+          Ordering.insert(Ordering.end(), options.begin(), options.end());
+        }
+      };
 
-          auto *parentDecl = funcDecl->getParent()->getAsDecl();
-          for (auto designatedTypeIndex : indices(designatedNominalTypes)) {
-            auto *designatedNominal =
-                designatedNominalTypes[designatedTypeIndex];
-            if (parentDecl == designatedNominal) {
-              if (designatedTypeIndex >= definedInDesignatedType.size())
-                definedInDesignatedType.resize(designatedTypeIndex + 1);
-              auto &constraints = definedInDesignatedType[designatedTypeIndex];
-              constraints.push_back(constraintIndex);
-              return true;
-            }
+  partitionForDesignatedTypes(Choices, forEachChoice, appendPartition);
 
-            if (auto *extensionDecl = dyn_cast<ExtensionDecl>(parentDecl)) {
-              parentDecl = extensionDecl->getExtendedNominal();
-              if (parentDecl == designatedNominal) {
-                if (designatedTypeIndex >=
-                    definedInExtensionOfDesignatedType.size())
-                  definedInExtensionOfDesignatedType.resize(
-                      designatedTypeIndex + 1);
-
-                auto &constraints =
-                    definedInExtensionOfDesignatedType[designatedTypeIndex];
-                constraints.push_back(constraintIndex);
-                return true;
-              }
-            }
-          }
-
-          return false;
-        });
-  }
-
+  SmallVector<unsigned, 4> everythingElse;
   // Gather the remaining options.
   forEachChoice(Choices, [&](unsigned index, Constraint *constraint) -> bool {
     everythingElse.push_back(index);
     return true;
   });
-
-  // Local function to create the next partition based on the options
-  // passed in.
-  auto appendPartition = [&](SmallVectorImpl<unsigned> &options) {
-    if (options.size()) {
-      PartitionBeginning.push_back(Ordering.size());
-      Ordering.insert(Ordering.end(), options.begin(), options.end());
-    }
-  };
-
-  // Now create the partitioning based on what was collected.
-
-  // First we'll add partitions for each of the overloads we found in
-  // types that were designated as part of the operator declaration.
-  for (auto designatedTypeIndex : indices(designatedNominalTypes)) {
-    if (designatedTypeIndex < definedInDesignatedType.size()) {
-      auto &primary = definedInDesignatedType[designatedTypeIndex];
-      appendPartition(primary);
-    }
-    if (designatedTypeIndex < definedInExtensionOfDesignatedType.size()) {
-      auto &secondary = definedInExtensionOfDesignatedType[designatedTypeIndex];
-      appendPartition(secondary);
-    }
-  }
   appendPartition(everythingElse);
+
+  // Now create the remaining partitions from what we previously collected.
   appendPartition(globalScope);
   appendPartition(unavailable);
   appendPartition(disabled);
