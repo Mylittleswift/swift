@@ -2461,6 +2461,25 @@ public:
       }
     }
 
+    // Reject variable if it is a stored property with an uninhabited type
+    if (VD->hasStorage() && 
+        VD->getInterfaceType()->isStructurallyUninhabited()) {
+      auto uninhabitedTypeDiag = diag::pattern_no_uninhabited_type;
+      
+      if (VD->getInterfaceType()->is<TupleType>()) {
+        uninhabitedTypeDiag = diag::pattern_no_uninhabited_tuple_type;
+      } else {
+        assert((VD->getInterfaceType()->is<EnumType>() || 
+                VD->getInterfaceType()->is<BoundGenericEnumType>()) && 
+          "unknown structurally uninhabited type");
+      }
+          
+      TC.diagnose(VD->getLoc(), uninhabitedTypeDiag, VD->isLet(),
+                  VD->isInstanceMember(), VD->getName(),
+                  VD->getInterfaceType());
+      VD->markInvalid();
+    }
+
     if (!checkOverrides(VD)) {
       // If a property has an override attribute but does not override
       // anything, complain.
@@ -3206,19 +3225,6 @@ public:
 
     TC.checkDeclAttributesEarly(ED);
 
-    if (auto extendedTy = ED->getExtendedType()) {
-      if (!extendedTy->is<NominalType>() &&
-          !extendedTy->is<BoundGenericType>() &&
-          !extendedTy->hasError()) {
-        // FIXME: Redundant diagnostic test here?
-        TC.diagnose(ED->getStartLoc(), diag::non_nominal_extension,
-                    extendedTy);
-        // FIXME: It would be nice to point out where we found the named type
-        // declaration, if any.
-        ED->setInvalid();
-      }
-    }
-
     checkInheritanceClause(ED);
 
     if (auto nominal = ED->getExtendedNominal()) {
@@ -3254,8 +3260,8 @@ public:
     // nominal type.
     // FIXME: This is a hack to make sure that the type checker precomputes
     // enough information for later passes that might query conformances.
-    if (auto nominal = ED->getSelfNominalTypeDecl())
-      (void)nominal->getAllConformances();
+    if (auto nominal = ED->getExtendedNominal())
+      (void) nominal->getAllConformances();
   }
 
   void visitTopLevelCodeDecl(TopLevelCodeDecl *TLCD) {
@@ -4968,6 +4974,13 @@ void TypeChecker::validateExtension(ExtensionDecl *ext) {
   // Extensions nested inside other declarations are invalid and we
   // do not bind them.
   if (!isa<SourceFile>(dc))
+    return;
+
+  // If this is not bound to any decls at this point, this extension is in
+  // inactive coditional compilation block. It's not safe to typecheck this
+  // extension. This happens if code completion is triggered in inactive
+  // conditional complation block.
+  if (!ext->alreadyBoundToNominal())
     return;
 
   // Validate the nominal type declaration being extended.

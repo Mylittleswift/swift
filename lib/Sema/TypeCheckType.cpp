@@ -149,6 +149,9 @@ Type TypeResolution::resolveDependentMemberType(
   }
 
   assert(stage == TypeResolutionStage::Interface);
+  if (!getGenericSignature())
+    return ErrorType::get(baseTy);
+
   auto builder = getGenericSignatureBuilder();
   auto baseEquivClass =
     builder->resolveEquivalenceClass(
@@ -817,7 +820,8 @@ Type TypeChecker::applyUnboundGenericArguments(
   // Check the generic arguments against the requirements of the declaration's
   // generic signature.
   auto dc = resolution.getDeclContext();
-  if (!hasTypeVariable) {
+  if (!hasTypeVariable &&
+      resolution.getStage() > TypeResolutionStage::Structural) {
     auto result =
       checkGenericArguments(dc, loc, noteLoc, unboundType,
                             genericSig->getGenericParams(),

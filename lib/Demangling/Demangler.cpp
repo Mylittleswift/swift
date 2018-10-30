@@ -1540,6 +1540,8 @@ NodePointer Demangler::demangleMetatype() {
       return createWithChild(Node::Kind::ProtocolDescriptor, popProtocol());
     case 'u':
       return createWithPoppedType(Node::Kind::MethodLookupFunction);
+    case 'U':
+      return createWithPoppedType(Node::Kind::ObjCMetadataUpdateFunction);
     case 'B':
       return createWithChild(Node::Kind::ReflectionMetadataBuiltinDescriptor,
                              popNode(Node::Kind::Type));
@@ -1683,6 +1685,10 @@ NodePointer Demangler::popAssocTypeName() {
   NodePointer Proto = popNode(Node::Kind::Type);
   if (Proto && !isProtocolNode(Proto))
     return nullptr;
+
+  // If we haven't seen a protocol, check for a symbolic reference.
+  if (!Proto)
+    Proto = popNode(Node::Kind::ProtocolSymbolicReference);
 
   NodePointer Id = popNode(Node::Kind::Identifier);
   NodePointer AssocTy = changeKind(Id, Node::Kind::DependentAssociatedTypeRef);
