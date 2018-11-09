@@ -573,7 +573,7 @@ protected:
     HasAnyUnavailableValues : 1
   );
 
-  SWIFT_INLINE_BITFIELD(ModuleDecl, TypeDecl, 1+1+1+1,
+  SWIFT_INLINE_BITFIELD(ModuleDecl, TypeDecl, 1+1+1+1+1,
     /// If the module was or is being compiled with `-enable-testing`.
     TestingEnabled : 1,
 
@@ -586,7 +586,10 @@ protected:
     RawResilienceStrategy : 1,
 
     /// Whether all imports have been resolved. Used to detect circular imports.
-    HasResolvedImports : 1
+    HasResolvedImports : 1,
+
+    // If the module was or is being compiled with `-enable-private-imports`.
+    PrivateImportsEnabled : 1
   );
 
   SWIFT_INLINE_BITFIELD(PrecedenceGroupDecl, Decl, 1+2,
@@ -2589,6 +2592,10 @@ public:
 
   /// Is this declaration marked with 'dynamic'?
   bool isDynamic() const;
+
+  bool isObjCDynamic() const {
+    return isObjC() && isDynamic();
+  }
 
   /// Set whether this type is 'dynamic' or not.
   void setIsDynamic(bool value);
@@ -6789,12 +6796,6 @@ inline const GenericContext *Decl::getAsGenericContext() const {
     return static_cast<const Id##Decl*>(this);
 #include "swift/AST/DeclNodes.def"
   }
-}
-
-inline bool DeclContext::isExtensionContext() const {
-  if (auto D = getAsDecl())
-    return ExtensionDecl::classof(D);
-  return false;
 }
 
 inline bool DeclContext::classof(const Decl *D) {

@@ -86,15 +86,23 @@ struct is_apply_expr
               std::is_same<Ty, ConstructorRefCallExpr>::value> {};
 
 template <typename Ty>
+struct is_subscript_expr
+    : public std::integral_constant<
+          bool, std::is_same<Ty, SubscriptExpr>::value ||
+                    std::is_same<Ty, DynamicSubscriptExpr>::value> {};
+
+template <typename Ty>
 struct is_autoclosure_expr
     : public std::integral_constant<bool,
                                     std::is_same<Ty, AutoClosureExpr>::value> {
 };
 
 template <typename Ty>
-struct is_apply_or_autoclosure_expr
-    : public std::integral_constant<
-          bool, is_apply_expr<Ty>::value || is_autoclosure_expr<Ty>::value> {};
+struct is_apply_subscript_or_autoclosure_expr
+    : public std::integral_constant<bool, is_apply_expr<Ty>::value ||
+                                              is_subscript_expr<Ty>::value ||
+                                              is_autoclosure_expr<Ty>::value> {
+};
 
 template <typename Verifier, typename Kind>
 std::pair<bool, Expr *> dispatchVisitPreExprHelper(
@@ -106,6 +114,22 @@ std::pair<bool, Expr *> dispatchVisitPreExprHelper(
     // Record any inout_to_pointer or array_to_pointer that we see in
     // the proper position.
     V.maybeRecordValidPointerConversion(node, node->getArg());
+    return {true, node};
+  }
+  V.cleanup(node);
+  return {false, node};
+}
+
+template <typename Verifier, typename Kind>
+std::pair<bool, Expr *> dispatchVisitPreExprHelper(
+    Verifier &V,
+    typename std::enable_if<
+        is_subscript_expr<typename std::remove_pointer<Kind>::type>::value,
+        Kind>::type node) {
+  if (V.shouldVerify(node)) {
+    // Record any inout_to_pointer or array_to_pointer that we see in
+    // the proper position.
+    V.maybeRecordValidPointerConversion(node, node->getIndex());
     return {true, node};
   }
   V.cleanup(node);
@@ -131,7 +155,7 @@ std::pair<bool, Expr *> dispatchVisitPreExprHelper(
 template <typename Verifier, typename Kind>
 std::pair<bool, Expr *> dispatchVisitPreExprHelper(
     Verifier &V, typename std::enable_if<
-                     !is_apply_or_autoclosure_expr<
+                     !is_apply_subscript_or_autoclosure_expr<
                          typename std::remove_pointer<Kind>::type>::value,
                      Kind>::type node) {
   if (V.shouldVerify(node)) {
@@ -3009,10 +3033,9 @@ public:
           abort();
         }
 
-        if (AD->getAccessorKind() != AccessorKind::Read &&
-            AD->getAccessorKind() != AccessorKind::Modify) {
-          Out << "hasForcedStaticDispatch() set on accessor other than "
-                 "read or modify\n";
+        if (AD->getStorage()->requiresOpaqueAccessor(AD->getAccessorKind())) {
+          Out << "hasForcedStaticDispatch() set on accessor that's opaque "
+                 "for its storage\n";
           abort();
         }
       }
@@ -3076,9 +3099,28 @@ public:
           Out << "Property and accessor do not match for 'final'\n";
           abort();
         }
-        if (FD->isDynamic() != storageDecl->isDynamic()) {
+        if (FD->isDynamic() != storageDecl->isDynamic() &&
+            // We allow a non dynamic setter if there is a dynamic modify,
+            // observer, or mutable addressor.
+            !(FD->isSetter() &&
+              (storageDecl->getWriteImpl() == WriteImplKind::Modify ||
+               storageDecl->getWriteImpl() ==
+                   WriteImplKind::StoredWithObservers ||
+               storageDecl->getWriteImpl() == WriteImplKind::MutableAddress) &&
+              storageDecl->isDynamic() && !storageDecl->isObjC()) &&
+            // We allow a non dynamic getter if there is a dynamic read.
+            !(FD->isGetter() &&
+              (storageDecl->getReadImpl() == ReadImplKind::Read ||
+               storageDecl->getReadImpl() == ReadImplKind::Address) &&
+              storageDecl->isDynamic() && !storageDecl->isObjC())) {
           Out << "Property and accessor do not match for 'dynamic'\n";
           abort();
+        }
+        if (FD->isDynamic()) {
+          if (FD->isObjC() != storageDecl->isObjC()) {
+            Out << "Property and accessor do not match for '@objc'\n";
+            abort();
+          }
         }
       }
 
