@@ -90,6 +90,10 @@ The following symbolic reference kinds are currently implemented:
    dependent-associated-conformance ::= '\x05' .{4}  // Reference points directly to associated conformance descriptor (NOT IMPLEMENTED)
    dependent-associated-conformance ::= '\x06' .{4}  // Reference points indirectly to associated conformance descriptor (NOT IMPLEMENTED)
 
+   associated-conformance-acceess-function ::= '\x07' .{4}  // Reference points directly to associated conformance access function relative to the protocol
+   associated-conformance-acceess-function ::= '\x08' .{4}  // Reference points directly to associated conformance access function relative to the conforming type
+   keypath-metadata-access-function ::= '\x09' {.4}  // Reference points directly to keypath type metadata access function
+
 Globals
 ~~~~~~~
 
@@ -191,8 +195,8 @@ types where the metadata itself has unknown layout.)
   global ::= protocol 'TL'               // protocol requirements base descriptor
   global ::= assoc-type-name 'Tl'        // associated type descriptor
   global ::= assoc-type-name 'TM'        // default associated type witness accessor (HISTORICAL)
-  global ::= type assoc-type-path protocol 'Tn' // associated conformance descriptor
-  global ::= type assoc-type-path protocol 'TN' // default associated conformance witness accessor
+  global ::= type assoc-type-list protocol 'Tn' // associated conformance descriptor
+  global ::= type assoc-type-list protocol 'TN' // default associated conformance witness accessor
 
   REABSTRACT-THUNK-TYPE ::= 'R'          // reabstraction thunk helper function
   REABSTRACT-THUNK-TYPE ::= 'r'          // reabstraction thunk
@@ -289,8 +293,8 @@ Entities
   ACCESSOR ::= 'p'                           // pseudo accessor referring to the storage itself
 
   ADDRESSOR-KIND ::= 'u'                     // unsafe addressor (no owner)
-  ADDRESSOR-KIND ::= 'O'                     // owning addressor (non-native owner)
-  ADDRESSOR-KIND ::= 'o'                     // owning addressor (native owner)
+  ADDRESSOR-KIND ::= 'O'                     // owning addressor (non-native owner), not used anymore
+  ADDRESSOR-KIND ::= 'o'                     // owning addressor (native owner), not used anymore
   ADDRESSOR-KIND ::= 'p'                     // pinning addressor (native owner), not used anymore
 
   decl-name ::= identifier

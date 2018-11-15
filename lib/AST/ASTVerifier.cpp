@@ -2738,6 +2738,48 @@ public:
       verifyCheckedBase(nominal);
     }
 
+    void verifyCheckedAlways(GenericTypeParamDecl *GTPD) {
+      PrettyStackTraceDecl debugStack("verifying GenericTypeParamDecl", GTPD);
+
+      const DeclContext *DC = GTPD->getDeclContext();
+      if (!GTPD->getDeclContext()->isInnermostContextGeneric()) {
+        Out << "DeclContext of GenericTypeParamDecl does not have "
+               "generic params\n";
+        abort();
+      }
+
+      GenericParamList *paramList =
+          static_cast<const GenericContext *>(DC)->getGenericParams();
+      if (!paramList) {
+        Out << "DeclContext of GenericTypeParamDecl does not have "
+               "generic params\n";
+        abort();
+      }
+
+      unsigned currentDepth = paramList->getDepth();
+      if (currentDepth < GTPD->getDepth()) {
+        Out << "GenericTypeParamDecl has incorrect depth\n";
+        abort();
+      }
+      while (currentDepth > GTPD->getDepth()) {
+        paramList = paramList->getOuterParameters();
+        --currentDepth;
+      }
+      assert(paramList && "this is guaranteed by the parameter list's depth");
+
+      if (paramList->size() <= GTPD->getIndex() ||
+          paramList->getParams()[GTPD->getIndex()] != GTPD) {
+        if (llvm::is_contained(paramList->getParams(), GTPD))
+          Out << "GenericTypeParamDecl has incorrect index\n";
+        else
+          Out << "GenericTypeParamDecl not found in GenericParamList; "
+                 "incorrect depth or wrong DeclContext\n";
+        abort();
+      }
+
+      verifyCheckedBase(GTPD);
+    }
+
     void verifyChecked(ExtensionDecl *ext) {
       // Make sure that the protocol conformances are complete.
       for (auto conformance : ext->getLocalConformances()) {
@@ -3107,12 +3149,12 @@ public:
                storageDecl->getWriteImpl() ==
                    WriteImplKind::StoredWithObservers ||
                storageDecl->getWriteImpl() == WriteImplKind::MutableAddress) &&
-              storageDecl->isDynamic() && !storageDecl->isObjC()) &&
+              storageDecl->isNativeDynamic()) &&
             // We allow a non dynamic getter if there is a dynamic read.
             !(FD->isGetter() &&
               (storageDecl->getReadImpl() == ReadImplKind::Read ||
                storageDecl->getReadImpl() == ReadImplKind::Address) &&
-              storageDecl->isDynamic() && !storageDecl->isObjC())) {
+              storageDecl->isNativeDynamic())) {
           Out << "Property and accessor do not match for 'dynamic'\n";
           abort();
         }
@@ -3128,28 +3170,6 @@ public:
       if (storedAccessor != FD) {
         Out << "storage declaration has different accessor for this kind\n";
         abort();
-      }
-
-      switch (FD->getAccessorKind()) {
-      case AccessorKind::Get:
-      case AccessorKind::Set:
-      case AccessorKind::WillSet:
-      case AccessorKind::DidSet:
-      case AccessorKind::Read:
-      case AccessorKind::Modify:
-        if (FD->getAddressorKind() != AddressorKind::NotAddressor) {
-          Out << "non-addressor accessor has an addressor kind\n";
-          abort();
-        }
-        break;
-
-      case AccessorKind::Address:
-      case AccessorKind::MutableAddress:
-        if (FD->getAddressorKind() == AddressorKind::NotAddressor) {
-          Out << "addressor does not have an addressor kind\n";
-          abort();
-        }
-        break;
       }
 
       verifyCheckedBase(FD);

@@ -1214,6 +1214,11 @@ IsDynamicRequest::evaluate(Evaluator &evaluator, ValueDecl *decl) const {
   if (!DeclAttribute::canAttributeAppearOnDecl(DAK_Dynamic, decl))
     return false;
 
+  // Add dynamic if -enable-implicit-dynamic was requested.
+  if (decl->getModuleContext()->isImplicitDynamicEnabled()) {
+    TypeChecker::addImplicitDynamicAttribute(decl);
+  }
+
   // If 'dynamic' was explicitly specified, check it.
   if (decl->getAttrs().hasAttribute<DynamicAttr>()) {
     if (decl->getASTContext().LangOpts.isSwiftVersionAtLeast(5))
@@ -2541,25 +2546,6 @@ public:
       }
     }
 
-    // Reject variable if it is a stored property with an uninhabited type
-    if (VD->hasStorage() && 
-        VD->getInterfaceType()->isStructurallyUninhabited()) {
-      auto uninhabitedTypeDiag = diag::pattern_no_uninhabited_type;
-      
-      if (VD->getInterfaceType()->is<TupleType>()) {
-        uninhabitedTypeDiag = diag::pattern_no_uninhabited_tuple_type;
-      } else {
-        assert((VD->getInterfaceType()->is<EnumType>() || 
-                VD->getInterfaceType()->is<BoundGenericEnumType>()) && 
-          "unknown structurally uninhabited type");
-      }
-          
-      TC.diagnose(VD->getLoc(), uninhabitedTypeDiag, VD->isLet(),
-                  VD->isInstanceMember(), VD->getName(),
-                  VD->getInterfaceType());
-      VD->markInvalid();
-    }
-
     if (!checkOverrides(VD)) {
       // If a property has an override attribute but does not override
       // anything, complain.
@@ -2745,8 +2731,6 @@ public:
   }
 
   void visitSubscriptDecl(SubscriptDecl *SD) {
-    TC.addImplicitDynamicAttribute(SD);
-
     TC.validateDecl(SD);
 
     if (!SD->isInvalid()) {
@@ -3155,6 +3139,7 @@ public:
     if (!PD->hasValidSignature())
       return;
 
+    auto *SF = PD->getParentSourceFile();
     {
       // Check for circular inheritance within the protocol.
       SmallVector<ProtocolDecl *, 8> path;
@@ -3162,7 +3147,7 @@ public:
       checkCircularity(TC, PD, diag::circular_protocol_def,
                        DescriptiveDeclKind::Protocol, path);
 
-      if (auto *SF = PD->getParentSourceFile()) {
+      if (SF) {
         if (auto *tracker = SF->getReferencedNameTracker()) {
           bool isNonPrivate =
               (PD->getFormalAccess() > AccessLevel::FilePrivate);
@@ -3184,7 +3169,8 @@ public:
 
     TC.checkDeclCircularity(PD);
     if (PD->isResilient())
-      TC.inferDefaultWitnesses(PD);
+      if (!SF || SF->Kind != SourceFileKind::Interface)
+        TC.inferDefaultWitnesses(PD);
 
     if (TC.Context.LangOpts.DebugGenericSignatures) {
       auto requirementsSig =
@@ -3214,8 +3200,6 @@ public:
   }
 
   void visitVarDecl(VarDecl *VD) {
-    TC.addImplicitDynamicAttribute(VD);
-
     // Delay type-checking on VarDecls until we see the corresponding
     // PatternBindingDecl.
 
@@ -3267,8 +3251,6 @@ public:
   }
 
   void visitFuncDecl(FuncDecl *FD) {
-    TC.addImplicitDynamicAttribute(FD);
-
     TC.validateDecl(FD);
 
     if (!FD->isInvalid()) {
@@ -3385,7 +3367,6 @@ public:
   }
 
   void visitConstructorDecl(ConstructorDecl *CD) {
-    TC.addImplicitDynamicAttribute(CD);
     TC.validateDecl(CD);
 
     if (!CD->isInvalid()) {
@@ -3819,37 +3800,7 @@ Type buildAddressorResultType(TypeChecker &TC,
     (addressor->getAccessorKind() == AccessorKind::Address)
       ? TC.getUnsafePointerType(addressor->getLoc(), valueType)
       : TC.getUnsafeMutablePointerType(addressor->getLoc(), valueType);
-  if (!pointerType) return Type();
-
-  switch (addressor->getAddressorKind()) {
-  case AddressorKind::NotAddressor:
-    llvm_unreachable("addressor without addressor kind");
-
-  // For unsafe addressors, it's just the pointer type.
-  case AddressorKind::Unsafe:
-    return pointerType;
-
-  // For non-native owning addressors, the return type is actually
-  //   (Unsafe{,Mutable}Pointer<T>, AnyObject)
-  case AddressorKind::Owning: {
-    TupleTypeElt elts[] = {
-      pointerType,
-      TC.Context.getAnyObjectType()
-    };
-    return TupleType::get(elts, TC.Context);
-  }
-
-  // For native owning addressors, the return type is actually
-  //   (Unsafe{,Mutable}Pointer<T>, Builtin.NativeObject)
-  case AddressorKind::NativeOwning: {
-    TupleTypeElt elts[] = {
-      pointerType,
-      TC.Context.TheNativeObjectType
-    };
-    return TupleType::get(elts, TC.Context);
-  }
-  }
-  llvm_unreachable("bad addressor kind");
+  return pointerType;
 }
 
 static TypeLoc getTypeLocForFunctionResult(FuncDecl *FD) {

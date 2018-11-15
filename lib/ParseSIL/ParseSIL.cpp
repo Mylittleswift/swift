@@ -264,7 +264,7 @@ namespace {
         return true;
       }
 
-      Result = ValueOwnershipKind(*Iter);
+      Result = T(*Iter);
       return false;
     }
 
@@ -5224,6 +5224,7 @@ bool SILParser::parseSILBasicBlock(SILBuilder &B) {
     F->setUnqualifiedOwnership();
   }
   B.setInsertionPoint(BB);
+  B.setHasOwnership(F->hasQualifiedOwnership());
   do {
     if (parseSILInstruction(B))
       return true;

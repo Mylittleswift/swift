@@ -3644,60 +3644,10 @@ RValue RValueEmitter::visitKeyPathExpr(KeyPathExpr *E, SGFContext C) {
 
 RValue RValueEmitter::
 visitKeyPathApplicationExpr(KeyPathApplicationExpr *E, SGFContext C) {
-  // An rvalue key path application always occurs as a read-only projection of
-  // the base. The base is received maximally abstracted.
-  auto root = SGF.emitMaterializedRValueAsOrig(E->getBase(),
-                                               AbstractionPattern::getOpaque());
-  auto keyPath = SGF.emitRValueAsSingleValue(E->getKeyPath());
+  FormalEvaluationScope scope(SGF);
 
-  auto keyPathDecl = E->getKeyPath()->getType()->getAnyNominal();
-  FuncDecl *projectFn;
-
-  SmallVector<Type, 2> replacementTypes;
-  if (keyPathDecl == SGF.getASTContext().getAnyKeyPathDecl()) {
-    // Invoke projectKeyPathAny with the type of the base value.
-    // The result is always `Any?`.
-    projectFn = SGF.getASTContext().getProjectKeyPathAny(nullptr);
-    replacementTypes.push_back(E->getBase()->getType());
-  } else {
-    auto keyPathTy = E->getKeyPath()->getType()->castTo<BoundGenericType>();
-    if (keyPathDecl == SGF.getASTContext().getPartialKeyPathDecl()) {
-      // Invoke projectKeyPathPartial with the type of the base value.
-      // The result is always `Any`.
-      projectFn = SGF.getASTContext().getProjectKeyPathPartial(nullptr);
-      replacementTypes.push_back(keyPathTy->getGenericArgs()[0]);
-    } else {
-      projectFn = SGF.getASTContext().getProjectKeyPathReadOnly(nullptr);
-      // Get the root and leaf type from the key path type.
-      replacementTypes.push_back(keyPathTy->getGenericArgs()[0]);
-      replacementTypes.push_back(keyPathTy->getGenericArgs()[1]);
-
-      // Upcast the keypath to KeyPath<T, U> if it isn't already.
-      if (keyPathTy->getDecl() != SGF.getASTContext().getKeyPathDecl()) {
-        auto castToTy = BoundGenericType::get(
-                                          SGF.getASTContext().getKeyPathDecl(),
-                                          nullptr,
-                                          keyPathTy->getGenericArgs())
-          ->getCanonicalType();
-        keyPath = SGF.B.createUpcast(SILLocation(E), keyPath,
-                                     SILType::getPrimitiveObjectType(castToTy));
-      }
-    }
-  }
-
-  auto projectionGenericSig = projectFn->getGenericSignature();
-  auto genericArgsMap = SubstitutionMap::get(
-      projectionGenericSig,
-      [&](SubstitutableType *type) -> Type {
-        auto genericParam = cast<GenericTypeParamType>(type);
-        auto index =
-            projectionGenericSig->getGenericParamOrdinal(genericParam);
-        return replacementTypes[index];
-      },
-      LookUpConformanceInSignature(*projectionGenericSig));
-
-  return SGF.emitApplyOfLibraryIntrinsic(SILLocation(E),
-                        projectFn, genericArgsMap, {root, keyPath}, C);
+  auto lv = SGF.emitLValue(E, SGFAccessKind::OwnedObjectRead);
+  return SGF.emitLoadOfLValue(E, std::move(lv), C);
 }
 
 RValue RValueEmitter::
@@ -4364,6 +4314,19 @@ static void emitSimpleAssignment(SILGenFunction &SGF, SILLocation loc,
     // also prevents us from getting into that case.
     if (dest->getType()->isEqual(srcLoad->getSubExpr()->getType())) {
       assert(!dest->getType()->is<TupleType>());
+
+      dest = dest->getSemanticsProvidingExpr();
+      if (isa<DiscardAssignmentExpr>(dest)) {
+        // The logical thing to do here would be emitIgnoredExpr, but that
+        // changed some test results in a way I wanted to avoid, so instead
+        // we're doing this.
+        FormalEvaluationScope writeback(SGF);
+        auto srcLV = SGF.emitLValue(srcLoad->getSubExpr(),
+                                    SGFAccessKind::IgnoredRead);
+        (void) SGF.emitLoadOfLValue(loc, std::move(srcLV), SGFContext());
+        return;
+      }
+
       FormalEvaluationScope writeback(SGF);
       auto destLV = SGF.emitLValue(dest, SGFAccessKind::Write);
       auto srcLV = SGF.emitLValue(srcLoad->getSubExpr(),

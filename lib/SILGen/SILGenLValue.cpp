@@ -120,6 +120,7 @@ void ExclusiveBorrowFormalAccess::diagnoseConflict(
 
   // If the decls match, then this could conflict.
   if (lhsStorage->Storage != rhsStorage->Storage ||
+      !lhsStorage->Storage ||
       lhsStorage->IsSuper != rhsStorage->IsSuper)
     return;
 
@@ -198,18 +199,25 @@ static CanType getSubstFormalRValueType(Expr *expr) {
   return expr->getType()->getRValueType()->getCanonicalType();
 }
 
-static LValueTypeData getLogicalStorageTypeData(SILGenModule &SGM,
-                                                SGFAccessKind accessKind,
-                                                CanType substFormalType) {
-  assert(!isa<ReferenceStorageType>(substFormalType));
-  AbstractionPattern origFormalType(
-      substFormalType.getReferenceStorageReferent());
+static LValueTypeData getAbstractedTypeData(SILGenModule &SGM,
+                                            SGFAccessKind accessKind,
+                                            AbstractionPattern origFormalType,
+                                            CanType substFormalType) {
   return {
     accessKind,
     origFormalType,
     substFormalType,
     SGM.Types.getLoweredType(origFormalType, substFormalType).getObjectType()
   };
+}
+
+static LValueTypeData getLogicalStorageTypeData(SILGenModule &SGM,
+                                                SGFAccessKind accessKind,
+                                                CanType substFormalType) {
+  assert(!isa<ReferenceStorageType>(substFormalType));
+  AbstractionPattern origFormalType(
+      substFormalType.getReferenceStorageReferent());
+  return getAbstractedTypeData(SGM, accessKind, origFormalType, substFormalType);
 }
 
 static LValueTypeData getPhysicalStorageTypeData(SILGenModule &SGM,
@@ -219,12 +227,7 @@ static LValueTypeData getPhysicalStorageTypeData(SILGenModule &SGM,
   assert(!isa<ReferenceStorageType>(substFormalType));
   auto origFormalType = SGM.Types.getAbstractionPattern(storage)
                                  .getReferenceStorageReferentType();
-  return {
-    accessKind,
-    origFormalType,
-    substFormalType,
-    SGM.Types.getLoweredType(origFormalType, substFormalType).getObjectType()
-  };
+  return getAbstractedTypeData(SGM, accessKind, origFormalType, substFormalType);
 }
 
 static bool shouldUseUnsafeEnforcement(VarDecl *var) {
@@ -387,7 +390,7 @@ ManagedValue LogicalPathComponent::project(SILGenFunction &SGF,
   // Push a writeback for the temporary.
   pushWriteback(SGF, loc, std::move(clonedComponent), base,
                 MaterializedLValue(temp));
-  return temp.unmanagedBorrow();
+  return ManagedValue::forLValue(temp.getValue());
 }
 
 void LogicalPathComponent::writeback(SILGenFunction &SGF, SILLocation loc,
@@ -900,9 +903,11 @@ namespace {
       auto refType = base.getType().getObjectType();
       auto &TL = SGF.getTypeLowering(refType);
 
-      // Load the original value.
-      auto result = SGF.emitLoad(loc, base.getValue(), TL,
-                                 SGFContext(), IsNotTake);
+      // Load the original value if necessary.
+      auto result = base.getType().isAddress()
+                      ? SGF.emitLoad(loc, base.getValue(), TL,
+                                     SGFContext(), IsNotTake)
+                      : base;
 
       assert(refType.isAnyExistentialType() &&
              "base for open existential component must be an existential");
@@ -1517,36 +1522,19 @@ namespace {
       assert(SGF.isInFormalEvaluationScope() &&
              "offsetting l-value for modification without writeback scope");
 
-      std::pair<ManagedValue, ManagedValue> result;
+      ManagedValue addr;
       {
         FormalEvaluationScope scope(SGF);
 
         auto args =
             std::move(*this).prepareAccessorArgs(SGF, loc, base, Accessor);
-        result = SGF.emitAddressorAccessor(
+        addr = SGF.emitAddressorAccessor(
             loc, Accessor, Substitutions, std::move(args.base), IsSuper,
             IsDirectAccessorUse, std::move(args.Indices), SubstFieldType,
             IsOnSelfParameter);
       }
 
-      switch (getAccessorDecl()->getAddressorKind()) {
-      case AddressorKind::NotAddressor:
-        llvm_unreachable("not an addressor!");
-
-      // For unsafe addressors, we have no owner pointer to manage.
-      case AddressorKind::Unsafe:
-        assert(!result.second);
-        break;
-
-      // For owning addressors, we can just let the owner get released
-      // at an appropriate point.
-      case AddressorKind::Owning:
-      case AddressorKind::NativeOwning:
-        break;
-      }
-
       // Enter an unsafe access scope for the access.
-      auto addr = result.first;
       addr = enterAccessScope(SGF, loc, addr, getTypeData(), getAccessKind(),
                               SILAccessEnforcement::Unsafe);
 
@@ -1600,6 +1588,26 @@ namespace {
                              IndexExprForDiagnostics};
     }
   };
+}
+
+static void pushEndApplyWriteback(SILGenFunction &SGF, SILLocation loc,
+                                  CleanupHandle endApplyHandle,
+                                  LValueTypeData typeData,
+                                  ManagedValue base = ManagedValue(),
+                                  AbstractStorageDecl *storage = nullptr,
+                                  bool isSuper = false,
+                                  PreparedArguments &&indices
+                                    = PreparedArguments(),
+                                  Expr *indexExprForDiagnostics = nullptr) {
+  std::unique_ptr<LogicalPathComponent>
+    component(new EndApplyPseudoComponent(typeData, endApplyHandle,
+                                          storage, isSuper, std::move(indices),
+                                          indexExprForDiagnostics));
+  pushWriteback(SGF, loc, std::move(component), /*for diagnostics*/ base,
+                MaterializedLValue());
+}
+
+namespace {
 
   /// A physical component which involves calling coroutine accessors.
   class CoroutineAccessorComponent
@@ -1636,13 +1644,9 @@ namespace {
           IsOnSelfParameter);
 
       // Push a writeback that ends the access.
-      std::unique_ptr<LogicalPathComponent>
-        component(new EndApplyPseudoComponent(getTypeData(), endApplyHandle,
-                                              Storage, IsSuper,
-                                              std::move(peekedIndices),
-                                              IndexExprForDiagnostics));
-      pushWriteback(SGF, loc, std::move(component), /*for diagnostics*/ base,
-                    MaterializedLValue());
+      pushEndApplyWriteback(SGF, loc, endApplyHandle, getTypeData(),
+                            base, Storage, IsSuper, std::move(peekedIndices),
+                            IndexExprForDiagnostics);
 
       auto decl = cast<AccessorDecl>(Accessor.getFuncDecl());
 
@@ -1680,208 +1684,214 @@ namespace {
       printBase(OS, indent, "CoroutineAccessorComponent");
     }
   };
-  
-  /// A physical component which involves applying a key path.
-  class KeyPathApplicationComponent final : public PhysicalPathComponent {
-    ArgumentSource KeyPath;
+}
+
+static ManagedValue
+makeBaseConsumableMaterializedRValue(SILGenFunction &SGF,
+                                     SILLocation loc, ManagedValue base) {
+  if (base.isLValue()) {
+    auto tmp = SGF.emitTemporaryAllocation(loc, base.getType());
+    SGF.B.createCopyAddr(loc, base.getValue(), tmp,
+                         IsNotTake, IsInitialization);
+    return SGF.emitManagedBufferWithCleanup(tmp);
+  }
+
+  bool isBorrowed = base.isPlusZeroRValueOrTrivial()
+    && !base.getType().isTrivial(SGF.SGM.M);
+  if (!base.getType().isAddress() || isBorrowed) {
+    auto tmp = SGF.emitTemporaryAllocation(loc, base.getType());
+    if (isBorrowed)
+      base.copyInto(SGF, tmp, loc);
+    else
+      base.forwardInto(SGF, loc, tmp);
+    return SGF.emitManagedBufferWithCleanup(tmp);
+  }
+
+  return base;
+}
+
+static ManagedValue
+emitUpcastToKeyPath(SILGenFunction &SGF, SILLocation loc,
+                    KeyPathTypeKind typeKind, ManagedValue keyPath) {
+  if (typeKind == KPTK_KeyPath) return keyPath;
+  assert(typeKind == KPTK_WritableKeyPath ||
+         typeKind == KPTK_ReferenceWritableKeyPath);
+
+  auto derivedKeyPathTy = keyPath.getType().castTo<BoundGenericType>();
+  auto baseKeyPathTy =
+    BoundGenericType::get(SGF.getASTContext().getKeyPathDecl(),
+                          Type(), derivedKeyPathTy->getGenericArgs())
+      ->getCanonicalType();
+  return SGF.B.createUpcast(loc, keyPath,
+                            SILType::getPrimitiveObjectType(baseKeyPathTy));
+}
+
+namespace {
+  class LogicalKeyPathApplicationComponent final
+      : public LogicalPathComponent {
+    KeyPathTypeKind TypeKind;
+    ManagedValue KeyPath;
+    Type BaseFormalType;
   public:
-    KeyPathApplicationComponent(LValueTypeData typeData,
-                                ArgumentSource &&KeyPath)
-      : PhysicalPathComponent(typeData, KeyPathApplicationKind),
-        KeyPath(std::move(KeyPath))
-    {}
-  
-    // An rvalue base object is passed indirectly +1 so needs to be
-    // materialized if the base we have is +0 or a loaded value.
-    void makeBaseConsumableMaterializedRValue(SILGenFunction &SGF,
-                                              SILLocation loc,
-                                              ManagedValue &base) {
-      if (base.isLValue()) {
-        auto tmp = SGF.emitTemporaryAllocation(loc, base.getType());
-        SGF.B.createCopyAddr(loc, base.getValue(), tmp,
-                             IsNotTake, IsInitialization);
-        base = SGF.emitManagedBufferWithCleanup(tmp);
-        return;
-      }
-
-      bool isBorrowed = base.isPlusZeroRValueOrTrivial()
-        && !base.getType().isTrivial(SGF.SGM.M);
-      if (!base.getType().isAddress() || isBorrowed) {
-        auto tmp = SGF.emitTemporaryAllocation(loc, base.getType());
-        if (isBorrowed)
-          base.copyInto(SGF, tmp, loc);
-        else
-          base.forwardInto(SGF, loc, tmp);
-        base = SGF.emitManagedBufferWithCleanup(tmp);
-      }
+    LogicalKeyPathApplicationComponent(LValueTypeData typeData,
+                                       KeyPathTypeKind typeKind,
+                                       ManagedValue keyPath,
+                                       Type baseFormalType)
+      : LogicalPathComponent(typeData, LogicalKeyPathApplicationKind),
+        TypeKind(typeKind), KeyPath(keyPath), BaseFormalType(baseFormalType) {
+      assert(isReadAccess(getAccessKind()) ||
+             typeKind == KPTK_WritableKeyPath ||
+             typeKind == KPTK_ReferenceWritableKeyPath);
     }
-  
-    ManagedValue mutableOffset(
-                   SILGenFunction &SGF, SILLocation loc, ManagedValue base) && {
-      auto &C = SGF.getASTContext();
-      auto keyPathTy = KeyPath.getSubstRValueType()->castTo<BoundGenericType>();
 
-      FuncDecl *projectionFunction;
-      if (keyPathTy->getDecl() == C.getWritableKeyPathDecl()) {
-        // Turn the base lvalue into a pointer to pass to the projection
-        // function.
-        // This is OK since the materialized base is exclusive-borrowed for the
-        // duration of the access.
-        auto baseRawPtr = SGF.B.createAddressToPointer(loc,
-                              base.getValue(),
-                              SILType::getRawPointerType(SGF.getASTContext()));
-        auto basePtrTy = BoundGenericType::get(C.getUnsafeMutablePointerDecl(),
-                                               nullptr,
-                                               keyPathTy->getGenericArgs()[0])
-          ->getCanonicalType();
-        auto basePtr = SGF.B.createStruct(loc,
-                                    SILType::getPrimitiveObjectType(basePtrTy),
-                                    SILValue(baseRawPtr));
-        base = ManagedValue::forUnmanaged(basePtr);
-        projectionFunction = C.getProjectKeyPathWritable(nullptr);
-      } else if (keyPathTy->getDecl() == C.getReferenceWritableKeyPathDecl()) {
-        projectionFunction = C.getProjectKeyPathReferenceWritable(nullptr);
-        makeBaseConsumableMaterializedRValue(SGF, loc, base);
+    RValue get(SILGenFunction &SGF, SILLocation loc,
+               ManagedValue base, SGFContext C) && override {
+      assert(isReadAccess(getAccessKind()));
+      FuncDecl *projectFn;
+
+      auto keyPathValue = KeyPath;
+
+      SmallVector<Type, 2> typeArgs;
+      typeArgs.push_back(BaseFormalType);
+      if (TypeKind == KPTK_AnyKeyPath) {
+        projectFn = SGF.getASTContext().getGetAtAnyKeyPath(nullptr);
+      } else if (TypeKind == KPTK_PartialKeyPath) {
+        projectFn = SGF.getASTContext().getGetAtPartialKeyPath(nullptr);
+      } else if (TypeKind == KPTK_KeyPath ||
+                 TypeKind == KPTK_WritableKeyPath ||
+                 TypeKind == KPTK_ReferenceWritableKeyPath) {
+        projectFn = SGF.getASTContext().getGetAtKeyPath(nullptr);
+
+        auto keyPathTy = keyPathValue.getType().castTo<BoundGenericType>();
+        assert(keyPathTy->getGenericArgs().size() == 2);
+        assert(keyPathTy->getGenericArgs()[0]->getCanonicalType() ==
+               BaseFormalType->getCanonicalType());
+        typeArgs.push_back(keyPathTy->getGenericArgs()[1]);
+
+        keyPathValue = emitUpcastToKeyPath(SGF, loc, TypeKind, keyPathValue);
       } else {
-        llvm_unreachable("not a writable key path type?!");
+        llvm_unreachable("bad key path kind for this component");
       }
-      
-      auto projectionGenericSig = projectionFunction->getGenericSignature();
-      auto subMap = SubstitutionMap::get(
-          projectionGenericSig,
-          [&](SubstitutableType *type) -> Type {
-            auto genericParam = cast<GenericTypeParamType>(type);
-            auto index =
-                projectionGenericSig->getGenericParamOrdinal(genericParam);
-            return keyPathTy->getGenericArgs()[index];
-          },
-          LookUpConformanceInSignature(*projectionGenericSig));
 
-      // The projection function behaves like an owning addressor, returning
-      // a pointer to the projected value and an owner reference that keeps
-      // it alive.
-      auto keyPathValue = std::move(KeyPath).getAsSingleValue(SGF);
-      auto resultTuple = SGF.emitApplyOfLibraryIntrinsic(loc,
-                                                         projectionFunction,
-                                                         subMap,
-                                                         {base, keyPathValue},
-                                                         SGFContext());
-      SmallVector<ManagedValue, 2> members;
-      std::move(resultTuple).getAll(members);
-      auto projectedPtr = members[0];
-      auto projectedOwner = members[1];
+      auto subs = SubstitutionMap::get(projectFn->getGenericSignature(),
+                                       ArrayRef<Type>(typeArgs),
+                                       ArrayRef<ProtocolConformanceRef>());
 
-      // Pass along the projected pointer.
-      auto rawValueField = *C.getUnsafeMutablePointerDecl()
-        ->getStoredProperties().begin();
-      auto projectedRawPtr = SGF.B.createStructExtract(loc,
-                                               projectedPtr.getUnmanagedValue(),
-                                               rawValueField,
-                                               SILType::getRawPointerType(C));
-      SILValue projectedAddr = SGF.B.createPointerToAddress(loc,
-                                            projectedRawPtr,
-                                            getTypeOfRValue().getAddressType(),
-                                            /*strict*/ true);
-      // Mark the projected address's dependence on the owner.
-      projectedAddr = SGF.B.createMarkDependence(loc, projectedAddr,
-                                                 projectedOwner.getValue());
-      
-      // Push a cleanup to destroy the owner object. We don't want to leave
-      // it to release whenever because the key path implementation hangs
-      // the writeback operations specific to the traversal onto the destruction
-      // of the owner.
-      struct DestroyOwnerPseudoComponent : WritebackPseudoComponent {
-        ManagedValue owner;
-        
-        DestroyOwnerPseudoComponent(const LValueTypeData &typeData,
-                                    ManagedValue owner)
-          : WritebackPseudoComponent(typeData), owner(owner)
-        {}
-        
-        void writeback(SILGenFunction &SGF, SILLocation loc,
-                       ManagedValue base,
-                       MaterializedLValue materialized,
-                       bool isFinal) override {
-          // Just let the cleanup get emitted normally if the writeback is for
-          // an unwind.
-          if (!isFinal) return;
+      base = makeBaseConsumableMaterializedRValue(SGF, loc, base);
 
-          SGF.Cleanups.popAndEmitCleanup(owner.getCleanup(),
-                                         CleanupLocation::get(loc),
-                                         NotForUnwind);
-        }
-        
-        void dump(raw_ostream &OS, unsigned indent) const override {
-          OS << "DestroyOwnerPseudoComponent";
-        }
-      };
-      
-      std::unique_ptr<LogicalPathComponent> component(
-        new DestroyOwnerPseudoComponent(getTypeData(), projectedOwner));
-      
-      pushWriteback(SGF, loc, std::move(component), base, MaterializedLValue());
-
-      return ManagedValue::forLValue(projectedAddr);
+      return SGF.emitApplyOfLibraryIntrinsic(loc, projectFn, subs,
+                                             {base, keyPathValue}, C);
     }
 
-    ManagedValue readOnlyOffset(
-                   SILGenFunction &SGF, SILLocation loc, ManagedValue base) && {
-      auto &C = SGF.getASTContext();
-      
-      makeBaseConsumableMaterializedRValue(SGF, loc, base);
-      auto keyPathValue = std::move(KeyPath).getAsSingleValue(SGF);
-      // Upcast the key path operand to the base KeyPath type, as expected by
-      // the read-only projection function.
-      BoundGenericType *keyPathTy
-        = keyPathValue.getType().castTo<BoundGenericType>();
-      if (keyPathTy->getDecl() != C.getKeyPathDecl()) {
-        keyPathTy = BoundGenericType::get(C.getKeyPathDecl(), Type(),
-                                          keyPathTy->getGenericArgs());
-        keyPathValue = SGF.B.createUpcast(loc, keyPathValue,
-                SILType::getPrimitiveObjectType(keyPathTy->getCanonicalType()));
+    void set(SILGenFunction &SGF, SILLocation loc,
+             ArgumentSource &&value, ManagedValue base) && override {
+      assert(!isReadAccess(getAccessKind()));
+
+      auto keyPathValue = KeyPath;
+      FuncDecl *setFn;
+      if (TypeKind == KPTK_WritableKeyPath) {
+        setFn = SGF.getASTContext().getSetAtWritableKeyPath(nullptr);
+        assert(base.isLValue());
+      } else if (TypeKind == KPTK_ReferenceWritableKeyPath) {
+        setFn = SGF.getASTContext().getSetAtReferenceWritableKeyPath(nullptr);
+        base = makeBaseConsumableMaterializedRValue(SGF, loc, base);
+      } else {
+        llvm_unreachable("bad writable type kind");
       }
-      
-      auto projectFn = C.getProjectKeyPathReadOnly(nullptr);
 
-      auto projectionGenericSig = projectFn->getGenericSignature();
-      auto subMap = SubstitutionMap::get(
-          projectionGenericSig,
-          [&](SubstitutableType *type) -> Type {
-            auto genericParam = cast<GenericTypeParamType>(type);
-            auto index =
-                projectionGenericSig->getGenericParamOrdinal(genericParam);
-            return keyPathTy->getGenericArgs()[index];
-          },
-          LookUpConformanceInSignature(*projectionGenericSig));
+      auto keyPathTy = keyPathValue.getType().castTo<BoundGenericType>();
+      auto subs = SubstitutionMap::get(setFn->getGenericSignature(),
+                                       keyPathTy->getGenericArgs(),
+                                       ArrayRef<ProtocolConformanceRef>());
 
-      // Allocate a temporary to own the projected value.
-      auto &resultTL = SGF.getTypeLowering(keyPathTy->getGenericArgs()[1]);
-      auto resultInit = SGF.emitTemporary(loc, resultTL);
+      auto setValue =
+        std::move(value).getAsSingleValue(SGF, AbstractionPattern::getOpaque());
+      if (!setValue.getType().isAddress()) {
+        setValue = setValue.materialize(SGF, loc);
+      }
 
-      auto result = SGF.emitApplyOfLibraryIntrinsic(loc, projectFn,
-        subMap, {base, keyPathValue}, SGFContext(resultInit.get()));
-      if (!result.isInContext())
-        std::move(result).forwardInto(SGF, loc, resultInit.get());
-      
-      // Result should be a temporary we own. Return its address as an lvalue.
-      return ManagedValue::forLValue(resultInit->getAddress());
+      SGF.emitApplyOfLibraryIntrinsic(loc, setFn, subs,
+                                      {base, keyPathValue, setValue},
+                                      SGFContext());
     }
-  
+
+    Optional<AccessedStorage> getAccessedStorage() const override {
+      return None;
+    }
+
+    std::unique_ptr<LogicalPathComponent>
+    clone(SILGenFunction &SGF, SILLocation l) const override {
+      llvm_unreachable("can't be cloned");
+    }
+
+    void dump(raw_ostream &OS, unsigned indent) const override {
+      OS.indent(indent) << "LogicalKeyPathApplicationComponent\n";
+    }
+  };
+
+  /// A physical component which involves applying a key path.
+  class PhysicalKeyPathApplicationComponent final
+      : public PhysicalPathComponent {
+    KeyPathTypeKind TypeKind;
+    ManagedValue KeyPath;
+  public:
+    PhysicalKeyPathApplicationComponent(LValueTypeData typeData,
+                                        KeyPathTypeKind typeKind,
+                                        ManagedValue keyPath)
+      : PhysicalPathComponent(typeData, PhysicalKeyPathApplicationKind),
+        TypeKind(typeKind), KeyPath(keyPath) {
+      assert(typeKind == KPTK_KeyPath ||
+             typeKind == KPTK_WritableKeyPath ||
+             typeKind == KPTK_ReferenceWritableKeyPath);
+      assert(typeKind != KPTK_KeyPath || isReadAccess(getAccessKind()));
+    }
+
     ManagedValue project(SILGenFunction &SGF, SILLocation loc,
                          ManagedValue base) && override {
       assert(SGF.isInFormalEvaluationScope() &&
              "offsetting l-value for modification without writeback scope");
-      if (isReadAccess(getAccessKind())) {
-        // For a read-only access, project the key path as if immutable,
-        // so that we don't trigger captured writebacks or observers or other
-        // operations that might be enqueued by a mutable projection.
-        return std::move(*this).readOnlyOffset(SGF, loc, base);
+
+      bool isRead = isReadAccess(getAccessKind());
+
+      // Set up the base and key path values correctly.
+      auto keyPathValue = KeyPath;
+      if (isRead) {
+        keyPathValue = emitUpcastToKeyPath(SGF, loc, TypeKind, keyPathValue);
+        base = makeBaseConsumableMaterializedRValue(SGF, loc, base);
+      } else if (TypeKind == KPTK_WritableKeyPath) {
+        // nothing to do
+      } else if (TypeKind == KPTK_ReferenceWritableKeyPath) {
+        base = makeBaseConsumableMaterializedRValue(SGF, loc, base);
       } else {
-        return std::move(*this).mutableOffset(SGF, loc, base);
+        llvm_unreachable("bad combination");
       }
+
+      SILFunction *projectFn =
+        SGF.SGM.getKeyPathProjectionCoroutine(isRead, TypeKind);
+      auto projectFnRef = SGF.B.createManagedFunctionRef(loc, projectFn);
+      auto projectFnType = projectFn->getLoweredFunctionType();
+
+      auto keyPathTy = keyPathValue.getType().castTo<BoundGenericType>();
+      auto subs = SubstitutionMap::get(projectFnType->getGenericSignature(),
+                                       keyPathTy->getGenericArgs(), {});
+
+      auto substFnType = projectFnType->substGenericArgs(SGF.SGM.M, subs);
+
+      // Perform the begin_apply.
+      SmallVector<ManagedValue, 1> yields;
+      auto cleanup =
+        SGF.emitBeginApply(loc, projectFnRef, subs, { base, keyPathValue },
+                           substFnType, ApplyOptions(), yields);
+
+      // Push an operation to do the end_apply.
+      pushEndApplyWriteback(SGF, loc, cleanup, getTypeData());
+
+      assert(yields.size() == 1);
+      return yields[0];
     }
+
     void dump(raw_ostream &OS, unsigned indent) const override {
-      OS.indent(indent) << "KeyPathApplicationComponent\n";
+      OS.indent(indent) << "PhysicalKeyPathApplicationComponent\n";
     }
   };
 } // end anonymous namespace
@@ -3055,44 +3065,87 @@ LValue SILGenLValue::visitSubscriptExpr(SubscriptExpr *e,
 LValue SILGenLValue::visitKeyPathApplicationExpr(KeyPathApplicationExpr *e,
                                                  SGFAccessKind accessKind,
                                                  LValueOptions options) {
+  auto keyPathExpr = e->getKeyPath();
+  auto keyPathKind =
+    *keyPathExpr->getType()->getAnyNominal()->getKeyPathTypeKind();
+
   // Determine the base access strategy based on the strategy of this access.
-  auto keyPathTy = e->getKeyPath()->getType()->castTo<BoundGenericType>();
   SGFAccessKind subAccess;
-  if (keyPathTy->getDecl() == SGF.getASTContext().getWritableKeyPathDecl()) {
-    // Assume the keypath only partially projects the root value.
-    subAccess = (isReadAccess(accessKind)
+  if (!isReadAccess(accessKind)) {
+    // The only read-write accesses we allow are with WritableKeyPath and
+    // ReferenceWritableKeyPath.
+    assert(keyPathKind == KPTK_WritableKeyPath ||
+           keyPathKind == KPTK_ReferenceWritableKeyPath);
+    subAccess = (keyPathKind == KPTK_ReferenceWritableKeyPath
                     ? SGFAccessKind::BorrowedAddressRead
                     : SGFAccessKind::ReadWrite);
   } else {
-    // The base is only ever read from a read-only or reference-writable
-    // keypath.
+    // For all the other kinds, we want the emit the base as an address
+    // r-value; we don't support key paths for storage with mutating read
+    // operations.
     subAccess = SGFAccessKind::BorrowedAddressRead;
   }
 
   // For now, just ignore any options we were given.
   LValueOptions subOptions = LValueOptions();
-  
+
+  // Do formal evaluation of the base l-value.
   // The base should be reabstracted to the maximal abstraction pattern.
   LValue lv = visitRec(e->getBase(), subAccess, subOptions,
                        AbstractionPattern::getOpaque());
-  
+
+  // Emit the key path r-value.
+  auto keyPath = SGF.emitRValueAsSingleValue(keyPathExpr);
+
   // The result will end up projected at the maximal abstraction level too.
-  auto resultTy = e->getType()->getRValueType()->getCanonicalType();
-  auto resultSILTy = SGF.getLoweredType(AbstractionPattern::getOpaque(),
-                                        resultTy);
-  
-  
-  lv.add<KeyPathApplicationComponent>(
-    LValueTypeData(accessKind, AbstractionPattern::getOpaque(), resultTy,
-                   resultSILTy.getObjectType()),
-    ArgumentSource(e->getKeyPath()));
-  
-  // Reabstract to the substituted abstraction level if necessary.
-  auto substResultSILTy = SGF.getLoweredType(resultTy);
-  if (resultSILTy.getObjectType() != substResultSILTy.getObjectType()) {
-    lv.addOrigToSubstComponent(substResultSILTy);
+  auto substFormalType = e->getType()->getRValueType()->getCanonicalType();
+
+  bool useLogical = [&] {
+    switch (accessKind) {
+    // Use the physical 'read' pattern for these unless we're working with
+    // AnyKeyPath or PartialKeyPath, which only have getters.
+    case SGFAccessKind::BorrowedAddressRead:
+    case SGFAccessKind::BorrowedObjectRead:
+      return (keyPathKind == KPTK_AnyKeyPath ||
+              keyPathKind == KPTK_PartialKeyPath);
+
+    case SGFAccessKind::OwnedObjectRead:
+    case SGFAccessKind::OwnedAddressRead:
+    case SGFAccessKind::IgnoredRead: // should we use physical for this?
+    case SGFAccessKind::Write:
+      return true;
+
+    case SGFAccessKind::ReadWrite:
+      return false;
+    }
+    llvm_unreachable("bad access kind");
+  }();
+
+  if (useLogical) {
+    auto typeData = getLogicalStorageTypeData(SGF.SGM, accessKind,
+                                              substFormalType);
+
+    Type baseFormalType = e->getBase()->getType()->getRValueType();
+    lv.add<LogicalKeyPathApplicationComponent>(typeData, keyPathKind, keyPath,
+                                               baseFormalType);
+
+    // TODO: make LogicalKeyPathApplicationComponent expect/produce values
+    // in the opaque AbstractionPattern and push an OrigToSubstComponent here
+    // so it can be peepholed.
+  } else {
+    auto typeData = getAbstractedTypeData(SGF.SGM, accessKind,
+                                          AbstractionPattern::getOpaque(),
+                                          substFormalType);
+
+    lv.add<PhysicalKeyPathApplicationComponent>(typeData, keyPathKind, keyPath);
+
+    // Reabstract to the substituted abstraction level if necessary.
+    auto substResultSILTy = SGF.getLoweredType(substFormalType);
+    if (typeData.TypeOfRValue != substResultSILTy.getObjectType()) {
+      lv.addOrigToSubstComponent(substResultSILTy);
+    }
   }
-  
+
   return lv;
 }
 

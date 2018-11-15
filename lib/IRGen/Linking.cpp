@@ -31,6 +31,18 @@ using namespace swift;
 using namespace irgen;
 using namespace Mangle;
 
+const IRLinkage IRLinkage::InternalLinkOnceODR = {
+  llvm::GlobalValue::LinkOnceODRLinkage,
+  llvm::GlobalValue::HiddenVisibility,
+  llvm::GlobalValue::DefaultStorageClass,
+};
+
+const IRLinkage IRLinkage::Internal = {
+  llvm::GlobalValue::InternalLinkage,
+  llvm::GlobalValue::DefaultVisibility,
+  llvm::GlobalValue::DefaultStorageClass,
+};
+
 bool swift::irgen::useDllStorage(const llvm::Triple &triple) {
   return triple.isOSBinFormatCOFF() && !triple.isOSCygMing();
 }
@@ -337,24 +349,6 @@ std::string LinkEntity::mangleAsString() const {
   llvm_unreachable("bad entity kind!");
 }
 
-/// Get SIL-linkage for something that's not required to be visible
-/// and doesn't actually need to be uniqued.
-static SILLinkage getNonUniqueSILLinkage(FormalLinkage linkage,
-                                         ForDefinition_t forDefinition) {
-  switch (linkage) {
-  case FormalLinkage::PublicUnique:
-  case FormalLinkage::PublicNonUnique:
-    return (forDefinition ? SILLinkage::Shared : SILLinkage::PublicExternal);
-
-  case FormalLinkage::HiddenUnique:
-    return (forDefinition ? SILLinkage::Shared : SILLinkage::HiddenExternal);
-
-  case FormalLinkage::Private:
-    return SILLinkage::Private;
-  }
-  llvm_unreachable("bad formal linkage");
-}
-
 SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
   // For when `this` is a protocol conformance of some kind.
   auto getLinkageAsConformance = [&] {
@@ -446,9 +440,12 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
     llvm_unreachable("bad kind");
 
   // ...but we don't actually expose individual value witnesses (right now).
-  case Kind::ValueWitness:
-    return getNonUniqueSILLinkage(getDeclLinkage(getType().getAnyNominal()),
-                                  forDefinition);
+  case Kind::ValueWitness: {
+    auto *nominal = getType().getAnyNominal();
+    if (getDeclLinkage(nominal) == FormalLinkage::PublicNonUnique)
+      return SILLinkage::Shared;
+    return forDefinition ? SILLinkage::Private : SILLinkage::PrivateExternal;
+  }
 
   // Foreign type metadata candidates are always shared; the runtime
   // does the uniquing.
