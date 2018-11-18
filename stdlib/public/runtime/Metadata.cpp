@@ -98,7 +98,7 @@ static ClassMetadataBounds
 computeMetadataBoundsForSuperclass(const void *ref,
                                    TypeReferenceKind refKind) {
   switch (refKind) {
-  case TypeReferenceKind::IndirectNominalTypeDescriptor: {
+  case TypeReferenceKind::IndirectTypeDescriptor: {
     auto description = *reinterpret_cast<const ClassDescriptor * const *>(ref);
     if (!description) {
       swift::fatalError(0, "instantiating class metadata for class with "
@@ -107,7 +107,7 @@ computeMetadataBoundsForSuperclass(const void *ref,
     return description->getMetadataBounds();
   }
 
-  case TypeReferenceKind::DirectNominalTypeDescriptor: {
+  case TypeReferenceKind::DirectTypeDescriptor: {
     auto description = reinterpret_cast<const ClassDescriptor *>(ref);
     return description->getMetadataBounds();
   }
@@ -2552,7 +2552,7 @@ swift::swift_initClassMetadata(ClassMetadata *self,
       Demangle::makeSymbolicMangledNameStringRef(superclassNameBase);
     SubstGenericParametersFromMetadata substitutions(self);
     const Metadata *superclass =
-      _getTypeByMangledName(superclassName, substitutions);
+      swift_getTypeByMangledName(superclassName, substitutions, substitutions);
     if (!superclass) {
       fatalError(0,
                  "failed to demangle superclass of %s from mangled name '%s'\n",
@@ -2642,7 +2642,7 @@ swift::swift_updateClassMetadata(ClassMetadata *self,
       Demangle::makeSymbolicMangledNameStringRef(superclassNameBase);
     SubstGenericParametersFromMetadata substitutions(self);
     const Metadata *superclass =
-      _getTypeByMangledName(superclassName, substitutions);
+      swift_getTypeByMangledName(superclassName, substitutions, substitutions);
     if (!superclass) {
       fatalError(0,
                  "failed to demangle superclass of %s from mangled name '%s'\n",
@@ -3390,6 +3390,17 @@ static bool anyProtocolIsClassBound(
 }
 #endif
 
+const Metadata *
+swift::_getSimpleProtocolTypeMetadata(const ProtocolDescriptor *protocol) {
+  auto protocolRef = ProtocolDescriptorRef::forSwift(protocol);
+  auto constraint =
+    protocol->getProtocolContextDescriptorFlags().getClassConstraint();
+  return swift_getExistentialTypeMetadata(constraint,
+                                          /*superclass bound*/ nullptr,
+                                          /*num protocols*/ 1,
+                                          &protocolRef);
+}
+
 /// \brief Fetch a uniqued metadata for an existential type. The array
 /// referenced by \c protocols will be sorted in-place.
 const ExistentialTypeMetadata *
@@ -4007,8 +4018,11 @@ swift::swift_getWitnessTable(const ProtocolConformanceDescriptor *conformance,
         if (!candidate || !conformance->isSynthesizedNonUnique())
           return candidate;
 
+        auto conformingType =
+          cast<TypeContextDescriptor>(conformance->getTypeDescriptor());
+
         return _getForeignWitnessTable(candidate,
-                                       conformance->getTypeContextDescriptor(),
+                                       conformingType,
                                        conformance->getProtocol());
       };
 
@@ -4053,13 +4067,13 @@ static StringRef findAssociatedTypeName(const ProtocolDescriptor *protocol,
   return StringRef();
 }
 
-MetadataResponse
-swift::swift_getAssociatedTypeWitness(MetadataRequest request,
+static MetadataResponse
+swift_getAssociatedTypeWitnessSlowImpl(
+                                      MetadataRequest request,
                                       WitnessTable *wtable,
                                       const Metadata *conformingType,
                                       const ProtocolRequirement *reqBase,
                                       const ProtocolRequirement *assocType) {
-
 #ifndef NDEBUG
   {
     const ProtocolConformanceDescriptor *conformance = wtable->Description;
@@ -4077,7 +4091,7 @@ swift::swift_getAssociatedTypeWitness(MetadataRequest request,
   unsigned witnessIndex = assocType - reqBase;
   auto witness = ((const void* const *)wtable)[witnessIndex];
   if (LLVM_LIKELY((uintptr_t(witness) &
-         ProtocolRequirementFlags::AssociatedTypeMangledNameBit) == 0)) {
+        ProtocolRequirementFlags::AssociatedTypeMangledNameBit) == 0)) {
     // Cached metadata pointers are always complete.
     return MetadataResponse{(const Metadata *)witness, MetadataState::Complete};
   }
@@ -4110,13 +4124,24 @@ swift::swift_getAssociatedTypeWitness(MetadataRequest request,
     // The protocol's Self is the only generic parameter that can occur in the
     // type.
     assocTypeMetadata =
-      _getTypeByMangledName(mangledName,
-         [conformingType](unsigned depth, unsigned index) -> const Metadata * {
-        if (depth == 0 && index == 0)
-          return conformingType;
+      swift_getTypeByMangledName(mangledName,
+        [conformingType](unsigned depth, unsigned index) -> const Metadata * {
+          if (depth == 0 && index == 0)
+            return conformingType;
 
-        return nullptr;
-      });
+          return nullptr;
+        },
+        [&](const Metadata *type, unsigned index) -> const WitnessTable * {
+          auto requirements = protocol->getRequirements();
+          auto dependentDescriptor = requirements.data() + index;
+          if (dependentDescriptor < requirements.begin() ||
+              dependentDescriptor >= requirements.end())
+            return nullptr;
+
+          return swift_getAssociatedConformanceWitness(wtable, conformingType,
+                                                       type, reqBase,
+                                                       dependentDescriptor);
+        });
   } else {
     // The generic parameters in the associated type name are those of the
     // conforming type.
@@ -4126,7 +4151,8 @@ swift::swift_getAssociatedTypeWitness(MetadataRequest request,
     auto originalConformingType = findConformingSuperclass(conformingType,
                                                            conformance);
     SubstGenericParametersFromMetadata substitutions(originalConformingType);
-    assocTypeMetadata = _getTypeByMangledName(mangledName, substitutions);
+    assocTypeMetadata = swift_getTypeByMangledName(mangledName, substitutions,
+                                                   substitutions);
   }
 
   if (!assocTypeMetadata) {
@@ -4158,7 +4184,26 @@ swift::swift_getAssociatedTypeWitness(MetadataRequest request,
   return response;
 }
 
-const WitnessTable *swift::swift_getAssociatedConformanceWitness(
+MetadataResponse
+swift::swift_getAssociatedTypeWitness(MetadataRequest request,
+                                      WitnessTable *wtable,
+                                      const Metadata *conformingType,
+                                      const ProtocolRequirement *reqBase,
+                                      const ProtocolRequirement *assocType) {
+  // If the low bit of the witness is clear, it's already a metadata pointer.
+  unsigned witnessIndex = assocType - reqBase;
+  auto witness = ((const void* const *)wtable)[witnessIndex];
+  if (LLVM_LIKELY((uintptr_t(witness) &
+        ProtocolRequirementFlags::AssociatedTypeMangledNameBit) == 0)) {
+    // Cached metadata pointers are always complete.
+    return MetadataResponse{(const Metadata *)witness, MetadataState::Complete};
+  }
+
+  return swift_getAssociatedTypeWitnessSlow(request, wtable, conformingType,
+                                            reqBase, assocType);
+}
+
+static const WitnessTable *swift_getAssociatedConformanceWitnessSlowImpl(
                                   WitnessTable *wtable,
                                   const Metadata *conformingType,
                                   const Metadata *assocType,
@@ -4172,12 +4217,15 @@ const WitnessTable *swift::swift_getAssociatedConformanceWitness(
     assert(assocConformance >= requirements.begin() &&
            assocConformance < requirements.end());
     assert(reqBase == requirements.data() - WitnessTableFirstRequirementOffset);
-    assert(assocConformance->Flags.getKind() ==
-           ProtocolRequirementFlags::Kind::AssociatedConformanceAccessFunction);
+    assert(
+      assocConformance->Flags.getKind() ==
+        ProtocolRequirementFlags::Kind::AssociatedConformanceAccessFunction ||
+      assocConformance->Flags.getKind() ==
+        ProtocolRequirementFlags::Kind::BaseProtocol);
   }
 #endif
 
-  // Call the access function.
+  // Retrieve the witness.
   unsigned witnessIndex = assocConformance - reqBase;
   auto witness = ((const void* const *)wtable)[witnessIndex];
   // Fast path: we've already resolved this to a witness table, so return it.
@@ -4193,6 +4241,9 @@ const WitnessTable *swift::swift_getAssociatedConformanceWitness(
 
 
   // Extract the mangled name itself.
+  if (*mangledNameBase == '\xFF')
+    ++mangledNameBase;
+
   StringRef mangledName =
     Demangle::makeSymbolicMangledNameStringRef(mangledNameBase);
 
@@ -4220,6 +4271,26 @@ const WitnessTable *swift::swift_getAssociatedConformanceWitness(
   }
 
   swift_runtime_unreachable("Invalid mangled associate conformance");
+}
+
+const WitnessTable *swift::swift_getAssociatedConformanceWitness(
+                                  WitnessTable *wtable,
+                                  const Metadata *conformingType,
+                                  const Metadata *assocType,
+                                  const ProtocolRequirement *reqBase,
+                                  const ProtocolRequirement *assocConformance) {
+  // Retrieve the witness.
+  unsigned witnessIndex = assocConformance - reqBase;
+  auto witness = ((const void* const *)wtable)[witnessIndex];
+  // Fast path: we've already resolved this to a witness table, so return it.
+  if (LLVM_LIKELY((uintptr_t(witness) &
+         ProtocolRequirementFlags::AssociatedTypeMangledNameBit) == 0)) {
+    return static_cast<const WitnessTable *>(witness);
+  }
+
+  return swift_getAssociatedConformanceWitnessSlow(wtable, conformingType,
+                                                   assocType, reqBase,
+                                                   assocConformance);
 }
 
 /***************************************************************************/
@@ -4820,8 +4891,11 @@ void swift::verifyMangledNameRoundtrip(const Metadata *metadata) {
     return;
   
   auto mangledName = Demangle::mangleNode(node);
-  auto result = _getTypeByMangledName(mangledName,
-                                      [](unsigned, unsigned){ return nullptr; });
+  auto result =
+    swift_getTypeByMangledName(
+                          mangledName,
+                          [](unsigned, unsigned){ return nullptr; },
+                          [](const Metadata *, unsigned) { return nullptr; });
   if (metadata != result)
     swift::warning(RuntimeErrorFlagNone,
                    "Metadata mangled name failed to roundtrip: %p -> %s -> %p\n",
@@ -4842,4 +4916,5 @@ const HeapObject *swift_getKeyPathImpl(const void *pattern,
                                        const void *arguments);
 
 #define OVERRIDE_KEYPATH COMPATIBILITY_OVERRIDE
+#define OVERRIDE_WITNESSTABLE COMPATIBILITY_OVERRIDE
 #include "CompatibilityOverride.def"

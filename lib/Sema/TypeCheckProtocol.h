@@ -252,6 +252,9 @@ enum class CheckKind : unsigned {
   /// requirement.
   AccessOfSetter,
 
+  /// The witness needs to be @usableFromInline.
+  UsableFromInline,
+
   /// The witness is less available than the requirement.
   Availability,
 
@@ -619,9 +622,6 @@ class ConformanceChecker : public WitnessChecker {
   /// involving the protocol 'Self' type.
   void checkNonFinalClassWitness(ValueDecl *requirement,
                                  ValueDecl *witness);
-
-  /// Resolve the (non-type) witness as requiring dynamic dispatch.
-  ResolveWitnessResult resolveWitnessAsOpaque(ValueDecl *requirement);
 
   /// Resolve a (non-type) witness via name lookup.
   ResolveWitnessResult resolveWitnessViaLookup(ValueDecl *requirement);

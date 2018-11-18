@@ -136,7 +136,7 @@ swift::Demangle::makeSymbolicMangledNameStringRef(const char *base) {
     // Skip over symbolic references.
     if (*end >= '\x01' && *end <= '\x17')
       end += sizeof(uint32_t);
-    if (*end >= '\x18' && *end <= '\x1F')
+    else if (*end >= '\x18' && *end <= '\x1F')
       end += sizeof(void*);
     ++end;
   }
@@ -1700,6 +1700,9 @@ NodePointer Demangler::demangleMetatype() {
       return createWithPoppedType(Node::Kind::ClassMetadataBaseOffset);
     case 'p':
       return createWithChild(Node::Kind::ProtocolDescriptor, popProtocol());
+    case 'S':
+      return createWithChild(Node::Kind::ProtocolSelfConformanceDescriptor,
+                             popProtocol());
     case 'u':
       return createWithPoppedType(Node::Kind::MethodLookupFunction);
     case 'U':
@@ -1953,6 +1956,9 @@ NodePointer Demangler::demangleThunkOrSpecialization() {
       NodePointer Conf = popProtocolConformance();
       return createWithChildren(Node::Kind::ProtocolWitness, Conf, Entity);
     }
+    case 'S':
+      return createWithChild(Node::Kind::ProtocolSelfConformanceWitness,
+                             popNode(isEntity));
     case 'R':
     case 'r': {
       NodePointer Thunk = createNode(c == 'R' ?
@@ -1991,6 +1997,9 @@ NodePointer Demangler::demangleThunkOrSpecialization() {
     case 'k': {
       auto nodeKind = c == 'K' ? Node::Kind::KeyPathGetterThunkHelper
                                : Node::Kind::KeyPathSetterThunkHelper;
+
+      bool isSerialized = nextIf('q');
+
       std::vector<NodePointer> types;
       auto node = popNode();
       if (!node || node->getKind() != Node::Kind::Type)
@@ -2016,6 +2025,10 @@ NodePointer Demangler::demangleThunkOrSpecialization() {
       for (auto i = types.rbegin(), e = types.rend(); i != e; ++i) {
         result->addChild(*i, *this);
       }
+
+      if (isSerialized)
+        result->addChild(createNode(Node::Kind::IsSerialized), *this);
+
       return result;
     }
     case 'l': {
@@ -2054,6 +2067,9 @@ NodePointer Demangler::demangleThunkOrSpecialization() {
     case 'h': {
       auto nodeKind = c == 'H' ? Node::Kind::KeyPathEqualsThunkHelper
                                : Node::Kind::KeyPathHashThunkHelper;
+
+      bool isSerialized = nextIf('q');
+
       NodePointer genericSig = nullptr;
       std::vector<NodePointer> types;
       
@@ -2083,6 +2099,10 @@ NodePointer Demangler::demangleThunkOrSpecialization() {
       }
       if (genericSig)
         result->addChild(genericSig, *this);
+
+      if (isSerialized)
+        result->addChild(createNode(Node::Kind::IsSerialized), *this);
+
       return result;
     }
     case 'v': {
@@ -2338,15 +2358,15 @@ NodePointer Demangler::addFuncSpecParamNumber(NodePointer Param,
 }
 
 NodePointer Demangler::demangleSpecAttributes(Node::Kind SpecKind) {
-  bool isFragile = nextIf('q');
+  bool isSerialized = nextIf('q');
 
   int PassID = (int)nextChar() - '0';
   if (PassID < 0 || PassID > 9)
     return nullptr;
 
   NodePointer SpecNd = createNode(SpecKind);
-  if (isFragile)
-    SpecNd->addChild(createNode(Node::Kind::SpecializationIsFragile),
+  if (isSerialized)
+    SpecNd->addChild(createNode(Node::Kind::IsSerialized),
                      *this);
 
   SpecNd->addChild(createNode(Node::Kind::SpecializationPassID, PassID),
@@ -2373,6 +2393,9 @@ NodePointer Demangler::demangleWitness() {
                         createNode(Node::Kind::Directness, Directness),
                         popNode(isEntity));
     }
+    case 'S':
+      return createWithChild(Node::Kind::ProtocolSelfConformanceWitnessTable,
+                             popProtocol());
     case 'P':
       return createWithChild(Node::Kind::ProtocolWitnessTable,
                              popProtocolConformance());

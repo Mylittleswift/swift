@@ -135,6 +135,20 @@ IRGenMangler::mangleTypeForReflection(IRGenModule &IGM,
   });
 }
 
+std::string IRGenMangler::mangleProtocolConformanceDescriptor(
+                                 const RootProtocolConformance *conformance) {
+  beginMangling();
+  if (isa<NormalProtocolConformance>(conformance)) {
+    appendProtocolConformance(conformance);
+    appendOperator("Mc");
+  } else {
+    auto protocol = cast<SelfProtocolConformance>(conformance)->getProtocol();
+    appendProtocolName(protocol);
+    appendOperator("MS");
+  }
+  return finalize();
+}
+
 SymbolicMangling
 IRGenMangler::mangleProtocolConformanceForReflection(IRGenModule &IGM,
                                   Type ty, ProtocolConformanceRef conformance) {
@@ -278,5 +292,13 @@ std::string IRGenMangler::mangleSymbolNameForKeyPathMetadata(
     appendProtocolName(conformance.getAbstract());
   else
     assert(conformance.isInvalid() && "Unknown protocol conformance");
+  return finalize();
+}
+
+std::string IRGenMangler::mangleSymbolNameForGenericEnvironment(
+                                              CanGenericSignature genericSig) {
+  beginManglingWithoutPrefix();
+  Buffer << "generic environment ";
+  appendGenericSignature(genericSig);
   return finalize();
 }
