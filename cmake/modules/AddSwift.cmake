@@ -265,7 +265,9 @@ function(_add_variant_c_compile_flags)
     # Emulate /GR-.
     # TODO(compnerd) when moving up to VS 2017 15.3 and newer, we can disable
     # RTTI again
-    if(NOT SWIFT_COMPILER_IS_MSVC_LIKE)
+    if(SWIFT_COMPILER_IS_MSVC_LIKE)
+      list(APPEND result /GR-)
+    else()
       list(APPEND result -frtti)
       list(APPEND result -Xclang;-fno-rtti-data)
     endif()
@@ -376,7 +378,7 @@ endfunction()
 function(_add_variant_link_flags)
   set(oneValueArgs SDK ARCH BUILD_TYPE ENABLE_ASSERTIONS ANALYZE_CODE_COVERAGE
   DEPLOYMENT_VERSION_OSX DEPLOYMENT_VERSION_IOS DEPLOYMENT_VERSION_TVOS DEPLOYMENT_VERSION_WATCHOS
-  RESULT_VAR_NAME ENABLE_LTO LTO_OBJECT_NAME LIBRARY_SEARCH_DIRECTORIES_VAR_NAME)
+  RESULT_VAR_NAME ENABLE_LTO LTO_OBJECT_NAME LINK_LIBRARIES_VAR_NAME LIBRARY_SEARCH_DIRECTORIES_VAR_NAME)
   cmake_parse_arguments(LFLAGS
     ""
     "${oneValueArgs}"
@@ -387,6 +389,7 @@ function(_add_variant_link_flags)
   precondition(LFLAGS_ARCH MESSAGE "Should specify an architecture")
 
   set(result ${${LFLAGS_RESULT_VAR_NAME}})
+  set(link_libraries ${${LFLAGS_LINK_LIBRARIES_VAR_NAME}})
   set(library_search_directories ${${LFLAGS_LIBRARY_SEARCH_DIRECTORIES_VAR_NAME}})
 
   _add_variant_c_compile_link_flags(
@@ -403,9 +406,9 @@ function(_add_variant_link_flags)
     RESULT_VAR_NAME result)
 
   if("${LFLAGS_SDK}" STREQUAL "LINUX")
-    list(APPEND result "-lpthread" "-latomic" "-ldl")
+    list(APPEND link_libraries "pthread" "atomic" "dl")
   elseif("${LFLAGS_SDK}" STREQUAL "FREEBSD")
-    list(APPEND result "-lpthread")
+    list(APPEND link_libraries "pthread")
   elseif("${LFLAGS_SDK}" STREQUAL "CYGWIN")
     # No extra libraries required.
   elseif("${LFLAGS_SDK}" STREQUAL "WINDOWS")
@@ -423,9 +426,10 @@ function(_add_variant_link_flags)
     list(APPEND library_search_directories
          ${CMAKE_BINARY_DIR}/winsdk_lib_${LFLAGS_ARCH}_symlinks)
   elseif("${LFLAGS_SDK}" STREQUAL "HAIKU")
-    list(APPEND result "-lbsd" "-latomic" "-Wl,-Bsymbolic")
+    list(APPEND link_libraries "bsd" "atomic")
+    list(APPEND result "-Wl,-Bsymbolic")
   elseif("${LFLAGS_SDK}" STREQUAL "ANDROID")
-    list(APPEND result "-ldl" "-llog" "-latomic" "-licudataswift" "-licui18nswift" "-licuucswift")
+    list(APPEND link_libraries "dl" "log" "atomic" "icudataswift" "icui18nswift" "icuucswift")
     if("${LFLAGS_ARCH}" MATCHES armv7)
       list(APPEND result "${SWIFT_ANDROID_NDK_PATH}/sources/cxx-stl/llvm-libc++/libs/armeabi-v7a/libc++_shared.so")
     elseif("${LFLAGS_ARCH}" MATCHES aarch64)
@@ -435,7 +439,7 @@ function(_add_variant_link_flags)
     endif()
     swift_android_lib_for_arch(${LFLAGS_ARCH} ${LFLAGS_ARCH}_LIB)
     foreach(path IN LISTS ${LFLAGS_ARCH}_LIB)
-      list(APPEND library_search_directories ${path}) 
+      list(APPEND library_search_directories ${path})
     endforeach()
   else()
     # If lto is enabled, we need to add the object path flag so that the LTO code
@@ -475,6 +479,7 @@ function(_add_variant_link_flags)
   endif()
 
   set("${LFLAGS_RESULT_VAR_NAME}" "${result}" PARENT_SCOPE)
+  set("${LFLAGS_LINK_LIBRARIES_VAR_NAME}" "${link_libraries}" PARENT_SCOPE)
   set("${LFLAGS_LIBRARY_SEARCH_DIRECTORIES_VAR_NAME}" "${library_search_directories}" PARENT_SCOPE)
 endfunction()
 
@@ -1207,6 +1212,7 @@ function(_add_swift_library_single target name)
     DEPLOYMENT_VERSION_TVOS "${SWIFTLIB_DEPLOYMENT_VERSION_TVOS}"
     DEPLOYMENT_VERSION_WATCHOS "${SWIFTLIB_DEPLOYMENT_VERSION_WATCHOS}"
     RESULT_VAR_NAME link_flags
+    LINK_LIBRARIES_VAR_NAME link_libraries
     LIBRARY_SEARCH_DIRECTORIES_VAR_NAME library_search_directories
       )
 
@@ -1251,6 +1257,7 @@ function(_add_swift_library_single target name)
       COMPILE_FLAGS " ${c_compile_flags}")
   set_property(TARGET "${target}" APPEND_STRING PROPERTY
       LINK_FLAGS " ${link_flags}")
+  set_property(TARGET "${target}" APPEND PROPERTY LINK_LIBRARIES ${link_libraries})
   swift_target_link_search_directories("${target}" "${library_search_directories}")
 
   # Adjust the linked libraries for windows targets.  On Windows, the link is
@@ -1612,6 +1619,7 @@ function(add_swift_target_library name)
         SWIFT_MODULE_DEPENDS_OSX
         SWIFT_MODULE_DEPENDS_TVOS
         SWIFT_MODULE_DEPENDS_WATCHOS
+        SWIFT_MODULE_DEPENDS_WINDOWS
         TARGET_SDKS)
 
   cmake_parse_arguments(SWIFTLIB
@@ -1735,6 +1743,9 @@ function(add_swift_target_library name)
     elseif(${sdk} STREQUAL HAIKU)
       list(APPEND swiftlib_module_depends_flattened
            ${SWIFTLIB_SWIFT_MODULE_DEPENDS_HAIKU})
+    elseif(${sdk} STREQUAL WINDOWS)
+      list(APPEND swiftlib_module_depends_flattened
+           ${SWIFTLIB_SWIFT_MODULE_DEPENDS_WINDOWS})
     endif()
 
     # Collect architecture agnostic SDK framework dependencies
@@ -1863,6 +1874,12 @@ function(add_swift_target_library name)
         set(swiftlib_swift_compile_private_frameworks_flag "-Fsystem" "${SWIFT_SDK_${sdk}_ARCH_${arch}_PATH}/System/Library/PrivateFrameworks/")
       endif()
 
+      if("${sdk}" STREQUAL WINDOWS)
+        if(arch STREQUAL x86_64)
+          set(swiftlib_swift_compile_flags_arch -Xcc -D_AMD64_)
+        endif()
+      endif()
+
       # Add this library variant.
       _add_swift_library_single(
         ${VARIANT_NAME}
@@ -1881,7 +1898,7 @@ function(add_swift_target_library name)
         LLVM_COMPONENT_DEPENDS ${SWIFTLIB_LLVM_COMPONENT_DEPENDS}
         FILE_DEPENDS ${SWIFTLIB_FILE_DEPENDS} ${swiftlib_module_dependency_targets}
         C_COMPILE_FLAGS ${SWIFTLIB_C_COMPILE_FLAGS}
-        SWIFT_COMPILE_FLAGS ${swiftlib_swift_compile_flags_all} ${swiftlib_swift_compile_private_frameworks_flag}
+        SWIFT_COMPILE_FLAGS ${swiftlib_swift_compile_flags_all} ${swiftlib_swift_compile_flags_arch} ${swiftlib_swift_compile_private_frameworks_flag}
         LINK_FLAGS ${swiftlib_link_flags_all}
         PRIVATE_LINK_LIBRARIES ${swiftlib_private_link_libraries_targets}
         INCORPORATE_OBJECT_LIBRARIES ${SWIFTLIB_INCORPORATE_OBJECT_LIBRARIES}
@@ -2119,6 +2136,7 @@ function(_add_swift_executable_single name)
     LTO_OBJECT_NAME "${name}-${SWIFTEXE_SINGLE_SDK}-${SWIFTEXE_SINGLE_ARCHITECTURE}"
     ANALYZE_CODE_COVERAGE "${SWIFT_ANALYZE_CODE_COVERAGE}"
     RESULT_VAR_NAME link_flags
+    LINK_LIBRARIES_VAR_NAME link_libraries
     LIBRARY_SEARCH_DIRECTORIES_VAR_NAME library_search_directories)
 
   if(${SWIFTEXE_SINGLE_SDK} IN_LIST SWIFT_APPLE_PLATFORMS)
@@ -2130,11 +2148,19 @@ function(_add_swift_executable_single name)
   # Find the names of dependency library targets.
   #
   # We don't add the ${ARCH} to the target suffix because we want to link
-  # against fat libraries.
-  _list_add_string_suffix(
-      "${SWIFTEXE_SINGLE_LINK_FAT_LIBRARIES}"
-      "-${SWIFT_SDK_${SWIFTEXE_SINGLE_SDK}_LIB_SUBDIR}"
-      SWIFTEXE_SINGLE_LINK_FAT_LIBRARIES_TARGETS)
+  # against fat libraries.  This only works for the Darwin targets as MachO is
+  # the only format with the fat libraries.
+  if(${SWIFTEXE_SINGLE_SDK} IN_LIST SWIFT_APPLE_PLATFORMS)
+    _list_add_string_suffix(
+        "${SWIFTEXE_SINGLE_LINK_FAT_LIBRARIES}"
+        "-${SWIFT_SDK_${SWIFTEXE_SINGLE_SDK}_LIB_SUBDIR}"
+        SWIFTEXE_SINGLE_LINK_FAT_LIBRARIES_TARGETS)
+  else()
+    _list_add_string_suffix(
+        "${SWIFTEXE_SINGLE_LINK_FAT_LIBRARIES}"
+        "-${SWIFT_SDK_${SWIFTEXE_SINGLE_SDK}_LIB_SUBDIR}-${SWIFTEXE_SINGLE_ARCHITECTURE}"
+        SWIFTEXE_SINGLE_LINK_FAT_LIBRARIES_TARGETS)
+  endif()
 
   handle_swift_sources(
       dependency_target
@@ -2176,6 +2202,7 @@ function(_add_swift_executable_single name)
   swift_target_link_search_directories("${name}" "${library_search_directories}")
   set_property(TARGET ${name} APPEND_STRING PROPERTY
       LINK_FLAGS " ${link_flags}")
+  set_property(TARGET ${name} APPEND PROPERTY LINK_LIBRARIES ${link_libraries})
   if (SWIFT_PARALLEL_LINK_JOBS)
     set_property(TARGET ${name} PROPERTY JOB_POOL_LINK swift_link_job_pool)
   endif()
@@ -2359,10 +2386,7 @@ endmacro()
 
 function(add_swift_host_tool executable)
   set(ADDSWIFTHOSTTOOL_multiple_parameter_options
-        SWIFT_COMPONENT
-        COMPILE_FLAGS
-        DEPENDS
-        SWIFT_MODULE_DEPENDS)
+        SWIFT_COMPONENT)
 
   cmake_parse_arguments(
       ADDSWIFTHOSTTOOL # prefix
@@ -2371,21 +2395,10 @@ function(add_swift_host_tool executable)
       "${ADDSWIFTHOSTTOOL_multiple_parameter_options}" # multi-value args
       ${ARGN})
 
-  # Configure variables for this subdirectory.
-  set(VARIANT_SUFFIX "-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH}")
-  set(MODULE_VARIANT_SUFFIX "-swiftmodule${VARIANT_SUFFIX}")
-
-  foreach(mod ${ADDSWIFTHOSTTOOL_SWIFT_MODULE_DEPENDS})
-    list(APPEND ADDSWIFTHOSTTOOL_DEPENDS "swift${mod}${MODULE_VARIANT_SUFFIX}")
-    list(APPEND ADDSWIFTHOSTTOOL_DEPENDS "swift${mod}${VARIANT_SUFFIX}")
-  endforeach()
-
   # Create the executable rule.
   add_swift_executable(
     ${executable} 
     ${ADDSWIFTHOSTTOOL_UNPARSED_ARGUMENTS}
-    DEPENDS ${ADDSWIFTHOSTTOOL_DEPENDS}
-    COMPILE_FLAGS ${ADDSWIFTHOSTTOOL_COMPILE_FLAGS}
   )
 
   # And then create the install rule if we are asked to.

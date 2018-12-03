@@ -17,6 +17,7 @@
 #include "swift/AST/ExistentialLayout.h"
 #include "swift/AST/FileSystem.h"
 #include "swift/AST/Module.h"
+#include "swift/AST/ProtocolConformance.h"
 #include "swift/Frontend/Frontend.h"
 #include "swift/Frontend/ParseableInterfaceSupport.h"
 #include "swift/Frontend/PrintingDiagnosticConsumer.h"
@@ -278,6 +279,7 @@ static bool buildSwiftModuleFromSwiftInterface(
     StringRef ModuleCachePath, DependencyTracker *OuterTracker) {
   bool SubError = false;
   bool RunSuccess = llvm::CrashRecoveryContext().RunSafelyOnThread([&] {
+    (void)llvm::sys::fs::create_directory(ModuleCachePath);
 
     llvm::BumpPtrAllocator SubArgsAlloc;
     llvm::StringSaver SubArgSaver(SubArgsAlloc);
@@ -343,10 +345,12 @@ static bool buildSwiftModuleFromSwiftInterface(
     }
 
     LLVM_DEBUG(llvm::dbgs() << "Serializing " << OutPath << "\n");
+    FrontendOptions &FEOpts = SubInvocation.getFrontendOptions();
     SerializationOptions SerializationOpts;
     std::string OutPathStr = OutPath;
     SerializationOpts.OutputPath = OutPathStr.c_str();
     SerializationOpts.SerializeAllSIL = true;
+    SerializationOpts.ModuleLinkName = FEOpts.ModuleLinkName;
     SmallVector<FileDependency, 16> Deps;
     if (collectDepsForSerialization(FS, SubInstance, InPath, ModuleCachePath,
                                     Deps, Diags, OuterTracker)) {
@@ -363,6 +367,17 @@ static bool buildSwiftModuleFromSwiftInterface(
   return !RunSuccess || SubError;
 }
 
+static bool serializedASTLooksValidOrCannotBeRead(clang::vfs::FileSystem &FS,
+                                                  StringRef ModPath) {
+  auto ModBuf = FS.getBufferForFile(ModPath, /*FileSize=*/-1,
+                                    /*RequiresNullTerminator=*/false);
+  if (!ModBuf)
+    return ModBuf.getError() != std::errc::no_such_file_or_directory;
+
+  auto VI = serialization::validateSerializedAST(ModBuf.get()->getBuffer());
+  return VI.status == serialization::Status::Valid;
+}
+
 /// Load a .swiftmodule associated with a .swiftinterface either from a
 /// cache or by converting it in a subordinate \c CompilerInstance, caching
 /// the results.
@@ -372,17 +387,38 @@ std::error_code ParseableInterfaceModuleLoader::openModuleFiles(
     std::unique_ptr<llvm::MemoryBuffer> *ModuleDocBuffer,
     llvm::SmallVectorImpl<char> &Scratch) {
 
+  // If running in OnlySerialized mode, ParseableInterfaceModuleLoader
+  // should not have been constructed at all.
+  assert(LoadMode != ModuleLoadingMode::OnlySerialized);
+
   auto &FS = *Ctx.SourceMgr.getFileSystem();
   auto &Diags = Ctx.Diags;
-  llvm::SmallString<128> InPath, OutPath;
+  llvm::SmallString<128> ModPath, InPath, OutPath;
 
   // First check to see if the .swiftinterface exists at all. Bail if not.
-  InPath = DirName;
-  llvm::sys::path::append(InPath, ModuleFilename);
+  ModPath = DirName;
+  llvm::sys::path::append(ModPath, ModuleFilename);
+
   auto Ext = file_types::getExtension(file_types::TY_SwiftParseableInterfaceFile);
+  InPath = ModPath;
   llvm::sys::path::replace_extension(InPath, Ext);
   if (!FS.exists(InPath))
     return std::make_error_code(std::errc::no_such_file_or_directory);
+
+  // Next, if we're in the load mode that prefers .swiftmodules, see if there's
+  // one here we can _likely_ load (validates OK). If so, bail early with
+  // errc::not_supported, so the next (serialized) loader in the chain will load
+  // it. Alternately, if there's a .swiftmodule present but we can't even read
+  // it (for whatever reason), we should let the other module loader diagnose
+  // it.
+  if (LoadMode == ModuleLoadingMode::PreferSerialized &&
+      serializedASTLooksValidOrCannotBeRead(FS, ModPath)) {
+    return std::make_error_code(std::errc::not_supported);
+  }
+
+  // At this point we're either in PreferParseable mode or there's no credible
+  // adjacent .swiftmodule so we'll go ahead and start trying to convert the
+  // .swiftinterface.
 
   // Set up a _potential_ sub-invocation to consume the .swiftinterface and emit
   // the .swiftmodule.
@@ -492,8 +528,7 @@ static void printImports(raw_ostream &out, ModuleDecl *M) {
   publicImportSet.insert(publicImports.begin(), publicImports.end());
 
   for (auto import : allImports) {
-    if (import.second->isStdlibModule() ||
-        import.second->isOnoneSupportModule() ||
+    if (import.second->isOnoneSupportModule() ||
         import.second->isBuiltinModule()) {
       continue;
     }
@@ -629,6 +664,9 @@ public:
       return;
     }
 
+    if (!isPublicOrUsableFromInline(nominal))
+      return;
+
     map[nominal].recordProtocols(directlyInherited);
 
     // Recurse to find any nested types.
@@ -647,8 +685,24 @@ public:
       return;
 
     const NominalTypeDecl *nominal = extension->getExtendedNominal();
+    if (!isPublicOrUsableFromInline(nominal))
+      return;
+
     map[nominal].recordConditionalConformances(extension->getInherited());
     // No recursion here because extensions are never nested.
+  }
+
+  /// Returns true if the conformance of \p nominal to \p proto is declared in
+  /// module \p M.
+  static bool conformanceDeclaredInModule(ModuleDecl *M,
+                                          const NominalTypeDecl *nominal,
+                                          ProtocolDecl *proto) {
+    SmallVector<ProtocolConformance *, 4> conformances;
+    nominal->lookupConformance(M, proto, conformances);
+    return llvm::all_of(conformances,
+                        [M](const ProtocolConformance *conformance) -> bool {
+      return M == conformance->getDeclContext()->getParentModule();
+    });
   }
 
   /// If there were any public protocols that need to be printed (i.e. they
@@ -657,6 +711,7 @@ public:
   void
   printSynthesizedExtensionIfNeeded(raw_ostream &out,
                                     const PrintOptions &printOptions,
+                                    ModuleDecl *M,
                                     const NominalTypeDecl *nominal) const {
     if (ExtraProtocols.empty())
       return;
@@ -682,10 +737,13 @@ public:
           [&](ProtocolDecl *inherited) -> TypeWalker::Action {
         if (!handledProtocols.insert(inherited).second)
           return TypeWalker::Action::SkipChildren;
-        if (isPublicOrUsableFromInline(inherited)) {
+
+        if (isPublicOrUsableFromInline(inherited) &&
+            conformanceDeclaredInModule(M, nominal, inherited)) {
           protocolsToPrint.push_back(inherited);
           return TypeWalker::Action::SkipChildren;
         }
+
         return TypeWalker::Action::Continue;
       });
     }
@@ -769,7 +827,7 @@ bool swift::emitParseableInterface(raw_ostream &out,
   for (const auto &nominalAndCollector : inheritedProtocolMap) {
     const NominalTypeDecl *nominal = nominalAndCollector.first;
     const InheritedProtocolCollector &collector = nominalAndCollector.second;
-    collector.printSynthesizedExtensionIfNeeded(out, printOptions, nominal);
+    collector.printSynthesizedExtensionIfNeeded(out, printOptions, M, nominal);
     needDummyProtocolDeclaration |=
         collector.printInaccessibleConformanceExtensionIfNeeded(out,
                                                                 printOptions,

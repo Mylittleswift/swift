@@ -72,6 +72,48 @@
 using namespace swift;
 using namespace metadataimpl;
 
+template<>
+Metadata *TargetSingletonMetadataInitialization<InProcess>::allocate(
+    const TypeContextDescriptor *description) const {
+  // If this class has resilient ancestry, the size of the metadata is not known
+  // at compile time, so we allocate it dynamically, filling it in from a
+  // pattern.
+  if (hasResilientClassPattern(description)) {
+    auto *pattern = ResilientPattern.get();
+
+    // If there is a relocation function, call it.
+    if (auto *fn = ResilientPattern->RelocationFunction.get())
+      return fn(description, pattern);
+
+    // Otherwise, use the default behavior.
+    auto *classDescription = cast<ClassDescriptor>(description);
+    return swift_relocateClassMetadata(classDescription, pattern);
+  }
+
+  // Otherwise, we have a static template that we can initialize in-place.
+  auto *metadata = IncompleteMetadata.get();
+
+  // If this is a class, we have to initialize the value witness table early
+  // so that two-phase initialization can proceed as if this metadata is
+  // complete for layout purposes when it appears as part of an aggregate type.
+  if (auto *classMetadata = dyn_cast<ClassMetadata>(metadata)) {
+    auto *fullMetadata = asFullMetadata(metadata);
+
+    // Begin by initializing the value witness table; everything else is
+    // initialized by swift_initClassMetadata().
+#if SWIFT_OBJC_INTEROP
+    fullMetadata->ValueWitnesses =
+      (classMetadata->Flags & ClassFlags::UsesSwiftRefcounting)
+         ? &VALUE_WITNESS_SYM(Bo)
+         : &VALUE_WITNESS_SYM(BO);
+#else
+    fullMetadata->ValueWitnesses = &VALUE_WITNESS_SYM(Bo);
+#endif
+  }
+
+  return metadata;
+}
+
 /// Copy the generic arguments into place in a newly-allocated metadata.
 static void installGenericArguments(Metadata *metadata,
                                     const TypeContextDescriptor *description,
@@ -268,12 +310,39 @@ namespace {
   };
 } // end anonymous namespace
 
-using GenericMetadataCache = MetadataCache<GenericCacheEntry, false>;
-using LazyGenericMetadataCache = Lazy<GenericMetadataCache>;
+namespace {
+  class GenericMetadataCache : public MetadataCache<GenericCacheEntry, false> {
+  public:
+    uint16_t NumKeyParameters;
+    uint16_t NumWitnessTables;
+
+    GenericMetadataCache(const TargetGenericContext<InProcess> &genericContext)
+        : NumKeyParameters(0), NumWitnessTables(0) {
+      // Count up the # of key parameters and # of witness tables.
+
+      // Find key generic parameters.
+      for (const auto &gp : genericContext.getGenericParams()) {
+        if (gp.hasKeyArgument())
+          ++NumKeyParameters;
+      }
+
+      // Find witness tables.
+      for (const auto &req : genericContext.getGenericRequirements()) {
+        if (req.Flags.hasKeyArgument() &&
+            req.getKind() == GenericRequirementKind::Protocol)
+          ++NumWitnessTables;
+      }
+    }
+  };
+
+  using LazyGenericMetadataCache = Lazy<GenericMetadataCache>;
+}
 
 /// Fetch the metadata cache for a generic metadata structure.
 static GenericMetadataCache &getCache(
-    const TypeGenericContextDescriptorHeader &generics) {
+                               const TypeContextDescriptor &description) {
+  auto &generics = description.getFullGenericContextHeader();
+
   // Keep this assert even if you change the representation above.
   static_assert(sizeof(LazyGenericMetadataCache) <=
                 sizeof(GenericMetadataInstantiationCache::PrivateData),
@@ -282,7 +351,7 @@ static GenericMetadataCache &getCache(
   auto lazyCache =
     reinterpret_cast<LazyGenericMetadataCache*>(
       generics.getInstantiationCache()->PrivateData);
-  return lazyCache->get();
+  return lazyCache->getWithInit(*description.getGenericContext());
 }
 
 /// Fetch the metadata cache for a generic metadata structure,
@@ -527,9 +596,11 @@ swift::swift_getGenericMetadata(MetadataRequest request,
   auto &generics = description->getFullGenericContextHeader();
   size_t numGenericArgs = generics.Base.NumKeyArguments;
 
-  auto key = MetadataCacheKey(arguments, numGenericArgs);
-  auto result =
-    getCache(generics).getOrInsert(key, request, description, arguments);
+  auto &cache = getCache(*description);
+  assert(numGenericArgs == cache.NumKeyParameters + cache.NumWitnessTables);
+  auto key = MetadataCacheKey(cache.NumKeyParameters, cache.NumWitnessTables,
+                              arguments);
+  auto result = cache.getOrInsert(key, request, description, arguments);
 
   return result.second;
 }
@@ -754,6 +825,22 @@ swift::swift_getObjCClassFromMetadata(const Metadata *theMetadata) {
   auto theClass = cast<ClassMetadata>(theMetadata);
   assert(theClass->isTypeMetadata());
   return theClass;
+}
+
+const ClassMetadata *
+swift::swift_getObjCClassFromMetadataConditional(const Metadata *theMetadata) {
+  // If it's an ordinary class, return it.
+  if (auto theClass = dyn_cast<ClassMetadata>(theMetadata)) {
+    return theClass;
+  }
+
+  // Unwrap ObjC class wrappers.
+  if (auto wrapper = dyn_cast<ObjCClassWrapperMetadata>(theMetadata)) {
+    return wrapper->Class;
+  }
+
+  // Not an ObjC class after all.
+  return nil;
 }
 
 #endif
@@ -2024,8 +2111,8 @@ static MetadataAllocator &getResilientMetadataAllocator() {
 }
 
 ClassMetadata *
-swift::swift_relocateClassMetadata(ClassDescriptor *description,
-                                   ResilientClassMetadataPattern *pattern) {
+swift::swift_relocateClassMetadata(const ClassDescriptor *description,
+                                   const ResilientClassMetadataPattern *pattern) {
   auto bounds = description->getMetadataBounds();
 
   auto metadata = reinterpret_cast<ClassMetadata *>(
@@ -2695,7 +2782,7 @@ swift::swift_updateClassMetadata(ClassMetadata *self,
 
 #ifndef NDEBUG
 static bool isAncestorOf(const ClassMetadata *metadata,
-                         ClassDescriptor *description) {
+                         const ClassDescriptor *description) {
   auto ancestor = metadata;
   while (ancestor && ancestor->isTypeMetadata()) {
     if (ancestor->getDescription() == description)
@@ -2707,9 +2794,9 @@ static bool isAncestorOf(const ClassMetadata *metadata,
 #endif
 
 void *
-swift::swift_lookUpClassMethod(ClassMetadata *metadata,
-                               MethodDescriptor *method,
-                               ClassDescriptor *description) {
+swift::swift_lookUpClassMethod(const ClassMetadata *metadata,
+                               const MethodDescriptor *method,
+                               const ClassDescriptor *description) {
   assert(metadata->isTypeMetadata());
 
   assert(isAncestorOf(metadata, description));
@@ -2722,7 +2809,7 @@ swift::swift_lookUpClassMethod(ClassMetadata *metadata,
   assert(index < methods.size());
 
   auto vtableOffset = vtable->getVTableOffset(description) + index;
-  auto *words = reinterpret_cast<void **>(metadata);
+  auto *words = reinterpret_cast<void * const *>(metadata);
 
   return *(words + vtableOffset);
 }
@@ -4337,11 +4424,15 @@ static Result performOnMetadataCache(const Metadata *metadata,
   auto genericArgs =
     reinterpret_cast<const void * const *>(
                                     description->getGenericArguments(metadata));
+  auto &cache = getCache(*description);
   size_t numGenericArgs = generics.Base.NumKeyArguments;
-  auto key = MetadataCacheKey(genericArgs, numGenericArgs);
+  assert(numGenericArgs == cache.NumKeyParameters + cache.NumWitnessTables);
+  (void)numGenericArgs;
+  auto key = MetadataCacheKey(cache.NumKeyParameters, cache.NumWitnessTables,
+                              genericArgs);
 
   return std::move(callbacks).forGenericMetadata(metadata, description,
-                                                 getCache(generics), key);
+                                                 cache, key);
 }
 
 bool swift::addToMetadataQueue(MetadataCompletionQueueEntry *queueEntry,
