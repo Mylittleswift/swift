@@ -89,7 +89,7 @@ swift::createDecrementBefore(SILValue Ptr, SILInstruction *InsertPt) {
   return B.createReleaseValue(Loc, Ptr, B.getDefaultAtomicity());
 }
 
-/// \brief Perform a fast local check to see if the instruction is dead.
+/// Perform a fast local check to see if the instruction is dead.
 ///
 /// This routine only examines the state of the instruction at hand.
 bool
@@ -121,8 +121,6 @@ swift::isInstructionTriviallyDead(SILInstruction *I) {
   // mark_uninitialized is never dead.
   if (isa<MarkUninitializedInst>(I))
     return false;
-  if (isa<MarkUninitializedBehaviorInst>(I))
-    return false;
 
   if (isa<DebugValueInst>(I) || isa<DebugValueAddrInst>(I))
     return false;
@@ -138,7 +136,7 @@ swift::isInstructionTriviallyDead(SILInstruction *I) {
   return false;
 }
 
-/// \brief Return true if this is a release instruction and the released value
+/// Return true if this is a release instruction and the released value
 /// is a part of a guaranteed parameter.
 bool swift::isIntermediateRelease(SILInstruction *I,
                                   EpilogueARCFunctionInfo *EAFI) {
@@ -240,7 +238,7 @@ void swift::recursivelyDeleteTriviallyDeadInstructions(
   }
 }
 
-/// \brief If the given instruction is dead, delete it along with its dead
+/// If the given instruction is dead, delete it along with its dead
 /// operands.
 ///
 /// \param I The instruction to be deleted.
@@ -396,7 +394,7 @@ void swift::placeFuncRef(ApplyInst *AI, DominanceInfo *DT) {
     FuncRef->moveBefore(&*DomBB->begin());
 }
 
-/// \brief Add an argument, \p val, to the branch-edge that is pointing into
+/// Add an argument, \p val, to the branch-edge that is pointing into
 /// block \p Dest. Return a new instruction and do not erase the old
 /// instruction.
 TermInst *swift::addArgumentToBranch(SILValue Val, SILBasicBlock *Dest,
@@ -1041,7 +1039,7 @@ void swift::releasePartialApplyCapturedArg(SILBuilder &Builder, SILLocation Loc,
   // possible for that value.
 
   // If we have qualified ownership, we should just emit a destroy value.
-  if (Arg->getFunction()->hasQualifiedOwnership()) {
+  if (Arg->getFunction()->hasOwnership()) {
     Callbacks.CreatedNewInst(Builder.createDestroyValue(Loc, Arg));
     return;
   }

@@ -6,6 +6,8 @@
 // RUN: %target-swift-frontend -typecheck %S/stored-properties.swift -enable-resilience -module-name StoredProperties -emit-parseable-module-interface-path %t/StoredProperties.swiftinterface
 // RUN: %target-swift-frontend -emit-ir %s -I %t -enable-parseable-module-interface | %FileCheck %s -check-prefix RESILIENT -check-prefix COMMON
 
+// REQUIRES: rdar_46486517
+
 import StoredProperties
 
 /// This test makes sure clients of a parseable interface see correct type
@@ -15,7 +17,7 @@ import StoredProperties
 // COMMON: %[[BAGOFVARIABLES:T16StoredProperties14BagOfVariablesV]] = type <{ %TSi, %TSb, [{{(3|7)}} x i8], %TSi }>
 
 // This type is non-@_fixed_layout, so it becomes opaque in a resilient module
-// CHECK: %[[HASSTOREDPROPERTIES:T16StoredProperties03HasaB0V]] = type <{ %TSi, %TSi, %TSb, [{{(3|7)}} x i8], %TSi, %TSb }>
+// CHECK: %[[HASSTOREDPROPERTIES:T16StoredProperties03HasaB0V]] = type <{ %TSi, %TSi, %TSb, [{{(3|7)}} x i8], %TSi, %TSb, [{{3|7}} x i8], %TSi }>
 // RESILIENT: %[[HASSTOREDPROPERTIES:swift.opaque]] = type opaque
 
 // COMMON: %[[HASSTOREDPROPERTIESFIXEDLAYOUT:T16StoredProperties03HasaB11FixedLayoutV]] = type <{ %[[BAGOFVARIABLES]], %[[BAGOFVARIABLES]] }>

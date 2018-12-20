@@ -107,7 +107,7 @@ namespace {
 
 class CallSiteDescriptor;
 
-/// \brief A SILCloner subclass which clones a function that takes a closure
+/// A SILCloner subclass which clones a function that takes a closure
 /// argument. We update the parameter list to remove the parameter for the
 /// closure argument and to append the variables captured in the closure.
 /// We also need to replace the closure parameter with the partial apply
@@ -664,8 +664,8 @@ ClosureSpecCloner::initCloned(SILOptFunctionBuilder &FunctionBuilder,
       /*classSubclassScope=*/SubclassScope::NotApplicable,
       ClosureUser->getInlineStrategy(), ClosureUser->getEffectsKind(),
       ClosureUser, ClosureUser->getDebugScope());
-  if (!ClosureUser->hasQualifiedOwnership()) {
-    Fn->setUnqualifiedOwnership();
+  if (!ClosureUser->hasOwnership()) {
+    Fn->setOwnershipEliminated();
   }
   for (auto &Attr : ClosureUser->getSemanticsAttrs())
     Fn->addSemanticsAttr(Attr);
@@ -711,7 +711,7 @@ SILValue ClosureSpecCloner::cloneCalleeConversion(
       CallSiteDesc.getLoc(), calleeValue, Cvt->getType(), false, true);
 }
 
-/// \brief Populate the body of the cloned closure, modifying instructions as
+/// Populate the body of the cloned closure, modifying instructions as
 /// necessary. This is where we create the actual specialized BB Arguments.
 void ClosureSpecCloner::populateCloned() {
   SILFunction *Cloned = getCloned();

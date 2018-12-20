@@ -234,7 +234,7 @@ void ConstraintSystem::applySolution(const Solution &solution) {
   Fixes.append(solution.Fixes.begin(), solution.Fixes.end());
 }
 
-/// \brief Restore the type variable bindings to what they were before
+/// Restore the type variable bindings to what they were before
 /// we attempted to solve this constraint system.
 void ConstraintSystem::restoreTypeVariableBindings(unsigned numBindings) {
   auto &savedBindings = *getSavedBindings();
@@ -251,8 +251,7 @@ bool ConstraintSystem::simplify(bool ContinueAfterFailures) {
   while (!ActiveConstraints.empty()) {
     // Grab the next constraint from the worklist.
     auto *constraint = &ActiveConstraints.front();
-    ActiveConstraints.pop_front();
-    assert(constraint->isActive() && "Worklist constraint is not active?");
+    deactivateConstraint(constraint);
 
     // Simplify this constraint.
     switch (simplifyConstraint(*constraint)) {
@@ -269,35 +268,20 @@ bool ConstraintSystem::simplify(bool ContinueAfterFailures) {
         log << ")\n";
       }
 
-      if (solverState)
-        solverState->retireConstraint(constraint);
-
-      CG.removeConstraint(constraint);
+      retireConstraint(constraint);
       break;
 
     case SolutionKind::Solved:
-      if (solverState) {
+      if (solverState)
         ++solverState->NumSimplifiedConstraints;
-
-        // This constraint has already been solved; retire it.
-        solverState->retireConstraint(constraint);
-      }
-
-      // Remove the constraint from the constraint graph.
-      CG.removeConstraint(constraint);
+      retireConstraint(constraint);
       break;
 
     case SolutionKind::Unsolved:
       if (solverState)
         ++solverState->NumUnsimplifiedConstraints;
-
-      InactiveConstraints.push_back(constraint);
       break;
     }
-
-    // This constraint is not active. We delay this operation until
-    // after simplification to avoid re-insertion.
-    constraint->setActive(false);
 
     // Check whether a constraint failed. If so, we're done.
     if (failedConstraint && !ContinueAfterFailures) {
@@ -316,7 +300,7 @@ bool ConstraintSystem::simplify(bool ContinueAfterFailures) {
 
 namespace {
 
-/// \brief Truncate the given small vector to the given new size.
+/// Truncate the given small vector to the given new size.
 template<typename T>
 void truncate(SmallVectorImpl<T> &vec, unsigned newSize) {
   assert(newSize <= vec.size() && "Not a truncation!");
@@ -388,10 +372,7 @@ ConstraintSystem::SolverState::~SolverState() {
 #endif
 
     // Transfer the constraint to "active" set.
-    CS.ActiveConstraints.splice(CS.ActiveConstraints.end(),
-                                CS.InactiveConstraints, constraint);
-
-    constraint->setActive(true);
+    CS.activateConstraint(constraint);
   }
 
   // Restore debugging state.
@@ -485,7 +466,7 @@ ConstraintSystem::SolverScope::~SolverScope() {
   cs.failedConstraint = nullptr;
 }
 
-/// \brief Solve the system of constraints.
+/// Solve the system of constraints.
 ///
 /// \param allowFreeTypeVariables How to bind free type variables in
 /// the solution.
@@ -826,7 +807,7 @@ void ConstraintSystem::shrink(Expr *expr) {
     }
 
   private:
-    /// \brief Extract type of the element from given collection type.
+    /// Extract type of the element from given collection type.
     ///
     /// \param collection The type of the collection container.
     ///
@@ -1670,11 +1651,18 @@ void ConstraintSystem::sortDesignatedTypes(
   size_t nextType = 0;
   for (auto argType : argInfo.getTypes()) {
     auto *nominal = argType->getAnyNominal();
-    for (size_t i = nextType + 1; i < nominalTypes.size(); ++i) {
+    for (size_t i = nextType; i < nominalTypes.size(); ++i) {
       if (nominal == nominalTypes[i]) {
         std::swap(nominalTypes[nextType], nominalTypes[i]);
         ++nextType;
         break;
+      } else if (auto *protoDecl = dyn_cast<ProtocolDecl>(nominalTypes[i])) {
+        if (TC.conformsToProtocol(argType, protoDecl, DC,
+                                  ConformanceCheckFlags::InExpression)) {
+          std::swap(nominalTypes[nextType], nominalTypes[i]);
+          ++nextType;
+          break;
+        }
       }
     }
   }
@@ -1722,6 +1710,10 @@ void ConstraintSystem::partitionForDesignatedTypes(
 
     auto *parentDC = funcDecl->getParent();
     auto *parentDecl = parentDC->getSelfNominalTypeDecl();
+
+    // Skip anything not defined in a nominal type.
+    if (!parentDecl)
+      return false;
 
     for (auto designatedTypeIndex : indices(designatedNominalTypes)) {
       auto *designatedNominal =
@@ -1807,7 +1799,6 @@ void ConstraintSystem::partitionDisjunction(
 
   SmallVector<unsigned, 4> disabled;
   SmallVector<unsigned, 4> unavailable;
-  SmallVector<unsigned, 4> globalScope;
 
   // First collect disabled constraints.
   forEachChoice(Choices, [&](unsigned index, Constraint *constraint) -> bool {
@@ -1831,20 +1822,6 @@ void ConstraintSystem::partitionDisjunction(
     });
   }
 
-  // Collect everything at the global scope.
-  forEachChoice(Choices, [&](unsigned index, Constraint *constraint) -> bool {
-    auto *decl = constraint->getOverloadChoice().getDecl();
-    auto *funcDecl = cast<FuncDecl>(decl);
-
-    // Skip anything defined within a type.
-    auto *parentDecl = funcDecl->getParent()->getAsDecl();
-    if (parentDecl)
-      return false;
-
-    globalScope.push_back(index);
-    return true;
-  });
-
   // Local function to create the next partition based on the options
   // passed in.
   PartitionAppendCallback appendPartition =
@@ -1866,7 +1843,6 @@ void ConstraintSystem::partitionDisjunction(
   appendPartition(everythingElse);
 
   // Now create the remaining partitions from what we previously collected.
-  appendPartition(globalScope);
   appendPartition(unavailable);
   appendPartition(disabled);
 

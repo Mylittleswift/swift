@@ -69,14 +69,17 @@ class ParseableInterfaceModuleLoader : public SerializedModuleLoaderBase {
 
   std::string CacheDir;
 
-  void
-  configureSubInvocationAndOutputPaths(CompilerInvocation &SubInvocation,
-                                       StringRef InPath,
-                                       llvm::SmallString<128> &OutPath);
+  /// Wire up the SubInvocation's InputsAndOutputs to contain both input and
+  /// output filenames.
+  ///
+  /// This is a method rather than a helper function in the implementation file
+  /// because it accesses non-public bits of FrontendInputsAndOutputs.
+  static void configureSubInvocationInputsAndOutputs(
+    CompilerInvocation &SubInvocation, StringRef InPath, StringRef OutPath);
 
   std::error_code
-  openModuleFiles(StringRef DirName, StringRef ModuleFilename,
-                  StringRef ModuleDocFilename,
+  openModuleFiles(AccessPathElem ModuleID, StringRef DirName,
+                  StringRef ModuleFilename, StringRef ModuleDocFilename,
                   std::unique_ptr<llvm::MemoryBuffer> *ModuleBuffer,
                   std::unique_ptr<llvm::MemoryBuffer> *ModuleDocBuffer,
                   llvm::SmallVectorImpl<char> &Scratch) override;
@@ -89,6 +92,17 @@ public:
     return std::unique_ptr<ParseableInterfaceModuleLoader>(
         new ParseableInterfaceModuleLoader(ctx, cacheDir, tracker, loadMode));
   }
+
+  /// Unconditionally build \p InPath (a swiftinterface file) to \p OutPath (as
+  /// a swiftmodule file).
+  ///
+  /// A simplified version of the core logic in #openModuleFiles, mostly for
+  /// testing purposes.
+  static bool buildSwiftModuleFromSwiftInterface(ASTContext &Ctx,
+                                                 StringRef CacheDir,
+                                                 StringRef ModuleName,
+                                                 StringRef InPath,
+                                                 StringRef OutPath);
 };
 
 

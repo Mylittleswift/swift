@@ -1226,3 +1226,52 @@ bool AutoClosureForwardingFailure::diagnoseAsError() {
       .fixItInsertAfter(argExpr->getEndLoc(), "()");
   return true;
 }
+
+bool NonOptionalUnwrapFailure::diagnoseAsError() {
+  auto *anchor = getAnchor();
+
+  auto diagnostic = diag::invalid_optional_chain;
+  if (isa<ForceValueExpr>(anchor))
+    diagnostic = diag::invalid_force_unwrap;
+
+  emitDiagnostic(anchor->getLoc(), diagnostic, BaseType)
+      .highlight(anchor->getSourceRange())
+      .fixItRemove(anchor->getEndLoc());
+
+  return true;
+}
+
+bool MissingCallFailure::diagnoseAsError() {
+  auto *baseExpr = getAnchor();
+  SourceLoc insertLoc = baseExpr->getEndLoc();
+
+  if (auto *FVE = dyn_cast<ForceValueExpr>(baseExpr))
+    baseExpr = FVE->getSubExpr();
+
+  if (auto *DRE = dyn_cast<DeclRefExpr>(baseExpr)) {
+    emitDiagnostic(baseExpr->getLoc(), diag::did_not_call_function,
+                   DRE->getDecl()->getBaseName().getIdentifier())
+        .fixItInsertAfter(insertLoc, "()");
+    return true;
+  }
+
+  if (auto *UDE = dyn_cast<UnresolvedDotExpr>(baseExpr)) {
+    emitDiagnostic(baseExpr->getLoc(), diag::did_not_call_method,
+                   UDE->getName().getBaseIdentifier())
+        .fixItInsertAfter(insertLoc, "()");
+    return true;
+  }
+
+  if (auto *DSCE = dyn_cast<DotSyntaxCallExpr>(baseExpr)) {
+    if (auto *DRE = dyn_cast<DeclRefExpr>(DSCE->getFn())) {
+      emitDiagnostic(baseExpr->getLoc(), diag::did_not_call_method,
+                     DRE->getDecl()->getBaseName().getIdentifier())
+          .fixItInsertAfter(insertLoc, "()");
+      return true;
+    }
+  }
+
+  emitDiagnostic(baseExpr->getLoc(), diag::did_not_call_function_value)
+      .fixItInsertAfter(insertLoc, "()");
+  return true;
+}

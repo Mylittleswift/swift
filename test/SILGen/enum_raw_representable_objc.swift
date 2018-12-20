@@ -1,13 +1,13 @@
-// RUN: %target-swift-emit-silgen -enable-sil-ownership -emit-sorted-sil -enable-objc-interop -disable-objc-attr-requires-foundation-module %s | %FileCheck %s
-// RUN: %target-swift-emit-silgen -enable-sil-ownership -emit-sorted-sil -enable-objc-interop -disable-objc-attr-requires-foundation-module -enable-resilience %s | %FileCheck -check-prefix=CHECK-RESILIENT %s
+// RUN: %target-swift-emit-silgen -emit-sorted-sil -enable-objc-interop -disable-objc-attr-requires-foundation-module %s | %FileCheck %s
+// RUN: %target-swift-emit-silgen -emit-sorted-sil -enable-objc-interop -disable-objc-attr-requires-foundation-module -enable-resilience %s | %FileCheck -check-prefix=CHECK-RESILIENT %s
 
 @objc public enum CLike: Int {
   case a, b, c
 }
 
-// CHECK-LABEL: sil [serialized] @$s27enum_raw_representable_objc5CLikeO0B5ValueACSgSi_tcfC
+// CHECK-LABEL: sil [serialized] [ossa] @$s27enum_raw_representable_objc5CLikeO0B5ValueACSgSi_tcfC
 
-// CHECK-LABEL: sil [serialized] @$s27enum_raw_representable_objc5CLikeO0B5ValueSivg
+// CHECK-LABEL: sil [serialized] [ossa] @$s27enum_raw_representable_objc5CLikeO0B5ValueSivg
 // CHECK-DAG: [[RESULT_BOX:%.+]] = alloc_stack $Int
 // CHECK-DAG: [[INPUT_BOX:%.+]] = alloc_stack $CLike
 // CHECK: [[RAW_TYPE:%.+]] = metatype $@thick Int.Type
@@ -17,5 +17,5 @@
 // CHECK: return [[RESULT]]
 // CHECK: end sil function '$s27enum_raw_representable_objc5CLikeO0B5ValueSivg'
 
-// CHECK-RESILIENT-DAG: sil @$s27enum_raw_representable_objc5CLikeO0B5ValueSivg
-// CHECK-RESILIENT-DAG: sil @$s27enum_raw_representable_objc5CLikeO0B5ValueACSgSi_tcfC
+// CHECK-RESILIENT-DAG: sil [ossa] @$s27enum_raw_representable_objc5CLikeO0B5ValueSivg
+// CHECK-RESILIENT-DAG: sil [ossa] @$s27enum_raw_representable_objc5CLikeO0B5ValueACSgSi_tcfC

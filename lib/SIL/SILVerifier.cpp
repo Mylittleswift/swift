@@ -77,16 +77,16 @@ static llvm::cl::opt<bool> SkipConvertEscapeToNoescapeAttributes(
 /// Returns true if A is an opened existential type or is equal to an
 /// archetype from F's generic context.
 static bool isArchetypeValidInFunction(ArchetypeType *A, const SILFunction *F) {
-  if (!A->getOpenedExistentialType().isNull())
+  if (isa<OpenedArchetypeType>(A))
     return true;
 
   // Find the primary archetype.
-  A = A->getPrimary();
+  auto P = A->getPrimary();
 
   // Ok, we have a primary archetype, make sure it is in the nested generic
   // environment of our caller.
   if (auto *genericEnv = F->getGenericEnvironment())
-    if (A->getGenericEnvironment() == genericEnv)
+    if (P->getGenericEnvironment() == genericEnv)
       return true;
 
   return false;
@@ -703,7 +703,7 @@ public:
     assert(F && "Expected value base with parent function");
     // If we do not have qualified ownership, then do not verify value base
     // ownership.
-    if (!F->hasQualifiedOwnership())
+    if (!F->hasOwnership())
       return;
     SILValue(V).verifyOwnership(F->getModule(), &DEBlocks);
   }
@@ -1515,12 +1515,12 @@ public:
     case LoadOwnershipQualifier::Unqualified:
       // We should not see loads with unqualified ownership when SILOwnership is
       // enabled.
-      require(!F.hasQualifiedOwnership(),
+      require(!F.hasOwnership(),
               "Load with unqualified ownership in a qualified function");
       break;
     case LoadOwnershipQualifier::Copy:
     case LoadOwnershipQualifier::Take:
-      require(F.hasQualifiedOwnership(),
+      require(F.hasOwnership(),
               "Load with qualified ownership in an unqualified function");
       // TODO: Could probably make this a bit stricter.
       require(!LI->getType().isTrivial(LI->getModule()),
@@ -1528,7 +1528,7 @@ public:
               "types");
       break;
     case LoadOwnershipQualifier::Trivial:
-      require(F.hasQualifiedOwnership(),
+      require(F.hasOwnership(),
               "Load with qualified ownership in an unqualified function");
       require(LI->getType().isTrivial(LI->getModule()),
               "A load with trivial ownership must load a trivial type");
@@ -1538,7 +1538,7 @@ public:
 
   void checkLoadBorrowInst(LoadBorrowInst *LBI) {
     require(
-        F.hasQualifiedOwnership(),
+        F.hasOwnership(),
         "Inst with qualified ownership in a function that is not qualified");
     require(LBI->getType().isObject(), "Result of load must be an object");
     require(!fnConv.useLoweredAddresses()
@@ -1552,7 +1552,7 @@ public:
 
   void checkEndBorrowInst(EndBorrowInst *EBI) {
     require(
-        F.hasQualifiedOwnership(),
+        F.hasOwnership(),
         "Inst with qualified ownership in a function that is not qualified");
   }
 
@@ -1672,13 +1672,13 @@ public:
     case StoreOwnershipQualifier::Unqualified:
       // We should not see loads with unqualified ownership when SILOwnership is
       // enabled.
-      require(!F.hasQualifiedOwnership(),
+      require(!F.hasOwnership(),
               "Qualified store in function with unqualified ownership?!");
       break;
     case StoreOwnershipQualifier::Init:
     case StoreOwnershipQualifier::Assign:
       require(
-          F.hasQualifiedOwnership(),
+          F.hasOwnership(),
           "Inst with qualified ownership in a function that is not qualified");
       // TODO: Could probably make this a bit stricter.
       require(!SI->getSrc()->getType().isTrivial(SI->getModule()),
@@ -1687,11 +1687,11 @@ public:
       break;
     case StoreOwnershipQualifier::Trivial: {
       require(
-          F.hasQualifiedOwnership(),
+          F.hasOwnership(),
           "Inst with qualified ownership in a function that is not qualified");
       SILValue Src = SI->getSrc();
       require(Src->getType().isTrivial(SI->getModule()) ||
-              Src.getOwnershipKind() == ValueOwnershipKind::Trivial,
+              Src.getOwnershipKind() == ValueOwnershipKind::Any,
               "A store with trivial ownership must store a type with trivial "
               "ownership");
       break;
@@ -1771,26 +1771,26 @@ public:
   void checkStrongRetain##Name##Inst(StrongRetain##Name##Inst *RI) { \
     requireObjectType(Name##StorageType, RI->getOperand(), \
                       "Operand of strong_retain_" #name); \
-    require(!F.hasQualifiedOwnership(), "strong_retain_" #name " is only in " \
+    require(!F.hasOwnership(), "strong_retain_" #name " is only in " \
                                         "functions with unqualified " \
                                         "ownership"); \
   } \
   void check##Name##RetainInst(Name##RetainInst *RI) { \
     requireObjectType(Name##StorageType, RI->getOperand(), \
                       "Operand of " #name "_retain"); \
-    require(!F.hasQualifiedOwnership(), \
+    require(!F.hasOwnership(), \
             #name "_retain is only in functions with unqualified ownership"); \
   } \
   void check##Name##ReleaseInst(Name##ReleaseInst *RI) { \
     requireObjectType(Name##StorageType, RI->getOperand(), \
                       "Operand of " #name "_release"); \
-    require(!F.hasQualifiedOwnership(), \
+    require(!F.hasOwnership(), \
             #name "_release is only in functions with unqualified ownership"); \
   } \
   void checkCopy##Name##ValueInst(Copy##Name##ValueInst *I) { \
     requireObjectType(Name##StorageType, I->getOperand(), \
                       "Operand of " #name "_retain"); \
-    require(F.hasQualifiedOwnership(), \
+    require(F.hasOwnership(), \
             "copy_" #name "_value is only valid in functions with qualified " \
             "ownership"); \
   }
@@ -1802,7 +1802,7 @@ public:
                                 "Operand of strong_retain_" #name); \
     require(ty->isLoadable(ResilienceExpansion::Maximal), \
           "strong_retain_" #name " requires '" #name "' type to be loadable"); \
-    require(!F.hasQualifiedOwnership(), "strong_retain_" #name " is only in " \
+    require(!F.hasOwnership(), "strong_retain_" #name " is only in " \
                                         "functions with unqualified " \
                                         "ownership"); \
   } \
@@ -1811,7 +1811,7 @@ public:
                                 "Operand of " #name "_retain"); \
     require(ty->isLoadable(ResilienceExpansion::Maximal), \
             #name "_retain requires '" #name "' type to be loadable"); \
-    require(!F.hasQualifiedOwnership(), \
+    require(!F.hasOwnership(), \
             #name "_retain is only in functions with unqualified ownership"); \
   } \
   void check##Name##ReleaseInst(Name##ReleaseInst *RI) { \
@@ -1819,7 +1819,7 @@ public:
                                 "Operand of " #name "_release"); \
     require(ty->isLoadable(ResilienceExpansion::Maximal), \
             #name "_release requires '" #name "' type to be loadable"); \
-    require(!F.hasQualifiedOwnership(), \
+    require(!F.hasOwnership(), \
             #name "_release is only in functions with unqualified ownership"); \
   } \
   void checkCopy##Name##ValueInst(Copy##Name##ValueInst *I) { \
@@ -1869,49 +1869,7 @@ public:
             || isa<PointerToAddressInst>(Src),
             "Mark Uninitialized must be applied to a storage location");
   }
-  
-  void checkMarkUninitializedBehaviorInst(MarkUninitializedBehaviorInst *MU) {
-    require(MU->getModule().getStage() == SILStage::Raw,
-            "mark_uninitialized instruction can only exist in raw SIL");
-    auto InitStorage = MU->getInitStorageFunc();
-    auto InitStorageTy = InitStorage->getType().getAs<SILFunctionType>();
-    require(InitStorageTy,
-            "mark_uninitialized initializer must be a function");
-    auto SubstInitStorageTy = InitStorageTy->substGenericArgs(F.getModule(),
-                                             MU->getInitStorageSubstitutions());
-    // FIXME: Destructured value or results?
-    require(SubstInitStorageTy->getResults().size() == 1,
-            "mark_uninitialized initializer must have one result");
-    auto StorageTy = SILType::getPrimitiveAddressType(
-                              SubstInitStorageTy->getSingleResult().getType());
-    requireSameType(StorageTy, MU->getStorage()->getType(),
-                    "storage must be address of initializer's result type");
-    
-    auto Setter = MU->getSetterFunc();
-    auto SetterTy = Setter->getType().getAs<SILFunctionType>();
-    require(SetterTy,
-            "mark_uninitialized setter must be a function");
-    auto SubstSetterTy = SetterTy->substGenericArgs(F.getModule(),
-                                               MU->getSetterSubstitutions());
-    require(SubstSetterTy->getParameters().size() == 2,
-            "mark_uninitialized setter must have a value and self param");
-    requireSameType(fnConv.getSILType(SubstSetterTy->getSelfParameter()),
-                    MU->getSelf()->getType(),
-                    "self type must match setter's self parameter type");
 
-    auto ValueTy = SubstInitStorageTy->getParameters()[0].getType();
-    requireSameType(SILType::getPrimitiveAddressType(ValueTy),
-                    SILType::getPrimitiveAddressType(
-                      SubstSetterTy->getParameters()[0].getType()),
-                    "value parameter type must match between initializer "
-                    "and setter");
-    
-    auto ValueAddrTy = SILType::getPrimitiveAddressType(ValueTy);
-    requireSameType(ValueAddrTy, MU->getType(),
-                    "result of mark_uninitialized_behavior should be address "
-                    "of value parameter to setter and initializer");
-  }
-  
   void checkMarkFunctionEscapeInst(MarkFunctionEscapeInst *MFE) {
     require(MFE->getModule().getStage() == SILStage::Raw,
             "mark_function_escape instruction can only exist in raw SIL");
@@ -1933,21 +1891,21 @@ public:
   void checkRetainValueInst(RetainValueInst *I) {
     require(I->getOperand()->getType().isObject(),
             "Source value should be an object value");
-    require(!F.hasQualifiedOwnership(),
+    require(!F.hasOwnership(),
             "retain_value is only in functions with unqualified ownership");
   }
 
   void checkRetainValueAddrInst(RetainValueAddrInst *I) {
     require(I->getOperand()->getType().isAddress(),
             "Source value should be an address value");
-    require(!F.hasQualifiedOwnership(),
+    require(!F.hasOwnership(),
             "retain_value is only in functions with unqualified ownership");
   }
 
   void checkCopyValueInst(CopyValueInst *I) {
     require(I->getOperand()->getType().isObject(),
             "Source value should be an object value");
-    require(!fnConv.useLoweredAddresses() || F.hasQualifiedOwnership(),
+    require(!fnConv.useLoweredAddresses() || F.hasOwnership(),
             "copy_value is only valid in functions with qualified "
             "ownership");
   }
@@ -1955,7 +1913,7 @@ public:
   void checkDestroyValueInst(DestroyValueInst *I) {
     require(I->getOperand()->getType().isObject(),
             "Source value should be an object value");
-    require(!fnConv.useLoweredAddresses() || F.hasQualifiedOwnership(),
+    require(!fnConv.useLoweredAddresses() || F.hasOwnership(),
             "destroy_value is only valid in functions with qualified "
             "ownership");
   }
@@ -1963,14 +1921,14 @@ public:
   void checkReleaseValueInst(ReleaseValueInst *I) {
     require(I->getOperand()->getType().isObject(),
             "Source value should be an object value");
-    require(!F.hasQualifiedOwnership(),
+    require(!F.hasOwnership(),
             "release_value is only in functions with unqualified ownership");
   }
 
   void checkReleaseValueAddrInst(ReleaseValueAddrInst *I) {
     require(I->getOperand()->getType().isAddress(),
             "Source value should be an address value");
-    require(!F.hasQualifiedOwnership(),
+    require(!F.hasOwnership(),
             "release_value is only in functions with unqualified ownership");
   }
 
@@ -2057,7 +2015,7 @@ public:
     if (auto *AEBI = dyn_cast<AllocExistentialBoxInst>(PEBI->getOperand())) {
       // The lowered type must be the properly-abstracted form of the AST type.
       SILType exType = AEBI->getExistentialType();
-      auto archetype = ArchetypeType::getOpened(exType.getASTType());
+      auto archetype = OpenedArchetypeType::get(exType.getASTType());
 
       auto loweredTy = F.getModule().Types.getLoweredType(
                                       Lowering::AbstractionPattern(archetype),
@@ -2257,12 +2215,12 @@ public:
 
   void checkStrongRetainInst(StrongRetainInst *RI) {
     requireReferenceValue(RI->getOperand(), "Operand of strong_retain");
-    require(!F.hasQualifiedOwnership(),
+    require(!F.hasOwnership(),
             "strong_retain is only in functions with unqualified ownership");
   }
   void checkStrongReleaseInst(StrongReleaseInst *RI) {
     requireReferenceValue(RI->getOperand(), "Operand of release");
-    require(!F.hasQualifiedOwnership(),
+    require(!F.hasOwnership(),
             "strong_release is only in functions with unqualified ownership");
   }
 
@@ -3077,7 +3035,7 @@ public:
             "existential type");
     
     // The lowered type must be the properly-abstracted form of the AST type.
-    auto archetype = ArchetypeType::getOpened(exType.getASTType());
+    auto archetype = OpenedArchetypeType::get(exType.getASTType());
     
     auto loweredTy = F.getModule().Types.getLoweredType(
                                 Lowering::AbstractionPattern(archetype),
@@ -3107,7 +3065,7 @@ public:
             "init_existential_value result must not be an address");
     // The operand must be at the right abstraction level for the existential.
     SILType exType = IEI->getType();
-    auto archetype = ArchetypeType::getOpened(exType.getASTType());
+    auto archetype = OpenedArchetypeType::get(exType.getASTType());
     auto loweredTy = F.getModule().Types.getLoweredType(
         Lowering::AbstractionPattern(archetype), IEI->getFormalConcreteType());
     requireSameType(
@@ -3139,7 +3097,7 @@ public:
     
     // The operand must be at the right abstraction level for the existential.
     SILType exType = IEI->getType();
-    auto archetype = ArchetypeType::getOpened(exType.getASTType());
+    auto archetype = OpenedArchetypeType::get(exType.getASTType());
     auto loweredTy = F.getModule().Types.getLoweredType(
                                        Lowering::AbstractionPattern(archetype),
                                        IEI->getFormalConcreteType());
@@ -3364,7 +3322,7 @@ public:
                 CBI->getCastType(),
             "success dest block argument of checked_cast_br must match type of "
             "cast");
-    require(F.hasQualifiedOwnership() || CBI->getFailureBB()->args_empty(),
+    require(F.hasOwnership() || CBI->getFailureBB()->args_empty(),
             "failure dest of checked_cast_br in unqualified ownership sil must "
             "take no arguments");
 #if 0
@@ -3391,7 +3349,7 @@ public:
                 CBI->getCastType(),
             "success dest block argument of checked_cast_value_br must match "
             "type of cast");
-    require(F.hasQualifiedOwnership() || CBI->getFailureBB()->args_empty(),
+    require(F.hasOwnership() || CBI->getFailureBB()->args_empty(),
             "failure dest of checked_cast_value_br in unqualified ownership "
             "sil must take no arguments");
   }
@@ -3939,7 +3897,7 @@ public:
       // The destination BB can take the argument payload, if any, as a BB
       // arguments, or it can ignore it and take no arguments.
       if (elt->hasAssociatedValues()) {
-        if (isSILOwnershipEnabled() && F.hasQualifiedOwnership()) {
+        if (isSILOwnershipEnabled() && F.hasOwnership()) {
           require(dest->getArguments().size() == 1,
                   "switch_enum destination for case w/ args must take 1 "
                   "argument");
@@ -3981,14 +3939,14 @@ public:
       // an @owned original version of the enum.
       //
       // When SIL ownership is disabled, we no longer support this.
-      if (isSILOwnershipEnabled() && F.hasQualifiedOwnership()) {
+      if (isSILOwnershipEnabled() && F.hasOwnership()) {
         require(SOI->getDefaultBB()->getNumArguments() == 1,
                 "Switch enum default block should have one argument");
         require(SOI->getDefaultBB()->getArgument(0)->getType() ==
                     SOI->getOperand()->getType(),
                 "Switch enum default block should have one argument that is "
                 "the same as the input type");
-      } else if (!F.hasQualifiedOwnership()) {
+      } else if (!F.hasOwnership()) {
         require(SOI->getDefaultBB()->args_empty(),
                 "switch_enum default destination must take no arguments");
       }
@@ -4046,6 +4004,13 @@ public:
     require(!(isa<MethodInst>(branchArg) &&
               cast<MethodInst>(branchArg)->getMember().isForeign),
         "branch argument cannot be a witness_method or an objc method_inst");
+    require(!(branchArg->getType().is<SILFunctionType>() &&
+              branchArg->getType()
+                      .castTo<SILFunctionType>()
+                      ->getExtInfo()
+                      .getRepresentation() ==
+                  SILFunctionTypeRepresentation::ObjCMethod),
+            "branch argument cannot be a objective-c method");
     return branchArg->getType() == bbArg->getType();
   }
 
@@ -4357,7 +4322,7 @@ public:
       }
 
       // If we do not have qualified ownership, do not check ownership.
-      if (!F.hasQualifiedOwnership()) {
+      if (!F.hasOwnership()) {
         return;
       }
 
@@ -4648,7 +4613,7 @@ public:
       // have non-trivial arguments.
       //
       // FIXME: it would be far simpler to ban all critical edges in general.
-      if (!F->hasQualifiedOwnership())
+      if (!F->hasOwnership())
         continue;
 
       if (isCriticalEdgePred(CBI, CondBranchInst::TrueIdx)) {
@@ -4656,7 +4621,7 @@ public:
             llvm::all_of(CBI->getTrueArgs(),
                          [](SILValue V) -> bool {
                            return V.getOwnershipKind() ==
-                                  ValueOwnershipKind::Trivial;
+                                  ValueOwnershipKind::Any;
                          }),
             "cond_br with critical edges must not have a non-trivial value");
       }
@@ -4665,7 +4630,7 @@ public:
             llvm::all_of(CBI->getFalseArgs(),
                          [](SILValue V) -> bool {
                            return V.getOwnershipKind() ==
-                                  ValueOwnershipKind::Trivial;
+                                  ValueOwnershipKind::Any;
                          }),
             "cond_br with critical edges must not have a non-trivial value");
       }

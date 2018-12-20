@@ -533,7 +533,7 @@ class TestBenchmarkDoctor(unittest.TestCase):
 
         Num-samples for Benchmark Driver are calibrated to be powers of two,
         take measurements for approximately 1s
-        based on short initial runtime sampling. Capped at 2k samples.
+        based on short initial runtime sampling. Capped at 200 samples.
         """
         driver = BenchmarkDriverMock(tests=['B1'], responses=([
             # calibration run, returns a stand-in for PerformanceTestResult
@@ -541,10 +541,10 @@ class TestBenchmarkDoctor(unittest.TestCase):
                   verbose=True), _PTR(min=300))] +
             # 5x i1 series, with 300 μs runtime its possible to take 4098
             # samples/s, but it should be capped at 2k
-            ([(_run('B1', num_samples=2048, num_iters=1,
+            ([(_run('B1', num_samples=200, num_iters=1,
                     verbose=True, measure_memory=True), _PTR(min=300))] * 5) +
             # 5x i2 series
-            ([(_run('B1', num_samples=2048, num_iters=2,
+            ([(_run('B1', num_samples=200, num_iters=2,
                     verbose=True, measure_memory=True), _PTR(min=300))] * 5)
         ))
         doctor = BenchmarkDoctor(self.args, driver)
@@ -561,13 +561,17 @@ class TestBenchmarkDoctor(unittest.TestCase):
         self.assert_contains(
             ['Calibrating num-samples for B1:',
              'Runtime 300 μs yields 4096 adjusted samples per second.',
-             'Measuring B1, 5 x i1 (2048 samples), 5 x i2 (2048 samples)'],
+             'Measuring B1, 5 x i1 (200 samples), 5 x i2 (200 samples)'],
             self.logs['debug'])
 
-    def test_benchmark_name_matches_capital_words_conventions(self):
+    def test_benchmark_name_matches_naming_conventions(self):
         driver = BenchmarkDriverMock(tests=[
             'BenchmarkName', 'CapitalWordsConvention', 'ABBRName',
-            'wrongCase', 'Wrong_convention'])
+            'TooManyCamelCaseHumps',
+            'Existential.Array.method.1x.Val4',
+            'Flatten.Array.Array.Str.for-in.reserved',
+            'Flatten.Array.String?.as!.NSArray',
+            'wrongCase', 'Wrong_convention', 'Illegal._$%[]<>{}@^()'])
         with captured_output() as (out, _):
             doctor = BenchmarkDoctor(self.args, driver)
             doctor.check()
@@ -577,12 +581,22 @@ class TestBenchmarkDoctor(unittest.TestCase):
         self.assertNotIn('BenchmarkName', output)
         self.assertNotIn('CapitalWordsConvention', output)
         self.assertNotIn('ABBRName', output)
+        self.assertNotIn('Existential.Array.method.1x.Val4', output)
+        self.assertNotIn('Flatten.Array.Array.Str.for-in.reserved', output)
+        self.assertNotIn('Flatten.Array.String?.as!.NSArray', output)
+        err_msg = " name doesn't conform to benchmark naming convention."
         self.assert_contains(
-            ["'wrongCase' name doesn't conform to UpperCamelCase convention.",
-             "'Wrong_convention' name doesn't conform to UpperCamelCase "
-             "convention."], self.logs['error'])
+            ["'wrongCase'" + err_msg, "'Wrong_convention'" + err_msg,
+             "'Illegal._$%[]<>{}@^()'" + err_msg], self.logs['error'])
         self.assert_contains(
-            ['See http://bit.ly/UpperCamelCase'], self.logs['info'])
+            ["'TooManyCamelCaseHumps' name is composed of 5 words."],
+            self.logs['warning'])
+        self.assert_contains(
+            ['See http://bit.ly/BenchmarkNaming'], self.logs['info'])
+        self.assert_contains(
+            ["Split 'TooManyCamelCaseHumps' name into dot-separated groups "
+             "and variants. See http://bit.ly/BenchmarkNaming"],
+            self.logs['info'])
 
     def test_benchmark_name_is_at_most_40_chars_long(self):
         driver = BenchmarkDriverMock(tests=[

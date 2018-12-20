@@ -202,6 +202,7 @@ extension _NativeDictionary { // ensureUnique
   }
 
   @inlinable
+  @_semantics("optimize.sil.specialize.generic.size.never")
   internal mutating func copyAndResize(capacity: Int) {
     let capacity = Swift.max(capacity, self.capacity)
     let newStorage = _DictionaryStorage<Key, Value>.resize(
@@ -220,6 +221,7 @@ extension _NativeDictionary { // ensureUnique
   }
 
   @inlinable
+  @_semantics("optimize.sil.specialize.generic.size.never")
   internal mutating func copy() {
     let newStorage = _DictionaryStorage<Key, Value>.copy(original: _storage)
     _internalInvariant(newStorage._scale == _storage._scale)
@@ -241,7 +243,7 @@ extension _NativeDictionary { // ensureUnique
   /// Ensure storage of self is uniquely held and can hold at least `capacity`
   /// elements. Returns true iff contents were rehashed.
   @inlinable
-  @inline(__always)
+  @_semantics("optimize.sil.specialize.generic.size.never")
   internal mutating func ensureUnique(isUnique: Bool, capacity: Int) -> Bool {
     if _fastPath(capacity <= self.capacity && isUnique) {
       return false
@@ -387,6 +389,52 @@ extension _NativeDictionary: _DictionaryBuffer {
   }
 }
 
+extension _NativeDictionary {
+  @inlinable
+  subscript(key: Key, isUnique isUnique: Bool) -> Value? {
+    @inline(__always)
+    get {
+      // Dummy definition; don't use.
+      return lookup(key)
+    }
+    @inline(__always)
+    _modify {
+      let (bucket, found) = mutatingFind(key, isUnique: isUnique)
+      if found {
+        // Move the old value out of storage, wrapping it into an optional
+        // before yielding it.
+        var value: Value? = (_values + bucket.offset).move()
+        defer {
+          // This is in a defer block because yield might throw, and we need to
+          // preserve Dictionary's storage invariants when that happens.
+          if let value = value {
+            // **Mutation.** Initialize storage to new value.
+            (_values + bucket.offset).initialize(to: value)
+          } else {
+            // **Removal.** We've already deinitialized the value; deinitialize
+            // the key too and register the removal.
+            (_keys + bucket.offset).deinitialize(count: 1)
+            _delete(at: bucket)
+          }
+        }
+        yield &value
+      } else {
+        var value: Value? = nil
+        defer {
+          // This is in a defer block because yield might throw, and we need to
+          // preserve Dictionary invariants when that happens.
+          if let value = value {
+            // **Insertion.** Insert the new entry at the correct place.  Note
+            // that `mutatingFind` already ensured that we have enough capacity.
+            _insert(at: bucket, key: key, value: value)
+          }
+        }
+        yield &value
+      }
+    }
+  }
+}
+
 // This function has a highly visible name to make it stand out in stack traces.
 @usableFromInline
 @inline(never)
@@ -444,7 +492,6 @@ extension _NativeDictionary { // Insertions
   /// held, and with enough capacity for a single insertion (if the key isn't
   /// already in the dictionary.)
   @inlinable
-  @inline(__always)
   internal mutating func mutatingFind(
     _ key: Key,
     isUnique: Bool
@@ -583,6 +630,7 @@ extension _NativeDictionary: _HashTableDelegate {
 extension _NativeDictionary { // Deletion
   @inlinable
   @_effects(releasenone)
+  @_semantics("optimize.sil.specialize.generic.size.never")
   internal func _delete(at bucket: Bucket) {
     hashTable.delete(at: bucket, with: self)
     _storage._count -= 1
@@ -591,7 +639,7 @@ extension _NativeDictionary { // Deletion
   }
 
   @inlinable
-  @inline(__always)
+  @_semantics("optimize.sil.specialize.generic.size.never")
   internal mutating func uncheckedRemove(
     at bucket: Bucket,
     isUnique: Bool

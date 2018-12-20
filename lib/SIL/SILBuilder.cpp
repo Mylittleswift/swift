@@ -24,7 +24,7 @@ using namespace swift;
 SILBuilder::SILBuilder(SILGlobalVariable *GlobVar,
                        SmallVectorImpl<SILInstruction *> *InsertedInstrs)
     : TempContext(GlobVar->getModule(), InsertedInstrs), C(TempContext),
-      F(nullptr), hasOwnership(false) {
+      F(nullptr) {
   setInsertionPoint(&GlobVar->StaticInitializerBlock);
 }
 
@@ -144,7 +144,7 @@ BranchInst *SILBuilder::createBranch(SILLocation Loc,
   return createBranch(Loc, TargetBlock, ArgsCopy);
 }
 
-/// \brief Branch to the given block if there's an active insertion point,
+/// Branch to the given block if there's an active insertion point,
 /// then move the insertion point to the end of that block.
 void SILBuilder::emitBlock(SILBasicBlock *BB, SILLocation BranchLoc) {
   if (!hasValidInsertionPoint()) {
@@ -514,7 +514,7 @@ void SILBuilder::emitShallowDestructureValueOperation(
   }
 
   // Otherwise, we want to destructure add the destructure and return.
-  if (getFunction().hasQualifiedOwnership()) {
+  if (getFunction().hasOwnership()) {
     auto *DI = emitDestructureValueOperation(Loc, V);
     copy(DI->getResults(), std::back_inserter(Results));
     return;

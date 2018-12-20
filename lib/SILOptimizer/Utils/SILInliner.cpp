@@ -313,7 +313,7 @@ class SILInlineCloner
 
   SILInliner::DeletionFuncTy DeletionCallback;
 
-  /// \brief The location representing the inlined instructions.
+  /// The location representing the inlined instructions.
   ///
   /// This location wraps the call site AST node that is being inlined.
   /// Alternatively, it can be the SIL file location of the call site (in case
@@ -593,7 +593,7 @@ void SILInlineCloner::fixUp(SILFunction *calleeFunction) {
 
 SILValue SILInlineCloner::borrowFunctionArgument(SILValue callArg,
                                                  FullApplySite AI) {
-  if (!AI.getFunction()->hasQualifiedOwnership()
+  if (!AI.getFunction()->hasOwnership()
       || callArg.getOwnershipKind() != ValueOwnershipKind::Owned) {
     return callArg;
   }
@@ -910,7 +910,6 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
   }
   case SILInstructionKind::MarkFunctionEscapeInst:
   case SILInstructionKind::MarkUninitializedInst:
-  case SILInstructionKind::MarkUninitializedBehaviorInst:
     llvm_unreachable("not valid in canonical sil");
   case SILInstructionKind::ObjectInst:
     llvm_unreachable("not valid in a function");

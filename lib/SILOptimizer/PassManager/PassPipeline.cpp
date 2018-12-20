@@ -11,7 +11,7 @@
 //===----------------------------------------------------------------------===//
 ///
 ///  \file
-///  \brief This file provides implementations of a few helper functions
+///  This file provides implementations of a few helper functions
 ///  which provide abstracted entrypoints to the SILPasses stage.
 ///
 ///  \note The actual SIL passes should be implemented in per-pass source files,
@@ -92,7 +92,14 @@ static void addMandatoryOptPipeline(SILPassPipelinePlan &P,
   P.addAllocBoxToStack();
   P.addNoReturnFolding();
   addDefiniteInitialization(P);
-  if (Options.EnableMandatorySemanticARCOpts) {
+  // Only run semantic arc opts if we are optimizing and if mandatory semantic
+  // arc opts is explicitly enabled.
+  //
+  // NOTE: Eventually this pass will be split into a mandatory/more aggressive
+  // pass. This will happen when OSSA is no longer eliminated before the
+  // optimizer pipeline is run implying we can put a pass that requires OSSA
+  // there.
+  if (Options.EnableMandatorySemanticARCOpts && Options.shouldOptimize()) {
     P.addSemanticARCOpts();
   }
   P.addClosureLifetimeFixup();
@@ -225,7 +232,8 @@ void addHighLevelLoopOptPasses(SILPassPipelinePlan &P) {
 }
 
 // Perform classic SSA optimizations.
-void addSSAPasses(SILPassPipelinePlan &P, OptimizationLevelKind OpLevel) {
+void addSSAPasses(SILPassPipelinePlan &P, OptimizationLevelKind OpLevel,
+                  bool stopAfterSerialization = false) {
   // Promote box allocations to stack allocations.
   P.addAllocBoxToStack();
 
@@ -282,6 +290,9 @@ void addSSAPasses(SILPassPipelinePlan &P, OptimizationLevelKind OpLevel) {
     // which reduces the ability of the compiler to optimize clients
     // importing this module.
     P.addSerializeSILPass();
+    if (stopAfterSerialization)
+      return;
+
     // Does inline semantics-functions (except "availability"), but not
     // global-init functions.
     P.addPerfInliner();
@@ -384,9 +395,12 @@ static void addMidModulePassesStackPromotePassPipeline(SILPassPipelinePlan &P) {
   P.addStackPromotion();
 }
 
-static void addMidLevelPassPipeline(SILPassPipelinePlan &P) {
+static bool addMidLevelPassPipeline(SILPassPipelinePlan &P,
+                                    bool stopAfterSerialization) {
   P.startPipeline("MidLevel");
-  addSSAPasses(P, OptimizationLevelKind::MidLevel);
+  addSSAPasses(P, OptimizationLevelKind::MidLevel, stopAfterSerialization);
+  if (stopAfterSerialization)
+    return true;
 
   // Specialize partially applied functions with dead arguments as a preparation
   // for CapturePropagation.
@@ -395,6 +409,7 @@ static void addMidLevelPassPipeline(SILPassPipelinePlan &P) {
   // Run loop unrolling after inlining and constant propagation, because loop
   // trip counts may have became constant.
   P.addLoopUnroll();
+  return false;
 }
 
 static void addClosureSpecializePassPipeline(SILPassPipelinePlan &P) {
@@ -574,7 +589,8 @@ SILPassPipelinePlan::getPerformancePassPipeline(const SILOptions &Options) {
   addMidModulePassesStackPromotePassPipeline(P);
 
   // Run an iteration of the mid-level SSA passes.
-  addMidLevelPassPipeline(P);
+  if (addMidLevelPassPipeline(P, Options.StopOptimizationAfterSerialization))
+    return P;
 
   // Perform optimizations that specialize.
   addClosureSpecializePassPipeline(P);

@@ -43,7 +43,8 @@ SerializedModuleLoaderBase::~SerializedModuleLoaderBase() = default;
 SerializedModuleLoader::~SerializedModuleLoader() = default;
 
 std::error_code SerializedModuleLoaderBase::openModuleFiles(
-    StringRef DirName, StringRef ModuleFilename, StringRef ModuleDocFilename,
+    AccessPathElem ModuleID, StringRef DirName, StringRef ModuleFilename,
+    StringRef ModuleDocFilename,
     std::unique_ptr<llvm::MemoryBuffer> *ModuleBuffer,
     std::unique_ptr<llvm::MemoryBuffer> *ModuleDocBuffer,
     llvm::SmallVectorImpl<char> &Scratch) {
@@ -94,14 +95,16 @@ std::error_code SerializedModuleLoaderBase::openModuleFiles(
 }
 
 std::error_code SerializedModuleLoader::openModuleFiles(
-    StringRef DirName, StringRef ModuleFilename, StringRef ModuleDocFilename,
+    AccessPathElem ModuleID, StringRef DirName, StringRef ModuleFilename,
+    StringRef ModuleDocFilename,
     std::unique_ptr<llvm::MemoryBuffer> *ModuleBuffer,
     std::unique_ptr<llvm::MemoryBuffer> *ModuleDocBuffer,
     llvm::SmallVectorImpl<char> &Scratch) {
   if (LoadMode == ModuleLoadingMode::OnlyParseable)
     return std::make_error_code(std::errc::not_supported);
 
-  return SerializedModuleLoaderBase::openModuleFiles(DirName, ModuleFilename,
+  return SerializedModuleLoaderBase::openModuleFiles(ModuleID, DirName,
+                                                     ModuleFilename,
                                                      ModuleDocFilename,
                                                      ModuleBuffer,
                                                      ModuleDocBuffer, Scratch);
@@ -142,6 +145,23 @@ bool SerializedModuleLoader::maybeDiagnoseArchitectureMismatch(
   return true;
 }
 
+static std::pair<llvm::SmallString<16>, llvm::SmallString<16>>
+getArchSpecificModuleFileNames(StringRef archName) {
+  llvm::SmallString<16> archFile, archDocFile;
+
+  if (!archName.empty()) {
+    archFile += archName;
+    archFile += '.';
+    archFile += file_types::getExtension(file_types::TY_SwiftModuleFile);
+
+    archDocFile += archName;
+    archDocFile += '.';
+    archDocFile += file_types::getExtension(file_types::TY_SwiftModuleDocFile);
+  }
+
+  return {archFile, archDocFile};
+}
+
 bool
 SerializedModuleLoaderBase::findModule(AccessPathElem moduleID,
            std::unique_ptr<llvm::MemoryBuffer> *moduleBuffer,
@@ -157,19 +177,19 @@ SerializedModuleLoaderBase::findModule(AccessPathElem moduleID,
   moduleDocFilename +=
       file_types::getExtension(file_types::TY_SwiftModuleDocFile);
 
-  // FIXME: Which name should we be using here? Do we care about CPU subtypes?
-  // FIXME: At the very least, don't hardcode "arch".
-  llvm::SmallString<16> archName{
-      Ctx.LangOpts.getPlatformConditionValue(PlatformConditionKind::Arch)};
-  llvm::SmallString<16> archFile{archName};
-  llvm::SmallString<16> archDocFile{archName};
-  if (!archFile.empty()) {
-    archFile += '.';
-    archFile += file_types::getExtension(file_types::TY_SwiftModuleFile);
+  StringRef archName = Ctx.LangOpts.Target.getArchName();
+  auto archFileNames = getArchSpecificModuleFileNames(archName);
 
-    archDocFile += '.';
-    archDocFile += file_types::getExtension(file_types::TY_SwiftModuleDocFile);
-  }
+  // FIXME: We used to use "major architecture" names for these files---the
+  // names checked in "#if arch(...)". Fall back to that name in the one case
+  // where it's different from what Swift 4.2 supported: 32-bit ARM platforms.
+  // We should be able to drop this once there's an Xcode that supports the
+  // new names.
+  StringRef alternateArchName;
+  if (Ctx.LangOpts.Target.getArch() == llvm::Triple::ArchType::arm)
+    alternateArchName = "arm";
+  auto alternateArchFileNames =
+      getArchSpecificModuleFileNames(alternateArchName);
 
   auto &fs = *Ctx.SourceMgr.getFileSystem();
   isFramework = false;
@@ -187,10 +207,19 @@ SerializedModuleLoaderBase::findModule(AccessPathElem moduleID,
 
     if (statResult && statResult->isDirectory()) {
       // A .swiftmodule directory contains architecture-specific files.
-      result = openModuleFiles(currPath,
-                               archFile.str(), archDocFile.str(),
+      result = openModuleFiles(moduleID, currPath,
+                               archFileNames.first, archFileNames.second,
                                moduleBuffer, moduleDocBuffer,
                                scratch);
+
+      if (result == std::errc::no_such_file_or_directory &&
+          !alternateArchName.empty()) {
+        result = openModuleFiles(moduleID, currPath,
+                                 alternateArchFileNames.first,
+                                 alternateArchFileNames.second,
+                                 moduleBuffer, moduleDocBuffer,
+                                 scratch);
+      }
 
       if (result == std::errc::no_such_file_or_directory) {
         if (maybeDiagnoseArchitectureMismatch(moduleID.second, moduleName,
@@ -202,7 +231,7 @@ SerializedModuleLoaderBase::findModule(AccessPathElem moduleID,
     } else {
       // We can't just return the error; the path we're looking for might not
       // be "Foo.swiftmodule".
-      result = openModuleFiles(path,
+      result = openModuleFiles(moduleID, path,
                                moduleFilename.str(), moduleDocFilename.str(),
                                moduleBuffer, moduleDocBuffer,
                                scratch);
@@ -228,8 +257,17 @@ SerializedModuleLoaderBase::findModule(AccessPathElem moduleID,
       // Frameworks always use architecture-specific files within a .swiftmodule
       // directory.
       llvm::sys::path::append(currPath, "Modules", moduleFilename.str());
-      auto err = openModuleFiles(currPath, archFile.str(), archDocFile.str(),
+      auto err = openModuleFiles(moduleID, currPath,
+                                 archFileNames.first, archFileNames.second,
                                  moduleBuffer, moduleDocBuffer, scratch);
+
+      if (err == std::errc::no_such_file_or_directory &&
+          !alternateArchName.empty()) {
+        err = openModuleFiles(moduleID, currPath,
+                              alternateArchFileNames.first,
+                              alternateArchFileNames.second,
+                              moduleBuffer, moduleDocBuffer, scratch);
+      }
 
       if (err == std::errc::no_such_file_or_directory) {
         if (maybeDiagnoseArchitectureMismatch(moduleID.second, moduleName,
@@ -267,7 +305,7 @@ SerializedModuleLoaderBase::findModule(AccessPathElem moduleID,
 
   // Search the runtime import path.
   isFramework = false;
-  return !openModuleFiles(Ctx.SearchPathOpts.RuntimeLibraryImportPath,
+  return !openModuleFiles(moduleID, Ctx.SearchPathOpts.RuntimeLibraryImportPath,
                           moduleFilename.str(), moduleDocFilename.str(),
                           moduleBuffer, moduleDocBuffer, scratch);
 }
@@ -508,7 +546,7 @@ void swift::serialization::diagnoseSerializedASTLoadFailure(
     auto diagKind = diag::serialization_name_mismatch;
     if (Ctx.LangOpts.DebuggerSupport)
       diagKind = diag::serialization_name_mismatch_repl;
-    Ctx.Diags.diagnose(diagLoc, diagKind, loadInfo.name, ModuleName);
+    Ctx.Diags.diagnose(diagLoc, diagKind, loadInfo.name, ModuleName.str());
     break;
   }
 

@@ -23,9 +23,11 @@
 #include "swift/Basic/FileTypes.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/Basic/Statistic.h"
+#include "swift/DWARFImporter/DWARFImporter.h"
 #include "swift/Parse/DelayedParsingCallbacks.h"
 #include "swift/Parse/Lexer.h"
 #include "swift/SIL/SILModule.h"
+#include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/Serialization/SerializationOptions.h"
 #include "swift/Serialization/SerializedModuleLoader.h"
 #include "swift/Strings.h"
@@ -337,6 +339,18 @@ bool CompilerInstance::setUpModuleLoaders() {
   }
   Context->addModuleLoader(std::move(SML));
   Context->addModuleLoader(std::move(clangImporter), /*isClang*/ true);
+
+  if (Invocation.getLangOptions().EnableDWARFImporter) {
+    auto dwarfImporter =
+        DWARFImporter::create(*Context, Invocation.getClangImporterOptions(),
+                              getDependencyTracker());
+    if (!dwarfImporter) {
+      Diagnostics.diagnose(SourceLoc(), diag::error_clang_importer_create_fail);
+      return true;
+    }
+    Context->addModuleLoader(std::move(dwarfImporter));
+  }
+
   return false;
 }
 
@@ -1042,13 +1056,7 @@ void CompilerInstance::performParseOnly(bool EvaluateConditionals,
         SourceFileKind::Library, SourceFile::ImplicitModuleImportKind::None,
         BufferID);
 
-    bool Done;
-    do {
-      // Parser may stop at some erroneous constructions like #else, #endif
-      // or '}' in some cases, continue parsing until we are done
-      parseIntoSourceFile(*NextInput, BufferID, &Done, nullptr,
-                          &PersistentState, nullptr);
-    } while (!Done);
+    parseIntoSourceFileFull(*NextInput, BufferID, &PersistentState);
   }
 
   // Now parse the main file.
@@ -1057,11 +1065,8 @@ void CompilerInstance::performParseOnly(bool EvaluateConditionals,
         MainModule->getMainSourceFile(Invocation.getSourceFileKind());
     MainFile.SyntaxParsingCache = Invocation.getMainFileSyntaxParsingCache();
 
-    bool Done;
-    do {
-      parseIntoSourceFile(MainFile, MainFile.getBufferID().getValue(), &Done,
-                          nullptr, &PersistentState, nullptr);
-    } while (!Done);
+    parseIntoSourceFileFull(MainFile, MainFile.getBufferID().getValue(),
+                            &PersistentState);
   }
 
   assert(Context->LoadedModules.size() == 1 &&
@@ -1077,6 +1082,85 @@ void CompilerInstance::freeASTContext() {
 }
 
 void CompilerInstance::freeSILModule() { TheSILModule.reset(); }
+
+/// Perform "stable" optimizations that are invariant across compiler versions.
+static bool performMandatorySILPasses(CompilerInvocation &Invocation,
+                                      SILModule *SM) {
+  if (Invocation.getFrontendOptions().RequestedAction ==
+      FrontendOptions::ActionType::MergeModules) {
+    // Don't run diagnostic passes at all.
+  } else if (!Invocation.getDiagnosticOptions().SkipDiagnosticPasses) {
+    if (runSILDiagnosticPasses(*SM))
+      return true;
+  } else {
+    // Even if we are not supposed to run the diagnostic passes, we still need
+    // to run the ownership evaluator.
+    if (runSILOwnershipEliminatorPass(*SM))
+      return true;
+  }
+
+  if (Invocation.getSILOptions().MergePartialModules)
+    SM->linkAllFromCurrentModule();
+  return false;
+}
+
+/// Perform SIL optimization passes if optimizations haven't been disabled.
+/// These may change across compiler versions.
+static void performSILOptimizations(CompilerInvocation &Invocation,
+                                    SILModule *SM) {
+  SharedTimer timer("SIL optimization");
+  if (Invocation.getFrontendOptions().RequestedAction ==
+      FrontendOptions::ActionType::MergeModules ||
+      !Invocation.getSILOptions().shouldOptimize()) {
+    runSILPassesForOnone(*SM);
+    return;
+  }
+  runSILOptPreparePasses(*SM);
+
+  StringRef CustomPipelinePath =
+  Invocation.getSILOptions().ExternalPassPipelineFilename;
+  if (!CustomPipelinePath.empty()) {
+    runSILOptimizationPassesWithFileSpecification(*SM, CustomPipelinePath);
+  } else {
+    runSILOptimizationPasses(*SM);
+  }
+}
+
+static void countStatsPostSILOpt(UnifiedStatsReporter &Stats,
+                                 const SILModule& Module) {
+  auto &C = Stats.getFrontendCounters();
+  // FIXME: calculate these in constant time, via the dense maps.
+  C.NumSILOptFunctions += Module.getFunctionList().size();
+  C.NumSILOptVtables += Module.getVTableList().size();
+  C.NumSILOptWitnessTables += Module.getWitnessTableList().size();
+  C.NumSILOptDefaultWitnessTables += Module.getDefaultWitnessTableList().size();
+  C.NumSILOptGlobalVariables += Module.getSILGlobalList().size();
+}
+
+bool CompilerInstance::performSILProcessing(SILModule *silModule,
+                                            UnifiedStatsReporter *stats) {
+  if (performMandatorySILPasses(Invocation, silModule))
+    return true;
+
+  {
+    SharedTimer timer("SIL verification, pre-optimization");
+    silModule->verify();
+  }
+
+  performSILOptimizations(Invocation, silModule);
+
+  if (stats)
+    countStatsPostSILOpt(*stats, *silModule);
+
+  {
+    SharedTimer timer("SIL verification, post-optimization");
+    silModule->verify();
+  }
+
+  performSILInstCountIfNeeded(silModule);
+  return false;
+}
+
 
 const PrimarySpecificPaths &
 CompilerInstance::getPrimarySpecificPathsForWholeModuleOptimizationMode()

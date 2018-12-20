@@ -39,7 +39,7 @@
 using namespace swift;
 using namespace constraints;
 
-/// \brief Retrieve the fixed type for the given type variable.
+/// Retrieve the fixed type for the given type variable.
 Type Solution::getFixedType(TypeVariableType *typeVar) const {
   auto knownBinding = typeBindings.find(typeVar);
   assert(knownBinding != typeBindings.end());
@@ -51,15 +51,11 @@ Type Solution::getFixedType(TypeVariableType *typeVar) const {
 /// This comes up in computeSubstitutions() when accessing
 /// members via dynamic lookup.
 static bool isOpenedAnyObject(Type type) {
-  auto archetype = type->getAs<ArchetypeType>();
+  auto archetype = type->getAs<OpenedArchetypeType>();
   if (!archetype)
     return false;
 
-  auto existential = archetype->getOpenedExistentialType();
-  if (!existential)
-    return false;
-
-  return existential->isAnyObject();
+  return archetype->getOpenedExistentialType()->isAnyObject();
 }
 
 SubstitutionMap Solution::computeSubstitutions(
@@ -103,7 +99,7 @@ SubstitutionMap Solution::computeSubstitutions(
                               lookupConformanceFn);
 }
 
-/// \brief Find a particular named function witness for a type that conforms to
+/// Find a particular named function witness for a type that conforms to
 /// the given protocol.
 ///
 /// \param tc The type check we're using.
@@ -219,24 +215,6 @@ getImplicitMemberReferenceAccessSemantics(Expr *base, VarDecl *member,
     // Access this directly instead of going through (e.g.) observing or
     // trivial accessors.
     return AccessSemantics::DirectToStorage;
-  }
-  
-  // Check for property behavior initializations.
-  if (auto *AFD_DC = dyn_cast<AbstractFunctionDecl>(DC)) {
-    if (member->hasBehaviorNeedingInitialization() &&
-        // In a ctor.
-        isa<ConstructorDecl>(AFD_DC) &&
-        
-        // Ctor is for immediate class, not a derived class.
-        AFD_DC->getParent()->getDeclaredInterfaceType()->isEqual(
-          member->getDeclContext()->getDeclaredInterfaceType()) &&
-        
-        // Is a "self.property" reference.
-        isa<DeclRefExpr>(base) &&
-        AFD_DC->getImplicitSelfDecl() == cast<DeclRefExpr>(base)->getDecl()) {
-      // Do definite initialization analysis to handle this property.
-      return AccessSemantics::BehaviorInitialization;
-    }
   }
 
   // Check whether this is a member access on 'self'.
@@ -403,21 +381,22 @@ static Expr *buildDynamicMemberLookupIndexExpr(StringRef name, Type ty,
   // Build and type check the string literal index value to the specific
   // string type expected by the subscript.
   Expr *nameExpr = new (ctx) StringLiteralExpr(name, loc, /*implicit*/true);
+  (void)cs.TC.typeCheckExpression(nameExpr, dc);
+  cs.cacheExprTypes(nameExpr);
 
   // Build a tuple so that the argument has a label.
   Expr *tuple = TupleExpr::create(ctx, loc, nameExpr, ctx.Id_dynamicMember,
                                   loc, loc, /*hasTrailingClosure*/false,
                                   /*implicit*/true);
-  (void)cs.TC.typeCheckExpression(tuple, dc, TypeLoc::withoutLoc(ty),
-                                  CTP_CallArgument);
-  cs.cacheExprTypes(tuple);
+  cs.setType(tuple, ty);
+  tuple->setType(ty);
   return tuple;
 }
 
 
 namespace {
 
-  /// \brief Rewrites an expression by applying the solution of a constraint
+  /// Rewrites an expression by applying the solution of a constraint
   /// system to that expression.
   class ExprRewriter : public ExprVisitor<ExprRewriter, Expr *> {
   public:
@@ -438,7 +417,7 @@ namespace {
       cs.getTypeChecker().useBridgedNSErrorConformances(dc, toType);
     }
 
-    /// \brief Coerce the given tuple to another tuple type.
+    /// Coerce the given tuple to another tuple type.
     ///
     /// \param expr The expression we're converting.
     ///
@@ -452,19 +431,15 @@ namespace {
     /// \param sources The sources of each of the elements to be used in the
     /// resulting tuple, as provided by \c computeTupleShuffle.
     ///
-    /// \param variadicArgs The source indices that are mapped to the variadic
-    /// parameter of the resulting tuple, as provided by \c computeTupleShuffle.
-    ///
     /// \param typeFromPattern Optionally, the caller can specify the pattern
     /// from where the toType is derived, so that we can deliver better fixit.
     Expr *coerceTupleToTuple(Expr *expr, TupleType *fromTuple,
                              TupleType *toTuple,
                              ConstraintLocatorBuilder locator,
-                             SmallVectorImpl<int> &sources,
-                             SmallVectorImpl<unsigned> &variadicArgs,
+                             SmallVectorImpl<unsigned> &sources,
                              Optional<Pattern*> typeFromPattern = None);
 
-    /// \brief Coerce a subclass, class-constrained archetype, class-constrained
+    /// Coerce a subclass, class-constrained archetype, class-constrained
     /// existential or to a superclass type.
     ///
     /// Also supports metatypes of the above.
@@ -478,7 +453,7 @@ namespace {
     Expr *coerceSuperclass(Expr *expr, Type toType,
                            ConstraintLocatorBuilder locator);
 
-    /// \brief Coerce the given value to existential type.
+    /// Coerce the given value to existential type.
     ///
     /// The following conversions are supported:
     /// - concrete to existential
@@ -495,13 +470,13 @@ namespace {
     Expr *coerceExistential(Expr *expr, Type toType,
                             ConstraintLocatorBuilder locator);
 
-    /// \brief Coerce an expression of (possibly unchecked) optional
+    /// Coerce an expression of (possibly unchecked) optional
     /// type to have a different (possibly unchecked) optional type.
     Expr *coerceOptionalToOptional(Expr *expr, Type toType,
                                    ConstraintLocatorBuilder locator,
                                    Optional<Pattern*> typeFromPattern = None);
 
-    /// \brief Coerce an expression of implicitly unwrapped optional type to its
+    /// Coerce an expression of implicitly unwrapped optional type to its
     /// underlying value type, in the correct way for an implicit
     /// look-through.
     Expr *coerceImplicitlyUnwrappedOptionalToValue(Expr *expr, Type objTy);
@@ -525,7 +500,7 @@ namespace {
     bool peepholeCollectionUpcast(Expr *expr, Type toType,  bool bridged,
                                   ConstraintLocatorBuilder locator);
 
-    /// \brief Build a collection upcast expression.
+    /// Build a collection upcast expression.
     ///
     /// \param bridged Whether this is a bridging conversion, meaning that the
     /// element types themselves are bridged (vs. simply coerced).
@@ -551,7 +526,7 @@ namespace {
     }
 
   public:
-    /// \brief Build a reference to the given declaration.
+    /// Build a reference to the given declaration.
     Expr *buildDeclRef(OverloadChoice choice, DeclNameLoc loc, Type openedType,
                        ConstraintLocatorBuilder locator, bool implicit,
                        FunctionRefKind functionRefKind,
@@ -662,7 +637,7 @@ namespace {
     /// Describes an opened existential that has not yet been closed.
     struct OpenedExistential {
       /// The archetype describing this opened existential.
-      ArchetypeType *Archetype;
+      OpenedArchetypeType *Archetype;
 
       /// The existential value being opened.
       Expr *ExistentialValue;
@@ -775,7 +750,7 @@ namespace {
     /// \returns An OpaqueValueExpr that provides a reference to the value
     /// stored within the expression or its metatype (if the base was a
     /// metatype).
-    Expr *openExistentialReference(Expr *base, ArchetypeType *archetype,
+    Expr *openExistentialReference(Expr *base, OpenedArchetypeType *archetype,
                                    ValueDecl *member) {
       assert(archetype && "archetype not already opened?");
 
@@ -879,7 +854,7 @@ namespace {
       return true;
     }
 
-    /// \brief Build a new member reference with the given base and member.
+    /// Build a new member reference with the given base and member.
     Expr *buildMemberRef(Expr *base, Type openedFullType, SourceLoc dotLoc,
                          OverloadChoice choice, DeclNameLoc memberLoc,
                          Type openedType, ConstraintLocatorBuilder locator,
@@ -1140,10 +1115,10 @@ namespace {
       return finishApply(apply, openedType, locator);
     }
     
-    /// \brief Describes either a type or the name of a type to be resolved.
+    /// Describes either a type or the name of a type to be resolved.
     using TypeOrName = llvm::PointerUnion<Identifier, Type>;
 
-    /// \brief Convert the given literal expression via a protocol pair.
+    /// Convert the given literal expression via a protocol pair.
     ///
     /// This routine handles the two-step literal conversion process used
     /// by integer, float, character, extended grapheme cluster, and string
@@ -1202,7 +1177,7 @@ namespace {
                          Diag<> brokenProtocolDiag,
                          Diag<> brokenBuiltinProtocolDiag);
 
-    /// \brief Convert the given literal expression via a protocol pair.
+    /// Convert the given literal expression via a protocol pair.
     ///
     /// This routine handles the two-step literal conversion process used
     /// by integer, float, character, extended grapheme cluster, and string
@@ -1248,7 +1223,7 @@ namespace {
                                 Diag<> brokenProtocolDiag,
                                 Diag<> brokenBuiltinProtocolDiag);
 
-    /// \brief Finish a function application by performing the appropriate
+    /// Finish a function application by performing the appropriate
     /// conversions on the function and argument expressions and setting
     /// the resulting type.
     ///
@@ -1264,7 +1239,7 @@ namespace {
                       ConstraintLocatorBuilder locator);
 
   private:
-    /// \brief Simplify the given type by substituting all occurrences of
+    /// Simplify the given type by substituting all occurrences of
     /// type variables for their fixed types.
     Type simplifyType(Type type) {
       return solution.simplifyType(type);
@@ -1273,7 +1248,7 @@ namespace {
   public:
 
 
-    /// \brief Coerce a closure expression with a non-Void return type to a
+    /// Coerce a closure expression with a non-Void return type to a
     /// contextual function type with a Void return type.
     ///
     /// This operation cannot fail.
@@ -1284,7 +1259,7 @@ namespace {
     ///
     ClosureExpr *coerceClosureExprToVoid(ClosureExpr *expr);
 
-    /// \brief Coerce a closure expression with a Never return type to a
+    /// Coerce a closure expression with a Never return type to a
     /// contextual function type with some other return type.
     ///
     /// This operation cannot fail.
@@ -1295,7 +1270,7 @@ namespace {
     ///
     ClosureExpr *coerceClosureExprFromNever(ClosureExpr *expr);
     
-    /// \brief Coerce the given expression to the given type.
+    /// Coerce the given expression to the given type.
     ///
     /// This operation cannot fail.
     ///
@@ -1310,7 +1285,7 @@ namespace {
                        ConstraintLocatorBuilder locator,
                        Optional<Pattern*> typeFromPattern = None);
     
-    /// \brief Coerce the given expression (which is the argument to a call) to
+    /// Coerce the given expression (which is the argument to a call) to
     /// the given parameter type.
     ///
     /// This operation cannot fail.
@@ -1331,7 +1306,7 @@ namespace {
                         bool hasTrailingClosure,
                         ConstraintLocatorBuilder locator);
 
-    /// \brief Coerce the given object argument (e.g., for the base of a
+    /// Coerce the given object argument (e.g., for the base of a
     /// member expression) to the given type.
     ///
     /// \param expr The expression to coerce.
@@ -1349,7 +1324,7 @@ namespace {
                                      ConstraintLocatorBuilder locator);
 
   private:
-    /// \brief Build a new subscript.
+    /// Build a new subscript.
     ///
     /// \param base The base of the subscript.
     /// \param index The index of the subscript.
@@ -1615,7 +1590,7 @@ namespace {
       return result;
     }
 
-    /// \brief Build a new reference to another constructor.
+    /// Build a new reference to another constructor.
     Expr *buildOtherConstructorRef(Type openedFullType,
                                    ConstructorDecl *ctor, Expr *base,
                                    DeclNameLoc loc,
@@ -1738,13 +1713,13 @@ namespace {
         // Retrieve the bridging operation to be used if a static conformance
         // to _BridgedToObjectiveC can be proven.
         fn = conditional
-                 ? tc.Context.getConditionallyBridgeFromObjectiveCBridgeable(&tc)
-                 : tc.Context.getForceBridgeFromObjectiveCBridgeable(&tc);
+                 ? tc.Context.getConditionallyBridgeFromObjectiveCBridgeable()
+                 : tc.Context.getForceBridgeFromObjectiveCBridgeable();
       } else {
         // Retrieve the bridging operation to be used if a static conformance
         // to _BridgedToObjectiveC cannot be proven.
-        fn = conditional ? tc.Context.getConditionallyBridgeFromObjectiveC(&tc)
-                         : tc.Context.getForceBridgeFromObjectiveC(&tc);
+        fn = conditional ? tc.Context.getConditionallyBridgeFromObjectiveC()
+                         : tc.Context.getForceBridgeFromObjectiveC();
       }
 
       if (!fn) {
@@ -1804,7 +1779,7 @@ namespace {
 
     ConstraintSystem &getConstraintSystem() const { return cs; }
 
-    /// \brief Simplify the expression type and return the expression.
+    /// Simplify the expression type and return the expression.
     ///
     /// This routine is used for 'simple' expressions that only need their
     /// types simplified, with no further computation.
@@ -2824,32 +2799,19 @@ namespace {
         return simplifyExprType(expr);
       }
       
-      Type subExprType = cs.getType(expr->getSubExpr());
-      Type targetType = simplifyType(subExprType);
-      
-      // If the subexpression is not optional, wrap it in
-      // an InjectIntoOptionalExpr. Then use the type of the
-      // subexpression as the type of the 'try?' expr
-      bool subExprIsOptional = (bool) subExprType->getOptionalObjectType();
-      
-      if (!subExprIsOptional) {
-        targetType = OptionalType::get(targetType);
-        auto subExpr = coerceToType(expr->getSubExpr(), targetType,
-                                    cs.getConstraintLocator(expr));
-        if (!subExpr) return nullptr;
-        expr->setSubExpr(subExpr);
-      }
-      
-      cs.setType(expr, targetType);
+      Type exprType = simplifyType(cs.getType(expr));
+
+      auto subExpr = coerceToType(expr->getSubExpr(), exprType,
+                                  cs.getConstraintLocator(expr));
+      if (!subExpr) return nullptr;
+      expr->setSubExpr(subExpr);
+
+      cs.setType(expr, exprType);
       return expr;
     }
 
     Expr *visitParenExpr(ParenExpr *expr) {
-      auto &ctx = cs.getASTContext();
-      auto pty = cs.getType(expr->getSubExpr());
-      cs.setType(expr, ParenType::get(ctx, pty->getInOutObjectType(),
-                                      ParameterTypeFlags().withInOut(pty->is<InOutType>())));
-      return expr;
+      return simplifyExprType(expr);
     }
 
     Expr *visitTupleExpr(TupleExpr *expr) {
@@ -3250,8 +3212,8 @@ namespace {
       }
 
       // SIL-generation magically turns this into a Bool; make sure it can.
-      if (!cs.getASTContext().getGetBoolDecl(&cs.getTypeChecker())) {
-        tc.diagnose(expr->getLoc(), diag::bool_intrinsics_not_found);
+      if (!tc.Context.getBoolBuiltinInitDecl()) {
+        tc.diagnose(expr->getLoc(), diag::broken_bool);
         // Continue anyway.
       }
 
@@ -3923,8 +3885,9 @@ namespace {
     }
 
     Expr *visitLazyInitializerExpr(LazyInitializerExpr *expr) {
-      simplifyExprType(expr);
-      assert(expr->getType()->isEqual(expr->getSubExpr()->getType()));
+      // Since `LazyInitializerExpr` should always have a type set,
+      // there is no need to do anything here.
+      assert(cs.getType(expr)->isEqual(expr->getSubExpr()->getType()));
       return expr;
     }
     
@@ -3935,7 +3898,7 @@ namespace {
       auto &tc = cs.getTypeChecker();
       auto &ctx = tc.Context;
       // Synthesize a call to _undefined() of appropriate type.
-      FuncDecl *undefinedDecl = ctx.getUndefinedDecl(&tc);
+      FuncDecl *undefinedDecl = ctx.getUndefinedDecl();
       if (!undefinedDecl) {
         tc.diagnose(E->getLoc(), diag::missing_undefined_runtime);
         return nullptr;
@@ -4108,7 +4071,7 @@ namespace {
         method = func;
       } else if (auto var = dyn_cast<VarDecl>(foundDecl)) {
         // Properties.
-        maybeAddAccessorsToStorage(tc, var);
+        maybeAddAccessorsToStorage(var);
 
         // If this isn't a property on a type, complain.
         if (!var->getDeclContext()->isTypeContext()) {
@@ -4196,6 +4159,17 @@ namespace {
       // The declaration we found must be exposed to Objective-C.
       tc.validateDecl(method);
       if (!method->isObjC()) {
+        // If the method declaration lies in a protocol and we're providing
+        // a default implementation of the method through a protocol extension
+        // and using it as a selector, then bail out as adding @objc to the
+        // protocol might not be the right thing to do and could lead to
+        // problems.
+        if (auto protocolDecl = dyn_cast<ProtocolDecl>(foundDecl->getDeclContext())) {
+          tc.diagnose(E->getLoc(), diag::expr_selector_cannot_be_used,
+                      foundDecl->getBaseName(), protocolDecl->getFullName());
+          return E;
+        }
+        
         tc.diagnose(E->getLoc(), diag::expr_selector_not_objc,
                     foundDecl->getDescriptiveKind(), foundDecl->getFullName())
           .highlight(subExpr->getSourceRange());
@@ -4430,13 +4404,17 @@ namespace {
             auto loc = origComponent.getLoc();
             auto fieldName =
                 foundDecl->choice.getName().getBaseIdentifier().str();
-            auto index = buildDynamicMemberLookupIndexExpr(fieldName, indexType,
-                                                           loc, dc, cs);
-            
+
+            Expr *nameExpr = new (ctx) StringLiteralExpr(fieldName, loc,
+                                                         /*implicit*/true);
+            (void)cs.TC.typeCheckExpression(nameExpr, dc);
+            cs.cacheExprTypes(nameExpr);
+
             origComponent = KeyPathExpr::Component::
-              forUnresolvedSubscript(ctx, loc, index, {}, loc, loc,
-                                     /*trailingClosure*/nullptr);
-            cs.setType(origComponent.getIndexExpr(), index->getType());
+              forUnresolvedSubscript(ctx, loc,
+                                     {nameExpr}, {ctx.Id_dynamicMember}, {loc},
+                                     loc, /*trailingClosure*/nullptr);
+            cs.setType(origComponent.getIndexExpr(), indexType);
           }
 
           auto subscriptType =
@@ -4871,7 +4849,7 @@ ConcreteDeclRef Solution::resolveLocatorToDecl(
   return ConcreteDeclRef();
 }
 
-/// \brief Given a constraint locator, find the declaration reference
+/// Given a constraint locator, find the declaration reference
 /// to the callee, it is a call to a declaration.
 static ConcreteDeclRef
 findCalleeDeclRef(ConstraintSystem &cs, const Solution &solution,
@@ -5076,8 +5054,7 @@ static Type rebuildIdentityExprs(ConstraintSystem &cs, Expr *expr, Type type) {
 Expr *ExprRewriter::coerceTupleToTuple(Expr *expr, TupleType *fromTuple,
                                        TupleType *toTuple,
                                        ConstraintLocatorBuilder locator,
-                                       SmallVectorImpl<int> &sources,
-                                       SmallVectorImpl<unsigned> &variadicArgs,
+                                       SmallVectorImpl<unsigned> &sources,
                                        Optional<Pattern*> typeFromPattern){
   auto &tc = cs.getTypeChecker();
 
@@ -5092,14 +5069,11 @@ Expr *ExprRewriter::coerceTupleToTuple(Expr *expr, TupleType *fromTuple,
                                  fromTuple->getElements().size());
 
   for (unsigned i = 0, n = toTuple->getNumElements(); i != n; ++i) {
-    assert(sources[i] != TupleShuffleExpr::DefaultInitialize &&
-           sources[i] != TupleShuffleExpr::Variadic);
-
     const auto &toElt = toTuple->getElement(i);
     auto toEltType = toElt.getType();
 
     // If the source and destination index are different, we'll be shuffling.
-    if ((unsigned)sources[i] != i) {
+    if (sources[i] != i) {
       anythingShuffled = true;
     }
 
@@ -5176,11 +5150,22 @@ Expr *ExprRewriter::coerceTupleToTuple(Expr *expr, TupleType *fromTuple,
 
     return expr;
   }
-  
+
+  // computeTupleShuffle() produces an array of unsigned (since it can only
+  // contain tuple element indices). However TupleShuffleExpr is also used
+  // for call argument lists which can contain special things like default
+  // arguments and variadics; those are presented by negative integers.
+  //
+  // FIXME: Design and implement a new AST where argument lists are
+  // separate from rvalue tuple conversions.
+  ArrayRef<unsigned> sourcesRef = sources;
+  ArrayRef<int> sourcesCast((const int *) sourcesRef.data(),
+                            sourcesRef.size());
+
   // Create the tuple shuffle.
   return
     cs.cacheType(TupleShuffleExpr::create(tc.Context,
-                                          expr, sources,
+                                          expr, sourcesCast,
                                           TupleShuffleExpr::TupleToTuple,
                                           ConcreteDeclRef(), {}, Type(), {},
                                           toSugarType));
@@ -5235,7 +5220,7 @@ Expr *ExprRewriter::coerceSuperclass(Expr *expr, Type toType,
   if (fromInstanceType->isExistentialType()) {
     // Coercion from superclass-constrained existential to its
     // concrete superclass.
-    auto fromArchetype = ArchetypeType::getAnyOpened(fromType);
+    auto fromArchetype = OpenedArchetypeType::getAny(fromType);
 
     auto *archetypeVal =
       cs.cacheType(
@@ -5303,7 +5288,7 @@ Expr *ExprRewriter::coerceExistential(Expr *expr, Type toType,
 
   // For existential-to-existential coercions, open the source existential.
   if (fromType->isAnyExistentialType()) {
-    fromType = ArchetypeType::getAnyOpened(fromType);
+    fromType = OpenedArchetypeType::getAny(fromType);
     
     auto *archetypeVal =
       cs.cacheType(
@@ -5321,15 +5306,12 @@ Expr *ExprRewriter::coerceExistential(Expr *expr, Type toType,
   if (auto tupleType = fromType->getAs<TupleType>()) {
     if (tupleType->hasLValueType()) {
       auto toTuple = tupleType->getRValueType()->castTo<TupleType>();
-      SmallVector<int, 4> sources;
-      SmallVector<unsigned, 4> variadicArgs;
-      bool failed = computeTupleShuffle(tupleType, toTuple,
-                                        sources, variadicArgs);
+      SmallVector<unsigned, 4> sources;
+      bool failed = computeTupleShuffle(tupleType, toTuple, sources);
       assert(!failed && "Couldn't convert tuple to tuple?");
       (void)failed;
 
-      coerceTupleToTuple(expr, tupleType, toTuple, locator, sources,
-                         variadicArgs);
+      coerceTupleToTuple(expr, tupleType, toTuple, locator, sources);
     }
   }
 
@@ -6558,11 +6540,10 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
   if (auto toTuple = toType->getAs<TupleType>()) {
     // Coerce from a tuple to a tuple.
     if (auto fromTuple = fromType->getAs<TupleType>()) {
-      SmallVector<int, 4> sources;
-      SmallVector<unsigned, 4> variadicArgs;
-      if (!computeTupleShuffle(fromTuple, toTuple, sources, variadicArgs)) {
+      SmallVector<unsigned, 4> sources;
+      if (!computeTupleShuffle(fromTuple, toTuple, sources)) {
         return coerceTupleToTuple(expr, fromTuple, toTuple,
-                                  locator, sources, variadicArgs);
+                                  locator, sources);
       }
     }
   }
@@ -7242,7 +7223,7 @@ Expr *ExprRewriter::finishApply(ApplyExpr *apply, Type openedType,
             ->castTo<ExistentialMetatypeType>()
             ->getInstanceType();
         }
-        assert(openedInstanceTy->castTo<ArchetypeType>()
+        assert(openedInstanceTy->castTo<OpenedArchetypeType>()
                    ->getOpenedExistentialType()
                    ->isEqual(existentialInstanceTy));
 
@@ -7722,12 +7703,12 @@ namespace {
       return result;
     }
 
-    /// \brief Ignore statements.
+    /// Ignore statements.
     std::pair<bool, Stmt *> walkToStmtPre(Stmt *stmt) override {
       return { false, stmt };
     }
 
-    /// \brief Ignore declarations.
+    /// Ignore declarations.
     bool walkToDeclPre(Decl *decl) override { return false; }
   };
 } // end anonymous namespace
@@ -7778,7 +7759,7 @@ bool ConstraintSystem::applySolutionFixes(Expr *E, const Solution &solution) {
   return diagnosed;
 }
 
-/// \brief Apply a given solution to the expression, producing a fully
+/// Apply a given solution to the expression, producing a fully
 /// type-checked expression.
 Expr *ConstraintSystem::applySolution(Solution &solution, Expr *expr,
                                       Type convertType,

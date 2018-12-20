@@ -295,6 +295,22 @@ public:
 private:
   FullApplySite rewriteApplyCallee(FullApplySite apply, SILValue callee);
 
+  // Build concrete existential information using findInitExistential.
+  Optional<ConcreteExistentialInfo>
+  buildConcreteExistentialInfo(Operand &ArgOperand);
+
+  // Build concrete existential information using SoleConformingType.
+  Optional<ConcreteExistentialInfo>
+  buildConcreteExistentialInfoFromSoleConformingType(Operand &ArgOperand);
+
+  // Common utility function to build concrete existential information for all
+  // arguments of an apply instruction.
+  void buildConcreteExistentialInfos(
+      FullApplySite Apply,
+      llvm::SmallDenseMap<unsigned, ConcreteExistentialInfo> &CEIs,
+      SILBuilderContext &BuilderCtx,
+      SILOpenedArchetypesTracker &OpenedArchetypesTracker);
+
   bool canReplaceArg(FullApplySite Apply, const ConcreteExistentialInfo &CEI,
                      unsigned ArgIdx);
   SILInstruction *createApplyWithConcreteType(
@@ -327,7 +343,7 @@ private:
 
   typedef SmallVector<SILInstruction*, 4> UserListTy;
 
-  /// \brief Returns a list of instructions that project or perform reference
+  /// Returns a list of instructions that project or perform reference
   /// counting operations on \p Value or on its uses.
   /// \return return false if \p Value has other than ARC uses.
   static bool recursivelyCollectARCUsers(UserListTy &Uses, ValueBase *Value);
