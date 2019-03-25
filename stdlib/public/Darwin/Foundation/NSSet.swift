@@ -17,7 +17,7 @@ extension Set {
   ///
   /// The provided `NSSet` will be copied to ensure that the copy can
   /// not be mutated by other code.
-  fileprivate init(_cocoaSet: __shared AnyObject) {
+  fileprivate init(_cocoaSet: __shared NSSet) {
     assert(_isBridgedVerbatimToObjectiveC(Element.self),
       "Set can be backed by NSSet _variantStorage only when the member type can be bridged verbatim to Objective-C")
     // FIXME: We would like to call CFSetCreateCopy() to avoid doing an
@@ -77,10 +77,8 @@ extension Set : _ObjectiveCBridgeable {
       // Swift. See rdar://problem/35995647
       var set = Set(minimumCapacity: s.count)
       s.enumerateObjects({ (anyMember: Any, _) in
-        let member = Swift._forceBridgeFromObjectiveC(
-          anyMember as AnyObject, Element.self)
         // FIXME: Log a warning if `member` is already in the set.
-        set.insert(member)
+        set.insert(anyMember as! Element)
       })
       result = set
       return
@@ -90,8 +88,7 @@ extension Set : _ObjectiveCBridgeable {
     // an NSSet.
     var builder = _SetBuilder<Element>(count: s.count)
     s.enumerateObjects({ (anyMember: Any, _) in
-      builder.add(member: Swift._forceBridgeFromObjectiveC(
-        anyMember as AnyObject, Element.self))
+      builder.add(member: anyMember as! Element)
     })
     result = builder.take()
   }

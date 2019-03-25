@@ -26,6 +26,7 @@
 #include "swift/AST/IRGenOptions.h"
 #include "swift/ABI/MetadataValues.h"
 #include "swift/IRGen/ValueWitness.h"
+#include "swift/SIL/TypeLowering.h"
 
 #include "Callee.h"
 #include "Explosion.h"
@@ -555,7 +556,10 @@ StackAddress IRGenFunction::emitDynamicAlloca(llvm::Type *eltTy,
 /// location before the dynamic alloca's call.
 void IRGenFunction::emitDeallocateDynamicAlloca(StackAddress address) {
   // In coroutines, unconditionally call llvm.coro.alloca.free.
-  if (isCoroutine()) {
+  // Except if the address is invalid, this happens when this is a StackAddress
+  // for a partial_apply [stack] that did not need a context object on the
+  // stack.
+  if (isCoroutine() && address.getAddress().isValid()) {
     auto allocToken = address.getExtraInfo();
     assert(allocToken && "dynamic alloca in coroutine without alloc token?");
     auto freeFn = llvm::Intrinsic::getDeclaration(
@@ -563,7 +567,6 @@ void IRGenFunction::emitDeallocateDynamicAlloca(StackAddress address) {
     Builder.CreateCall(freeFn, allocToken);
     return;
   }
-
   // Otherwise, call llvm.stackrestore if an address was saved.
   auto savedSP = address.getExtraInfo();
   if (savedSP == nullptr)
@@ -717,7 +720,7 @@ void irgen::emitDestroyArrayCall(IRGenFunction &IGF,
                                  Address object,
                                  llvm::Value *count) {
   // If T is a trivial/POD type, nothing needs to be done.
-  if (T.getObjectType().isTrivial(IGF.getSILModule()))
+  if (IGF.IGM.getTypeLowering(T).isTrivial())
     return;
 
   auto metadata = IGF.emitTypeMetadataRefForLayout(T);
@@ -992,7 +995,7 @@ void irgen::emitDestroyCall(IRGenFunction &IGF,
                             SILType T,
                             Address object) {
   // If T is a trivial/POD type, nothing needs to be done.
-  if (T.getObjectType().isTrivial(IGF.getSILModule()))
+  if (IGF.IGM.getTypeLowering(T).isTrivial())
     return;
   llvm::Value *metadata;
   auto fn = IGF.emitValueWitnessFunctionRef(T, metadata,

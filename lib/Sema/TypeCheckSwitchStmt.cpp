@@ -506,12 +506,35 @@ namespace {
         PAIRCASE (SpaceKind::Disjunct, SpaceKind::UnknownCase): {
           SmallVector<Space, 4> smallSpaces;
           for (auto s : this->getSpaces()) {
-            if (auto diff = s.minus(other, TC, DC, minusCount))
-              smallSpaces.push_back(*diff);
-            else
+            auto diff = s.minus(other, TC, DC, minusCount);
+            if (!diff)
               return None;
+            if (diff->getKind() == SpaceKind::Disjunct) {
+              smallSpaces.append(diff->getSpaces().begin(),
+                                 diff->getSpaces().end());
+            } else {
+              smallSpaces.push_back(*diff);
+            }
           }
-          return Space::forDisjunct(smallSpaces);
+
+          // Remove any of the later spaces that are contained entirely in an
+          // earlier one. Since we're not sorting by size, this isn't
+          // guaranteed to give us a minimal set, but it'll still reduce the
+          // general (A, B, C) - ((.a1, .b1, .c1) | (.a1, .b1, .c2)) problem.
+          // This is a quadratic operation but it saves us a LOT of work
+          // overall.
+          SmallVector<Space, 4> usefulSmallSpaces;
+          for (const Space &space : smallSpaces) {
+            bool alreadyHandled = llvm::any_of(usefulSmallSpaces,
+                                               [&](const Space &previousSpace) {
+              return space.isSubspace(previousSpace, TC, DC);
+            });
+            if (alreadyHandled)
+              continue;
+            usefulSmallSpaces.push_back(space);
+          }
+
+          return Space::forDisjunct(usefulSmallSpaces);
         }
         PAIRCASE (SpaceKind::Constructor, SpaceKind::Type):
           return Space();
@@ -923,26 +946,31 @@ namespace {
 
           Space projection = projectPattern(TC, caseItem.getPattern());
 
-          if (!projection.isEmpty() &&
-              projection.isSubspace(Space::forDisjunct(spaces), TC, DC)) {
+          bool isRedundant = !projection.isEmpty() &&
+                             llvm::any_of(spaces, [&](const Space &handled) {
+            return projection.isSubspace(handled, TC, DC);
+          });
+          if (isRedundant) {
             TC.diagnose(caseItem.getStartLoc(),
                           diag::redundant_particular_case)
               .highlight(caseItem.getSourceRange());
             continue;
-          } else {
-            Expr *cachedExpr = nullptr;
-            if (checkRedundantLiteral(caseItem.getPattern(), cachedExpr)) {
-              assert(cachedExpr && "Cache found hit but no expr?");
-              TC.diagnose(caseItem.getStartLoc(),
-                          diag::redundant_particular_literal_case)
-                .highlight(caseItem.getSourceRange());
-              TC.diagnose(cachedExpr->getLoc(),
-                          diag::redundant_particular_literal_case_here)
-                .highlight(cachedExpr->getSourceRange());
-              continue;
-            }
           }
-          spaces.push_back(projection);
+
+          Expr *cachedExpr = nullptr;
+          if (checkRedundantLiteral(caseItem.getPattern(), cachedExpr)) {
+            assert(cachedExpr && "Cache found hit but no expr?");
+            TC.diagnose(caseItem.getStartLoc(),
+                        diag::redundant_particular_literal_case)
+              .highlight(caseItem.getSourceRange());
+            TC.diagnose(cachedExpr->getLoc(),
+                        diag::redundant_particular_literal_case_here)
+              .highlight(cachedExpr->getSourceRange());
+            continue;
+          }
+
+          if (!projection.isEmpty())
+            spaces.push_back(projection);
         }
       }
 
@@ -1015,7 +1043,8 @@ namespace {
       bool InEditor = TC.Context.LangOpts.DiagnosticsEditorMode;
 
       // Decide whether we want an error or a warning.
-      auto mainDiagType = diag::non_exhaustive_switch;
+      Optional<decltype(diag::non_exhaustive_switch)> mainDiagType =
+          diag::non_exhaustive_switch;
       if (unknownCase) {
         switch (defaultReason) {
         case RequiresDefault::EmptySwitchBody:
@@ -1042,7 +1071,7 @@ namespace {
       switch (uncovered.checkDowngradeToWarning()) {
       case DowngradeToWarning::No:
         break;
-      case DowngradeToWarning::ForUnknownCase:
+      case DowngradeToWarning::ForUnknownCase: {
         if (TC.Context.LangOpts.DebuggerSupport ||
             TC.Context.LangOpts.Playground ||
             !TC.getLangOpts().EnableNonFrozenEnumExhaustivityDiagnostics) {
@@ -1050,8 +1079,17 @@ namespace {
           // playgrounds.
           return;
         }
-        // Missing '@unknown' is just a warning.
-        mainDiagType = diag::non_exhaustive_switch_warn;
+        assert(defaultReason == RequiresDefault::No);
+        Type subjectType = Switch->getSubjectExpr()->getType();
+        bool shouldIncludeFutureVersionComment = false;
+        if (auto *theEnum = subjectType->getEnumOrBoundGenericEnum()) {
+          shouldIncludeFutureVersionComment =
+              theEnum->getParentModule()->isSystemModule();
+        }
+        TC.diagnose(startLoc, diag::non_exhaustive_switch_unknown_only,
+                    subjectType, shouldIncludeFutureVersionComment);
+        mainDiagType = None;
+      }
         break;
       }
 
@@ -1066,7 +1104,7 @@ namespace {
         return;
       case RequiresDefault::UncoveredSwitch: {
         OS << tok::kw_default << ":\n" << placeholder << "\n";
-        TC.diagnose(startLoc, mainDiagType);
+        TC.diagnose(startLoc, mainDiagType.getValue());
         TC.diagnose(startLoc, diag::missing_several_cases, /*default*/true)
           .fixItInsert(insertLoc, buffer.str());
       }
@@ -1083,7 +1121,9 @@ namespace {
       // If there's nothing else to diagnose, bail.
       if (uncovered.isEmpty()) return;
 
-      TC.diagnose(startLoc, mainDiagType);
+      // Check if we still have to emit the main diganostic.
+      if (mainDiagType.hasValue())
+        TC.diagnose(startLoc, mainDiagType.getValue());
 
       // Add notes to explain what's missing.
       auto processUncoveredSpaces =

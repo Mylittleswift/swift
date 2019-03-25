@@ -112,7 +112,7 @@ public:
   std::string SILOutputFileNameForDebugging;
 
   /// If set to true, compile with the SIL Ownership Model enabled.
-  bool EnableSILOwnership = false;
+  bool VerifySILOwnership = false;
 
   /// Assume that code will be executed in a single-threaded environment.
   bool AssumeSingleThreaded = false;
@@ -134,6 +134,10 @@ public:
 
   /// Enable large loadable types IRGen pass.
   bool EnableLargeLoadableTypes = true;
+
+  /// Should the default pass pipelines strip ownership during the diagnostic
+  /// pipeline.
+  bool StripOwnershipDuringDiagnosticsPipeline = true;
 
   /// The name of the file to which the backend should save YAML optimization
   /// records.

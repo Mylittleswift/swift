@@ -495,27 +495,26 @@ public:
   SILOptions &getOptions() { return getModule().getOptions(); }
 
   const TypeLowering &getTypeLowering(AbstractionPattern orig, Type subst) {
-    return SGM.Types.getTypeLowering(orig, subst);
+    return F.getTypeLowering(orig, subst);
   }
   const TypeLowering &getTypeLowering(Type t) {
-    return SGM.Types.getTypeLowering(t);
+    return F.getTypeLowering(t);
   }
   CanSILFunctionType getSILFunctionType(AbstractionPattern orig,
                                         CanFunctionType substFnType) {
     return SGM.Types.getSILFunctionType(orig, substFnType);
   }
   SILType getLoweredType(AbstractionPattern orig, Type subst) {
-    return SGM.Types.getLoweredType(orig, subst);
+    return F.getLoweredType(orig, subst);
   }
   SILType getLoweredType(Type t) {
-    return SGM.Types.getLoweredType(t);
+    return F.getLoweredType(t);
   }
   SILType getLoweredLoadableType(Type t) {
-    return SGM.Types.getLoweredLoadableType(t);
+    return F.getLoweredLoadableType(t);
   }
-
   const TypeLowering &getTypeLowering(SILType type) {
-    return SGM.Types.getTypeLowering(type);
+    return F.getTypeLowering(type);
   }
 
   SILType getSILType(SILParameterInfo param) const {
@@ -667,12 +666,6 @@ public:
                                CanAnyFunctionType funcTy,
                                CanAnyFunctionType blockTy,
                                CanSILFunctionType loweredBlockTy);
-
-  /// Given a non-canonical function type, create a thunk for the function's
-  /// canonical type.
-  ManagedValue emitCanonicalFunctionThunk(SILLocation loc, ManagedValue fn,
-                                          CanSILFunctionType nonCanonicalTy,
-                                          CanSILFunctionType canonicalTy);
 
   /// Thunk with the signature of a base class method calling a derived class
   /// method.
@@ -855,7 +848,7 @@ public:
   //===--------------------------------------------------------------------===//
 
   ManagedValue emitInjectEnum(SILLocation loc,
-                              ArgumentSource payload,
+                              ArgumentSource &&payload,
                               SILType enumTy,
                               EnumElementDecl *element,
                               SGFContext C);
@@ -1127,8 +1120,8 @@ public:
   ManagedValue emitRValueAsSingleValue(Expr *E, SGFContext C = SGFContext());
 
   /// Emit 'undef' in a particular formal type.
-  ManagedValue emitUndef(SILLocation loc, Type type);
-  ManagedValue emitUndef(SILLocation loc, SILType type);
+  ManagedValue emitUndef(Type type);
+  ManagedValue emitUndef(SILType type);
   RValue emitUndefRValue(SILLocation loc, Type type);
   
   std::pair<ManagedValue, SILValue>
@@ -1225,6 +1218,10 @@ public:
                                             SubstitutionMap subs,
                                             AccessStrategy strategy,
                                             Expr *indices);
+
+  RValue prepareEnumPayload(EnumElementDecl *element,
+                            CanFunctionType substFnType,
+                            ArgumentSource &&indexExpr);
 
   ArgumentSource prepareAccessorBaseArg(SILLocation loc, ManagedValue base,
                                         CanType baseFormalType,
@@ -1343,6 +1340,8 @@ public:
                                            SILValue semanticValue,
                                            SILType storageType);
 
+  SILValue emitUnwrapIntegerResult(SILLocation loc, SILValue value);
+  
   /// Load an r-value out of the given address. This does not handle
   /// reabstraction or bridging. If that is needed, use the other emit load
   /// entry point.
@@ -1759,6 +1758,7 @@ public:
                                     CanType &outputSubstType,
                                     GenericEnvironment *&genericEnv,
                                     SubstitutionMap &interfaceSubs,
+                                    CanType &dynamicSelfType,
                                     bool withoutActuallyEscaping=false);
 
   //===--------------------------------------------------------------------===//

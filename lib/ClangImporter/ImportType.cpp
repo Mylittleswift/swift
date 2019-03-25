@@ -23,6 +23,7 @@
 #include "swift/AST/Decl.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsClangImporter.h"
+#include "swift/AST/ExistentialLayout.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/NameLookup.h"
@@ -198,7 +199,7 @@ namespace {
 #define TYPE(Class, Base)
 #include "clang/AST/TypeNodes.def"
     
-    // Given a loaded type like CInt, look through the name alias sugar that the
+    // Given a loaded type like CInt, look through the type alias sugar that the
     // stdlib uses to show the underlying type.  We want to import the signature
     // of the exit(3) libc function as "func exit(Int32)", not as
     // "func exit(CInt)".
@@ -206,7 +207,7 @@ namespace {
       // Handle missing or invalid stdlib declarations
       if (!T || T->hasError())
         return Type();
-      if (auto *NAT = dyn_cast<NameAliasType>(T.getPointer()))
+      if (auto *NAT = dyn_cast<TypeAliasType>(T.getPointer()))
         return NAT->getSinglyDesugaredType();
       return T;
     }
@@ -314,6 +315,18 @@ namespace {
       case clang::BuiltinType::OCLClkEvent:
       case clang::BuiltinType::OCLQueue:
       case clang::BuiltinType::OCLReserveID:
+      case clang::BuiltinType::OCLIntelSubgroupAVCMcePayload:
+      case clang::BuiltinType::OCLIntelSubgroupAVCImePayload:
+      case clang::BuiltinType::OCLIntelSubgroupAVCRefPayload:
+      case clang::BuiltinType::OCLIntelSubgroupAVCSicPayload:
+      case clang::BuiltinType::OCLIntelSubgroupAVCMceResult:
+      case clang::BuiltinType::OCLIntelSubgroupAVCImeResult:
+      case clang::BuiltinType::OCLIntelSubgroupAVCRefResult:
+      case clang::BuiltinType::OCLIntelSubgroupAVCSicResult:
+      case clang::BuiltinType::OCLIntelSubgroupAVCImeResultSingleRefStreamout:
+      case clang::BuiltinType::OCLIntelSubgroupAVCImeResultDualRefStreamout:
+      case clang::BuiltinType::OCLIntelSubgroupAVCImeSingleRefStreamin:
+      case clang::BuiltinType::OCLIntelSubgroupAVCImeDualRefStreamin:
         return Type();
 
       // OpenMP types that don't have Swift equivalents.
@@ -497,36 +510,36 @@ namespace {
     }
 
     ImportResult VisitVectorType(const clang::VectorType *type) {
-      auto *SIMD = Impl.tryLoadSIMDModule();
-      if (!SIMD)
-        return Type();
-      
-      // Map the element type and count to a Swift name, such as
-      // float x 3 => Float3.
-      SmallString<16> name;
-      {
-        llvm::raw_svector_ostream names(name);
-        
-        if (auto builtinTy
-              = dyn_cast<clang::BuiltinType>(type->getElementType())){
-          switch (builtinTy->getKind()) {
-#define MAP_SIMD_TYPE(TYPE_NAME, __, BUILTIN_KIND)   \
-          case clang::BuiltinType::BUILTIN_KIND: \
-            names << #TYPE_NAME;                 \
-            break;
-#include "swift/ClangImporter/SIMDMappedTypes.def"
-          default:
-            // A vector type we don't know how to map.
-            return Type();
+      // Get the imported element type and count.
+      Type element = Impl.importTypeIgnoreIUO(
+        type->getElementType(), ImportTypeKind::Abstract,
+        false /* No NSUIntegerAsInt */, Bridgeability::None,
+        OptionalTypeKind::OTK_None);
+      unsigned count = type->getNumElements();
+      // Import vector-of-one as the element type.
+      if (count == 1) { return element; }
+      // Imported element type needs to conform to SIMDScalar.
+      auto nominal = element->getAnyNominal();
+      auto simdscalar = Impl.SwiftContext.getProtocol(KnownProtocolKind::SIMDScalar);
+      SmallVector<ProtocolConformance *, 2> conformances;
+      if (simdscalar && nominal->lookupConformance(nominal->getParentModule(),
+                                                   simdscalar, conformances)) {
+        // Element type conforms to SIMDScalar. Get the SIMDn generic type
+        // if it exists.
+        SmallString<8> name("SIMD");
+        name.append(std::to_string(count));
+        if (auto vector = Impl.getNamedSwiftType(Impl.getStdlibModule(), name)) {
+          if (auto unbound = vector->getAs<UnboundGenericType>()) {
+            // All checks passed: the imported element type is SIMDScalar,
+            // and a generic SIMDn type exists with n == count. Construct the
+            // bound generic type and return that.
+            return BoundGenericType::get(
+              cast<NominalTypeDecl>(unbound->getDecl()), Type(), { element }
+            );
           }
-        } else {
-          return Type();
         }
-        
-        names << type->getNumElements();
       }
-      
-      return Impl.getNamedSwiftType(SIMD, name);
+      return Type();
     }
 
     ImportResult VisitFunctionProtoType(const clang::FunctionProtoType *type) {
@@ -1452,7 +1465,7 @@ ImportedType ClangImporter::Implementation::importType(
   // This bans some trickery that the redefinition types enable, but is a more
   // sane model overall.
   auto &clangContext = getClangASTContext();
-  if (clangContext.getLangOpts().ObjC1) {
+  if (clangContext.getLangOpts().ObjC) {
     if (clangContext.hasSameUnqualifiedType(
           type, clangContext.getObjCIdRedefinitionType()) &&
         !clangContext.hasSameUnqualifiedType(
@@ -2313,11 +2326,6 @@ ModuleDecl *ClangImporter::Implementation::tryLoadFoundationModule() {
                        ImportForwardDeclarations, checkedModules);
 }
 
-ModuleDecl *ClangImporter::Implementation::tryLoadSIMDModule() {
-  return tryLoadModule(SwiftContext, SwiftContext.Id_simd,
-                       ImportForwardDeclarations, checkedModules);
-}
-
 Type ClangImporter::Implementation::getNamedSwiftType(ModuleDecl *module,
                                                       StringRef name) {
   if (!module)
@@ -2442,13 +2450,21 @@ bool ClangImporter::Implementation::matchesHashableBound(Type type) {
   // Match generic parameters against their bounds.
   if (auto *genericTy = type->getAs<GenericTypeParamType>()) {
     if (auto *generic = genericTy->getDecl()) {
-      type = generic->getSuperclass();
-      if (!type)
-        return false;
+      auto genericSig =
+        generic->getDeclContext()->getGenericSignatureOfContext();
+      if (genericSig && genericSig->getConformsTo(type).empty()) {
+        type = genericSig->getSuperclassBound(type);
+        if (!type)
+          return false;
+      }
     }
   }
 
-  // Class type or existential that inherits from NSObject.
+  // Existentials cannot match the Hashable bound.
+  if (type->isAnyExistentialType())
+    return false;
+
+  // Class type that inherits from NSObject.
   if (NSObjectType->isExactSuperclassOf(type))
     return true;
 
@@ -2503,7 +2519,7 @@ Type ClangImporter::Implementation::getSugaredTypeReference(TypeDecl *type) {
         parentType = nominal->getDeclaredInterfaceType();
     }
 
-    return NameAliasType::get(typealias, parentType, SubstitutionMap(),
+    return TypeAliasType::get(typealias, parentType, SubstitutionMap(),
                               typealias->getUnderlyingTypeLoc().getType());
   }
 

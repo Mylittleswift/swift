@@ -646,6 +646,16 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
       return nullptr;
     }
 
+    return E;
+  }
+
+  Expr *visitArgumentShuffleExpr(ArgumentShuffleExpr *E) {
+    if (Expr *E2 = doIt(E->getSubExpr())) {
+      E->setSubExpr(E2);
+    } else {
+      return nullptr;
+    }
+
     for (auto &defaultArg : E->getCallerDefaultArgs()) {
       if (Expr *newDefaultArg = doIt(defaultArg))
         defaultArg = newDefaultArg;
@@ -1034,6 +1044,7 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
       case KeyPathExpr::Component::Kind::UnresolvedProperty:
       case KeyPathExpr::Component::Kind::Invalid:
       case KeyPathExpr::Component::Kind::Identity:
+      case KeyPathExpr::Component::Kind::TupleElement:
         // No subexpr to visit.
         break;
       }

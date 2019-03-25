@@ -25,7 +25,6 @@
 #include "swift/AST/USRGeneration.h"
 #include "swift/Basic/Range.h"
 #include "swift/ClangImporter/ClangImporter.h"
-#include "swift/ClangImporter/ClangModule.h"
 #include "swift/Serialization/BCReadingExtras.h"
 #include "swift/Serialization/SerializedModuleLoader.h"
 #include "llvm/ADT/StringExtras.h"
@@ -252,10 +251,19 @@ static bool validateInputBlock(
     StringRef blobData;
     unsigned kind = cursor.readRecord(entry.ID, scratch, &blobData);
     switch (kind) {
-    case input_block::FILE_DEPENDENCY:
-      dependencies.push_back(SerializationOptions::FileDependency{
-          scratch[0], scratch[1], blobData});
+    case input_block::FILE_DEPENDENCY: {
+      bool isHashBased = scratch[2] != 0;
+      if (isHashBased) {
+        dependencies.push_back(
+          SerializationOptions::FileDependency::hashBased(
+            blobData, scratch[0], scratch[1]));
+      } else {
+        dependencies.push_back(
+          SerializationOptions::FileDependency::modTimeBased(
+            blobData, scratch[0], scratch[1]));
+      }
       break;
+    }
     default:
       // Unknown metadata record, possibly for use by a future version of the
       // module format.
@@ -1016,7 +1024,7 @@ ModuleFile::readGroupTable(ArrayRef<uint64_t> Fields, StringRef BlobData) {
     new ModuleFile::GroupNameTable);
   auto Data = reinterpret_cast<const uint8_t *>(BlobData.data());
   unsigned GroupCount = endian::readNext<uint32_t, little, unaligned>(Data);
-  for (unsigned I = 0; I < GroupCount; I++) {
+  for (unsigned I = 0; I < GroupCount; ++I) {
     auto RawSize = endian::readNext<uint32_t, little, unaligned>(Data);
     auto RawText = StringRef(reinterpret_cast<const char *>(Data), RawSize);
     Data += RawSize;
@@ -1833,17 +1841,8 @@ void ModuleFile::loadExtensions(NominalTypeDecl *nominal) {
   }
 
   if (nominal->getParent()->isModuleScopeContext()) {
-    auto parentModule = nominal->getParentModule();
-    StringRef moduleName = parentModule->getName().str();
-
-    // If the originating module is a private module whose interface is
-    // re-exported via public module, check the name of the public module.
-    std::string exportedModuleName;
-    if (auto clangModuleUnit =
-            dyn_cast<ClangModuleUnit>(parentModule->getFiles().front())) {
-      exportedModuleName = clangModuleUnit->getExportedModuleName();
-      moduleName = exportedModuleName;
-    }
+    auto parentFile = cast<FileUnit>(nominal->getParent());
+    StringRef moduleName = parentFile->getExportedModuleName();
 
     for (auto item : *iter) {
       if (item.first != moduleName)

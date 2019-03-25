@@ -97,6 +97,9 @@ DeclName SILGenModule::getMagicFunctionName(DeclContext *dc) {
     assert(e->getExtendedNominal() && "extension for nonnominal");
     return e->getExtendedNominal()->getName();
   }
+  if (auto EED = dyn_cast<EnumElementDecl>(dc)) {
+    return EED->getFullName();
+  }
   llvm_unreachable("unexpected #function context");
 }
 
@@ -115,7 +118,7 @@ DeclName SILGenModule::getMagicFunctionName(SILDeclRef ref) {
   case SILDeclRef::Kind::GlobalAccessor:
     return getMagicFunctionName(cast<VarDecl>(ref.getDecl())->getDeclContext());
   case SILDeclRef::Kind::DefaultArgGenerator:
-    return getMagicFunctionName(cast<AbstractFunctionDecl>(ref.getDecl()));
+    return getMagicFunctionName(cast<DeclContext>(ref.getDecl()));
   case SILDeclRef::Kind::StoredPropertyInitializer:
     return getMagicFunctionName(cast<VarDecl>(ref.getDecl())->getDeclContext());
   case SILDeclRef::Kind::IVarInitializer:
@@ -194,7 +197,9 @@ void SILGenFunction::emitCaptures(SILLocation loc,
 
     auto *vd = capture.getDecl();
 
-    switch (SGM.Types.getDeclCaptureKind(capture)) {
+    // FIXME: Expansion
+    auto expansion = ResilienceExpansion::Minimal;
+    switch (SGM.Types.getDeclCaptureKind(capture, expansion)) {
     case CaptureKind::None:
       break;
 
@@ -686,4 +691,20 @@ Optional<ASTNode> SILGenFunction::getPGOParent(ASTNode Node) const {
   if (SILProfiler *SP = F.getProfiler())
     return SP->getPGOParent(Node);
   return None;
+}
+
+SILValue SILGenFunction::emitUnwrapIntegerResult(SILLocation loc,
+                                                 SILValue value) {
+  // This is a loop because we want to handle types that wrap integer types,
+  // like ObjCBool (which may be Bool or Int8).
+  while (!value->getType().is<BuiltinIntegerType>()) {
+    auto structDecl = value->getType().getStructOrBoundGenericStruct();
+    assert(structDecl && "value for error result wasn't of struct type!");
+    assert(std::next(structDecl->getStoredProperties().begin())
+           == structDecl->getStoredProperties().end());
+    auto property = *structDecl->getStoredProperties().begin();
+    value = B.createStructExtract(loc, value, property);
+  }
+
+  return value;
 }

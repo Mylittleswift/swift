@@ -380,7 +380,7 @@ protected:
     GenericArgCount : 32
   );
 
-  SWIFT_INLINE_BITFIELD_FULL(NameAliasType, SugarType, 1+1,
+  SWIFT_INLINE_BITFIELD_FULL(TypeAliasType, SugarType, 1+1,
     : NumPadBits,
 
     /// Whether we have a parent type.
@@ -1634,25 +1634,25 @@ public:
 
 /// A reference to a type alias that is somehow generic, along with the
 /// set of substitutions to apply to make the type concrete.
-class NameAliasType final
+class TypeAliasType final
   : public SugarType, public llvm::FoldingSetNode,
-    llvm::TrailingObjects<NameAliasType, Type, SubstitutionMap>
+    llvm::TrailingObjects<TypeAliasType, Type, SubstitutionMap>
 {
   TypeAliasDecl *typealias;
 
   friend class ASTContext;
   friend TrailingObjects;
 
-  NameAliasType(TypeAliasDecl *typealias, Type parent,
+  TypeAliasType(TypeAliasDecl *typealias, Type parent,
                 SubstitutionMap substitutions, Type underlying,
                 RecursiveTypeProperties properties);
 
   size_t numTrailingObjects(OverloadToken<Type>) const {
-    return Bits.NameAliasType.HasParent ? 1 : 0;
+    return Bits.TypeAliasType.HasParent ? 1 : 0;
   }
 
   size_t numTrailingObjects(OverloadToken<SubstitutionMap>) const {
-    return Bits.NameAliasType.HasSubstitutionMap ? 1 : 0;
+    return Bits.TypeAliasType.HasSubstitutionMap ? 1 : 0;
   }
 
 public:
@@ -1661,7 +1661,7 @@ public:
     return getSubstitutionMap().getGenericSignature();
   }
 
-  static NameAliasType *get(TypeAliasDecl *typealias, Type parent,
+  static TypeAliasType *get(TypeAliasDecl *typealias, Type parent,
                             SubstitutionMap substitutions, Type underlying);
 
   /// Returns the declaration that declares this type.
@@ -1673,14 +1673,14 @@ public:
   /// Retrieve the parent of this type as written, e.g., the part that was
   /// written before ".", if provided.
   Type getParent() const {
-    return Bits.NameAliasType.HasParent ? *getTrailingObjects<Type>()
+    return Bits.TypeAliasType.HasParent ? *getTrailingObjects<Type>()
                                         : Type();
   }
 
   /// Retrieve the substitution map applied to the declaration's underlying
   /// to produce the described type.
   SubstitutionMap getSubstitutionMap() const {
-    if (!Bits.NameAliasType.HasSubstitutionMap)
+    if (!Bits.TypeAliasType.HasSubstitutionMap)
       return SubstitutionMap();
 
     return *getTrailingObjects<SubstitutionMap>();
@@ -1703,7 +1703,7 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const TypeBase *T) {
-    return T->getKind() == TypeKind::NameAlias;
+    return T->getKind() == TypeKind::TypeAlias;
   }
 };
 
@@ -2241,7 +2241,7 @@ public:
 DEFINE_EMPTY_CAN_TYPE_WRAPPER(NominalType, NominalOrBoundGenericNominalType)
 
 /// EnumType - This represents the type declared by an EnumDecl.
-class EnumType : public NominalType, public llvm::FoldingSetNode {
+class EnumType : public NominalType {
 public:
   /// getDecl() - Returns the decl which declares this type.
   EnumDecl *getDecl() const {
@@ -2251,11 +2251,6 @@ public:
   /// Retrieve the type when we're referencing the given enum
   /// declaration in the parent type \c Parent.
   static EnumType *get(EnumDecl *D, Type Parent, const ASTContext &C);
-
-  void Profile(llvm::FoldingSetNodeID &ID) {
-    Profile(ID, getDecl(), getParent());
-  }
-  static void Profile(llvm::FoldingSetNodeID &ID, EnumDecl *D, Type Parent);
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const TypeBase *T) {
@@ -2269,7 +2264,7 @@ private:
 DEFINE_EMPTY_CAN_TYPE_WRAPPER(EnumType, NominalType)
 
 /// StructType - This represents the type declared by a StructDecl.
-class StructType : public NominalType, public llvm::FoldingSetNode {  
+class StructType : public NominalType {
 public:
   /// getDecl() - Returns the decl which declares this type.
   StructDecl *getDecl() const {
@@ -2279,11 +2274,6 @@ public:
   /// Retrieve the type when we're referencing the given struct
   /// declaration in the parent type \c Parent.
   static StructType *get(StructDecl *D, Type Parent, const ASTContext &C);
-
-  void Profile(llvm::FoldingSetNodeID &ID) {
-    Profile(ID, getDecl(), getParent());
-  }
-  static void Profile(llvm::FoldingSetNodeID &ID, StructDecl *D, Type Parent);
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const TypeBase *T) {
@@ -2297,7 +2287,7 @@ private:
 DEFINE_EMPTY_CAN_TYPE_WRAPPER(StructType, NominalType)
 
 /// ClassType - This represents the type declared by a ClassDecl.
-class ClassType : public NominalType, public llvm::FoldingSetNode {  
+class ClassType : public NominalType {
 public:
   /// getDecl() - Returns the decl which declares this type.
   ClassDecl *getDecl() const {
@@ -2307,11 +2297,6 @@ public:
   /// Retrieve the type when we're referencing the given class
   /// declaration in the parent type \c Parent.
   static ClassType *get(ClassDecl *D, Type Parent, const ASTContext &C);
-
-  void Profile(llvm::FoldingSetNodeID &ID) {
-    Profile(ID, getDecl(), getParent());
-  }
-  static void Profile(llvm::FoldingSetNodeID &ID, ClassDecl *D, Type Parent);
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const TypeBase *T) {
@@ -2347,7 +2332,9 @@ enum class MetatypeRepresentation : char {
   /// which permit dynamic behavior.
   Thick,
   /// An Objective-C metatype refers to an Objective-C class object.
-  ObjC
+  ObjC,
+
+  Last_MetatypeRepresentation = ObjC
 };
 
 /// AnyMetatypeType - A common parent class of MetatypeType and
@@ -2762,6 +2749,8 @@ public:
     bool operator!=(Param const &b) const { return !(*this == b); }
 
     Param getWithoutLabel() const { return Param(Ty, Identifier(), Flags); }
+
+    Param withType(Type newType) const { return Param(newType, Label, Flags); }
   };
 
   class CanParam : public Param {
@@ -3208,6 +3197,8 @@ BEGIN_CAN_TYPE_WRAPPER(GenericFunctionType, AnyFunctionType)
     return cast<GenericFunctionType>(fnType->getCanonicalType());
   }
 
+  CanFunctionType substGenericArgs(SubstitutionMap subs) const;
+
   CanGenericSignature getGenericSignature() const {
     return CanGenericSignature(getPointer()->getGenericSignature());
   }
@@ -3549,8 +3540,7 @@ public:
   }
 
   ValueOwnershipKind
-  getOwnershipKind(SILModule &,
-                   CanGenericSignature sig) const; // in SILType.cpp
+  getOwnershipKind(SILFunction &) const; // in SILType.cpp
 
   bool operator==(SILResultInfo rhs) const {
     return TypeAndConvention == rhs.TypeAndConvention;
@@ -4005,15 +3995,10 @@ public:
 
   CanType getSelfInstanceType() const;
 
-  /// If this is a @convention(witness_method) function with a protocol
-  /// constrained self parameter, return the protocol constraint for
-  /// the Self type.
-  ProtocolDecl *getDefaultWitnessMethodProtocol() const;
-
   /// If this is a @convention(witness_method) function with a class
   /// constrained self parameter, return the class constraint for the
   /// Self type.
-  ClassDecl *getWitnessMethodClass(ModuleDecl &M) const;
+  ClassDecl *getWitnessMethodClass() const;
 
   /// If this is a @convention(witness_method) function, return the conformance
   /// for which the method is a witness.
@@ -4344,7 +4329,7 @@ public:
 
 /// ProtocolType - A protocol type describes an abstract interface implemented
 /// by another type.
-class ProtocolType : public NominalType, public llvm::FoldingSetNode {
+class ProtocolType : public NominalType {
 public:
   /// Retrieve the type when we're referencing the given protocol.
   /// declaration.
@@ -4376,11 +4361,6 @@ public:
   /// otherwise.
   static bool visitAllProtocols(ArrayRef<ProtocolDecl *> protocols,
                                 llvm::function_ref<bool(ProtocolDecl *)> fn);
-
-  void Profile(llvm::FoldingSetNodeID &ID) {
-    Profile(ID, getDecl(), getParent());
-  }
-  static void Profile(llvm::FoldingSetNodeID &ID, ProtocolDecl *D, Type Parent);
 
 private:
   friend class NominalTypeDecl;
@@ -4698,8 +4678,11 @@ public:
   /// Register a nested type with the given name.
   void registerNestedType(Identifier name, Type nested);
 
-  /// getPrimary - Return the primary archetype parent of this archetype.
-  PrimaryArchetypeType *getPrimary() const;
+  /// Return the root archetype parent of this archetype.
+  ArchetypeType *getRoot() const;
+  
+  /// Get the generic environment this archetype lives in.
+  GenericEnvironment *getGenericEnvironment() const;
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const TypeBase *T) {
@@ -4763,7 +4746,8 @@ class OpenedArchetypeType final : public ArchetypeType,
 {
   friend TrailingObjects;
   friend ArchetypeType;
-      
+  
+  mutable GenericEnvironment *Environment = nullptr;
   TypeBase *Opened;
   UUID ID;
 public:
@@ -4792,12 +4776,17 @@ public:
     return Opened;
   }
   
+  /// Get a generic environment with this opened type bound to its generic
+  /// parameter.
+  GenericEnvironment *getGenericEnvironment() const;
+  
   static bool classof(const TypeBase *T) {
     return T->getKind() == TypeKind::OpenedArchetype;
   }
   
 private:
-  OpenedArchetypeType(const ASTContext &Ctx, Type Existential,
+  OpenedArchetypeType(const ASTContext &Ctx,
+                      Type Existential,
                       ArrayRef<ProtocolDecl *> ConformsTo, Type Superclass,
                       LayoutConstraint Layout, UUID uuid);
 };
@@ -4833,6 +4822,10 @@ public:
 
   static bool classof(const TypeBase *T) {
     return T->getKind() == TypeKind::NestedArchetype;
+  }
+  
+  DependentMemberType *getInterfaceType() const {
+    return cast<DependentMemberType>(InterfaceType.getPointer());
   }
 
 private:

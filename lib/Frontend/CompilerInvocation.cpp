@@ -42,20 +42,35 @@ void CompilerInvocation::setMainExecutablePath(StringRef Path) {
   setRuntimeResourcePath(LibPath.str());
 }
 
-static void updateRuntimeLibraryPath(SearchPathOptions &SearchPathOpts,
-                                     llvm::Triple &Triple) {
+static void updateRuntimeLibraryPaths(SearchPathOptions &SearchPathOpts,
+                                      llvm::Triple &Triple) {
   llvm::SmallString<128> LibPath(SearchPathOpts.RuntimeResourcePath);
 
   llvm::sys::path::append(LibPath, getPlatformNameForTriple(Triple));
   SearchPathOpts.RuntimeLibraryPath = LibPath.str();
 
-  llvm::sys::path::append(LibPath, swift::getMajorArchitectureName(Triple));
-  SearchPathOpts.RuntimeLibraryImportPath = LibPath.str();
+  // Set up the import paths containing the swiftmodules for the libraries in
+  // RuntimeLibraryPath.
+  SearchPathOpts.RuntimeLibraryImportPaths.clear();
+
+  // If this is set, we don't want any runtime import paths.
+  if (SearchPathOpts.SkipRuntimeLibraryImportPaths)
+    return;
+
+  if (!Triple.isOSDarwin())
+    llvm::sys::path::append(LibPath, swift::getMajorArchitectureName(Triple));
+  SearchPathOpts.RuntimeLibraryImportPaths.push_back(LibPath.str());
+
+  if (!SearchPathOpts.SDKPath.empty()) {
+    LibPath = SearchPathOpts.SDKPath;
+    llvm::sys::path::append(LibPath, "usr", "lib", "swift");
+    SearchPathOpts.RuntimeLibraryImportPaths.push_back(LibPath.str());
+  }
 }
 
 void CompilerInvocation::setRuntimeResourcePath(StringRef Path) {
   SearchPathOpts.RuntimeResourcePath = Path;
-  updateRuntimeLibraryPath(SearchPathOpts, LangOpts.Target);
+  updateRuntimeLibraryPaths(SearchPathOpts, LangOpts.Target);
 }
 
 void CompilerInvocation::setTargetTriple(StringRef Triple) {
@@ -64,7 +79,12 @@ void CompilerInvocation::setTargetTriple(StringRef Triple) {
 
 void CompilerInvocation::setTargetTriple(const llvm::Triple &Triple) {
   LangOpts.setTarget(Triple);
-  updateRuntimeLibraryPath(SearchPathOpts, LangOpts.Target);
+  updateRuntimeLibraryPaths(SearchPathOpts, LangOpts.Target);
+}
+
+void CompilerInvocation::setSDKPath(const std::string &Path) {
+  SearchPathOpts.SDKPath = Path;
+  updateRuntimeLibraryPaths(SearchPathOpts, LangOpts.Target);
 }
 
 SourceFileKind CompilerInvocation::getSourceFileKind() const {
@@ -126,11 +146,21 @@ generateOptimizationRemarkRegex(DiagnosticEngine &Diags, ArgList &Args,
 static void PrintArg(raw_ostream &OS, const char *Arg, StringRef TempDir) {
   const bool Escape = std::strpbrk(Arg, "\"\\$ ");
 
-  if (!TempDir.empty() && StringRef(Arg).startswith(TempDir)) {
-    // Don't write temporary file names in the debug info. This would prevent
-    // incremental llvm compilation because we would generate different IR on
-    // every compiler invocation.
-    Arg = "<temporary-file>";
+  if (!TempDir.empty()) {
+    llvm::SmallString<256> ArgPath{Arg};
+    llvm::sys::fs::make_absolute(ArgPath);
+    llvm::sys::path::native(ArgPath);
+
+    llvm::SmallString<256> TempPath{TempDir};
+    llvm::sys::fs::make_absolute(TempPath);
+    llvm::sys::path::native(TempPath);
+
+    if (StringRef(ArgPath).startswith(TempPath)) {
+      // Don't write temporary file names in the debug info. This would prevent
+      // incremental llvm compilation because we would generate different IR on
+      // every compiler invocation.
+      Arg = "<temporary-file>";
+    }
   }
 
   if (!Escape) {
@@ -171,12 +201,6 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
                           const FrontendOptions &FrontendOpts) {
   using namespace options;
 
-  /// FIXME: Remove this flag when void subscripts are implemented.
-  /// This is used to guard preemptive testing for the fix-it.
-  if (Args.hasArg(OPT_fix_string_substring_conversion)) {
-    Opts.FixStringToSubstringConversions = true;
-  }
-
   if (auto A = Args.getLastArg(OPT_swift_version)) {
     auto vers = version::Version::parseVersionString(
       A->getValue(), SourceLoc(), &Diags);
@@ -189,6 +213,16 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     }
     if (!isValid)
       diagnoseSwiftVersion(vers, A, Args, Diags);
+  }
+
+  if (auto A = Args.getLastArg(OPT_package_description_version)) {
+    auto vers = version::Version::parseVersionString(
+      A->getValue(), SourceLoc(), &Diags);
+    if (vers.hasValue()) {
+      Opts.PackageDescriptionVersion = vers.getValue();
+    } else {
+      return true;
+    }
   }
 
   Opts.AttachCommentsToDecls |= Args.hasArg(OPT_dump_api_path);
@@ -271,6 +305,9 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   
   if (Args.hasArg(OPT_enable_experimental_dependencies))
     Opts.EnableExperimentalDependencies = true;
+
+  if (Args.hasArg(OPT_experimental_dependency_include_intrafile))
+    Opts.ExperimentalDependenciesIncludeIntrafileOnes = true;
 
   Opts.DebuggerSupport |= Args.hasArg(OPT_debugger_support);
   if (Opts.DebuggerSupport)
@@ -404,11 +441,11 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
                    Target.isOSDarwin());
   Opts.EnableSILOpaqueValues |= Args.hasArg(OPT_enable_sil_opaque_values);
 
-#if SWIFT_DARWIN_ENABLE_STABLE_ABI_BIT
-  Opts.UseDarwinPreStableABIBit = false;
-#else
-  Opts.UseDarwinPreStableABIBit = true;
-#endif
+  Opts.UseDarwinPreStableABIBit =
+    (Target.isMacOSX() && Target.isMacOSXVersionLT(10, 14, 4)) ||
+    (Target.isiOS() && Target.isOSVersionLT(12, 2)) ||
+    (Target.isTvOS() && Target.isOSVersionLT(12, 2)) ||
+    (Target.isWatchOS() && Target.isOSVersionLT(5, 2));
 
   Opts.DisableConstraintSolverPerformanceHacks |=
       Args.hasArg(OPT_disable_constraint_solver_performance_hacks);
@@ -534,7 +571,7 @@ static bool ParseSearchPathArgs(SearchPathOptions &Opts,
   if (const Arg *A = Args.getLastArg(OPT_resource_dir))
     Opts.RuntimeResourcePath = A->getValue();
 
-  Opts.SkipRuntimeLibraryImportPath |= Args.hasArg(OPT_nostdimport);
+  Opts.SkipRuntimeLibraryImportPaths |= Args.hasArg(OPT_nostdimport);
 
   // Opts.RuntimeIncludePath is set by calls to
   // setRuntimeIncludePath() or setMainExecutablePath().
@@ -730,7 +767,7 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
   Opts.EmitProfileCoverageMapping |= Args.hasArg(OPT_profile_coverage_mapping);
   Opts.DisableSILPartialApply |=
     Args.hasArg(OPT_disable_sil_partial_apply);
-  Opts.EnableSILOwnership |= Args.hasArg(OPT_enable_sil_ownership);
+  Opts.VerifySILOwnership |= Args.hasArg(OPT_verify_sil_ownership);
   Opts.EnableMandatorySemanticARCOpts |=
       Args.hasArg(OPT_enable_mandatory_semantic_arc_opts);
   Opts.EnableLargeLoadableTypes |= Args.hasArg(OPT_enable_large_loadable_types);
@@ -1037,12 +1074,11 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
     Opts.EnableReflectionNames = false;
   }
 
+  if (Args.hasArg(OPT_enable_anonymous_context_mangled_names))
+    Opts.EnableAnonymousContextMangledNames = true;
+
   if (Args.hasArg(OPT_disable_reflection_names)) {
     Opts.EnableReflectionNames = false;
-  }
-
-  if (Args.hasArg(OPT_enable_class_resilience)) {
-    Opts.EnableClassResilience = true;
   }
 
   if (Args.hasArg(OPT_enable_resilience_bypass)) {
@@ -1053,8 +1089,17 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
   // (e.g. NativeObject).  Force the lazy initialization of the VWT always.
   Opts.LazyInitializeClassMetadata = Triple.isOSBinFormatCOFF();
 
-  if (const Arg *A = Args.getLastArg(OPT_read_type_info_path_EQ)) {
-    Opts.ReadTypeInfoPath = A->getValue();
+  // PE/COFF cannot deal with cross-module reference to the protocol conformance
+  // witness.  Use a runtime initialized value for the protocol conformance
+  // witness.
+  Opts.LazyInitializeProtocolConformances = Triple.isOSBinFormatCOFF();
+
+  if (Args.hasArg(OPT_disable_legacy_type_info)) {
+    Opts.DisableLegacyTypeInfo = true;
+  }
+
+  if (const Arg *A = Args.getLastArg(OPT_read_legacy_type_info_path_EQ)) {
+    Opts.ReadLegacyTypeInfoPath = A->getValue();
   }
 
   for (const auto &Lib : Args.getAllArgValues(options::OPT_autolink_library))
@@ -1243,7 +1288,7 @@ bool CompilerInvocation::parseArgs(
     return true;
   }
 
-  updateRuntimeLibraryPath(SearchPathOpts, LangOpts.Target);
+  updateRuntimeLibraryPaths(SearchPathOpts, LangOpts.Target);
 
   return false;
 }

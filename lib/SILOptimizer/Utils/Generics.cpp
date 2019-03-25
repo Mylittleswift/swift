@@ -156,7 +156,7 @@ static std::pair<unsigned, unsigned> getTypeDepthAndWidth(Type t) {
     for (auto &Param : Params) {
       unsigned TypeWidth;
       unsigned TypeDepth;
-      std::tie(TypeDepth, TypeWidth) = getTypeDepthAndWidth(Param.getOldType());
+      std::tie(TypeDepth, TypeWidth) = getTypeDepthAndWidth(Param.getParameterType());
       if (TypeDepth > MaxTypeDepth)
         MaxTypeDepth = TypeDepth;
       Width += TypeWidth;
@@ -390,6 +390,8 @@ static bool shouldNotSpecialize(SILFunction *Callee, SILFunction *Caller,
 bool ReabstractionInfo::prepareAndCheck(ApplySite Apply, SILFunction *Callee,
                                         SubstitutionMap ParamSubs,
                                         OptRemark::Emitter *ORE) {
+  assert(ParamSubs.hasAnySubstitutableParams());
+
   if (shouldNotSpecialize(Callee, Apply ? Apply.getFunction() : nullptr))
     return false;
 
@@ -530,12 +532,13 @@ bool ReabstractionInfo::canBeSpecialized(ApplySite Apply, SILFunction *Callee,
 
 ReabstractionInfo::ReabstractionInfo(ApplySite Apply, SILFunction *Callee,
                                      SubstitutionMap ParamSubs,
+                                     IsSerialized_t Serialized,
                                      bool ConvertIndirectToDirect,
-                                     OptRemark::Emitter *ORE) {
+                                     OptRemark::Emitter *ORE)
+    : ConvertIndirectToDirect(ConvertIndirectToDirect),
+      Serialized(Serialized) {
   if (!prepareAndCheck(Apply, Callee, ParamSubs, ORE))
     return;
-
-  this->ConvertIndirectToDirect = ConvertIndirectToDirect;
 
   SILFunction *Caller = nullptr;
   if (Apply)
@@ -557,7 +560,7 @@ ReabstractionInfo::ReabstractionInfo(ApplySite Apply, SILFunction *Callee,
                             << SpecializedType << "\n\n");
   }
 
-  // Some sanity checks.
+  // Some correctness checks.
   auto SpecializedFnTy = getSpecializedType();
   auto SpecializedSubstFnTy = SpecializedFnTy;
 
@@ -675,8 +678,13 @@ void ReabstractionInfo::createSubstitutedAndSpecializedTypes() {
     unsigned IdxForResult = 0;
     for (SILResultInfo RI : SubstitutedType->getIndirectFormalResults()) {
       assert(RI.isFormalIndirect());
-      if (substConv.getSILType(RI).isLoadable(M) && !RI.getType()->isVoid() &&
-          shouldExpand(M, substConv.getSILType(RI).getObjectType())) {
+
+      auto ResultTy = substConv.getSILType(RI);
+      auto &TL = M.Types.getTypeLowering(ResultTy,
+                                         getResilienceExpansion());
+
+      if (TL.isLoadable() && !RI.getType()->isVoid() &&
+          shouldExpand(M, ResultTy)) {
         Conversions.set(IdxForResult);
         break;
       }
@@ -689,7 +697,12 @@ void ReabstractionInfo::createSubstitutedAndSpecializedTypes() {
   for (SILParameterInfo PI : SubstitutedType->getParameters()) {
     auto IdxToInsert = IdxForParam;
     ++IdxForParam;
-    if (!substConv.getSILType(PI).isLoadable(M)) {
+
+    auto ParamTy = substConv.getSILType(PI);
+    auto &TL = M.Types.getTypeLowering(ParamTy,
+                                       getResilienceExpansion());
+
+    if (!TL.isLoadable()) {
       continue;
     }
 
@@ -777,10 +790,14 @@ createSpecializedType(CanSILFunctionType SubstFTy, SILModule &M) const {
       if (isFormalResultConverted(IndirectResultIdx++)) {
         // Convert the indirect result to a direct result.
         SILType SILResTy = SILType::getPrimitiveObjectType(RI.getType());
+        auto &TL = M.Types.getTypeLowering(SILResTy,
+                                           getResilienceExpansion());
+
         // Indirect results are passed as owned, so we also need to pass the
         // direct result as owned (except it's a trivial type).
-        auto C = (SILResTy.isTrivial(M) ? ResultConvention::Unowned :
-                  ResultConvention::Owned);
+        auto C = (TL.isTrivial()
+                  ? ResultConvention::Unowned
+                  : ResultConvention::Owned);
         SpecializedResults.push_back(SILResultInfo(RI.getType(), C));
         continue;
       }
@@ -798,11 +815,14 @@ createSpecializedType(CanSILFunctionType SubstFTy, SILModule &M) const {
 
     // Convert the indirect parameter to a direct parameter.
     SILType SILParamTy = SILType::getPrimitiveObjectType(PI.getType());
+    auto &TL = M.Types.getTypeLowering(SILParamTy,
+                                       getResilienceExpansion());
+
     // Indirect parameters are passed as owned/guaranteed, so we also
     // need to pass the direct/guaranteed parameter as
     // owned/guaranteed (except it's a trivial type).
     auto C = ParameterConvention::Direct_Unowned;
-    if (!SILParamTy.isTrivial(M)) {
+    if (!TL.isTrivial()) {
       if (PI.isGuaranteed()) {
         C = ParameterConvention::Direct_Guaranteed;
       } else {
@@ -1036,7 +1056,9 @@ shouldBePartiallySpecialized(Type Replacement,
   llvm::SmallSetVector<ArchetypeType *, 2> UsedArchetypes;
   Replacement.visit([&](Type Ty) {
     if (auto Archetype = Ty->getAs<ArchetypeType>()) {
-      UsedArchetypes.insert(Archetype->getPrimary());
+      if (auto Primary = dyn_cast<PrimaryArchetypeType>(Archetype->getRoot())) {
+        UsedArchetypes.insert(Primary);
+      }
     }
   });
 
@@ -1264,7 +1286,9 @@ void FunctionSignaturePartialSpecializer::collectUsedCallerArchetypes(
     // Add used generic parameters/archetypes.
     Replacement.visit([&](Type Ty) {
       if (auto Archetype = Ty->getAs<ArchetypeType>()) {
-        UsedCallerArchetypes.insert(Archetype->getPrimary());
+        if (auto Primary = dyn_cast<PrimaryArchetypeType>(Archetype->getRoot())) {
+          UsedCallerArchetypes.insert(Primary);
+        }
       }
     });
   }
@@ -1770,6 +1794,8 @@ checkSpecializationRequirements(ArrayRef<Requirement> Requirements) {
 /// This constructor is used when processing @_specialize.
 ReabstractionInfo::ReabstractionInfo(SILFunction *Callee,
                                      ArrayRef<Requirement> Requirements) {
+  Serialized = Callee->isSerialized();
+
   if (shouldNotSpecialize(Callee, nullptr))
     return;
 
@@ -1798,12 +1824,11 @@ ReabstractionInfo::ReabstractionInfo(SILFunction *Callee,
 
 GenericFuncSpecializer::GenericFuncSpecializer(
     SILOptFunctionBuilder &FuncBuilder, SILFunction *GenericFunc,
-    SubstitutionMap ParamSubs, IsSerialized_t Serialized,
+    SubstitutionMap ParamSubs,
     const ReabstractionInfo &ReInfo)
     : FuncBuilder(FuncBuilder), M(GenericFunc->getModule()),
       GenericFunc(GenericFunc),
       ParamSubs(ParamSubs),
-      Serialized(Serialized),
       ReInfo(ReInfo) {
 
   assert(GenericFunc->isDefinition() && "Expected definition to specialize!");
@@ -1811,11 +1836,11 @@ GenericFuncSpecializer::GenericFuncSpecializer(
 
   if (ReInfo.isPartialSpecialization()) {
     Mangle::PartialSpecializationMangler Mangler(
-        GenericFunc, FnTy, Serialized, /*isReAbstracted*/ true);
+        GenericFunc, FnTy, ReInfo.isSerialized(), /*isReAbstracted*/ true);
     ClonedName = Mangler.mangle();
   } else {
     Mangle::GenericSpecializationMangler Mangler(
-        GenericFunc, ParamSubs, Serialized, /*isReAbstracted*/ true);
+        GenericFunc, ParamSubs, ReInfo.isSerialized(), /*isReAbstracted*/ true);
     ClonedName = Mangler.mangle();
   }
   LLVM_DEBUG(llvm::dbgs() << "    Specialized function " << ClonedName << '\n');
@@ -1865,7 +1890,7 @@ SILFunction *GenericFuncSpecializer::tryCreateSpecialization() {
 
   // Create a new function.
   SILFunction *SpecializedF = GenericCloner::cloneFunction(
-      FuncBuilder, GenericFunc, Serialized, ReInfo,
+      FuncBuilder, GenericFunc, ReInfo,
       // Use these substitutions inside the new specialized function being
       // created.
       ReInfo.getClonerParamSubstitutionMap(),
@@ -2033,7 +2058,8 @@ static ApplySite replaceWithSpecializedCallee(ApplySite AI,
   if (auto *PAI = dyn_cast<PartialApplyInst>(AI)) {
     auto *NewPAI = Builder.createPartialApply(
         Loc, Callee, Subs, Arguments,
-        PAI->getType().getAs<SILFunctionType>()->getCalleeConvention());
+        PAI->getType().getAs<SILFunctionType>()->getCalleeConvention(),
+        PAI->isOnStack());
     PAI->replaceAllUsesWith(NewPAI);
     return NewPAI;
   }
@@ -2060,7 +2086,6 @@ class ReabstractionThunkGenerator {
   const ReabstractionInfo &ReInfo;
   PartialApplyInst *OrigPAI;
 
-  IsSerialized_t Serialized = IsNotSerialized;
   std::string ThunkName;
   RegularLocation Loc;
   SmallVector<SILValue, 4> Arguments;
@@ -2073,23 +2098,18 @@ public:
       : FunctionBuilder(FunctionBuilder), OrigF(OrigPAI->getCalleeFunction()), M(OrigF->getModule()),
         SpecializedFunc(SpecializedFunc), ReInfo(ReInfo), OrigPAI(OrigPAI),
         Loc(RegularLocation::getAutoGeneratedLocation()) {
-    if (OrigF->isSerialized() && OrigPAI->getFunction()->isSerialized())
-      Serialized = IsSerializable;
+    if (!ReInfo.isPartialSpecialization()) {
+      Mangle::GenericSpecializationMangler Mangler(
+          OrigF, ReInfo.getCalleeParamSubstitutionMap(), ReInfo.isSerialized(),
+          /*isReAbstracted*/ false);
 
-    {
-      if (!ReInfo.isPartialSpecialization()) {
-        Mangle::GenericSpecializationMangler Mangler(
-            OrigF, ReInfo.getCalleeParamSubstitutionMap(), Serialized,
-            /*isReAbstracted*/ false);
+      ThunkName = Mangler.mangle();
+    } else {
+      Mangle::PartialSpecializationMangler Mangler(
+          OrigF, ReInfo.getSpecializedType(), ReInfo.isSerialized(),
+          /*isReAbstracted*/ false);
 
-        ThunkName = Mangler.mangle();
-      } else {
-        Mangle::PartialSpecializationMangler Mangler(
-            OrigF, ReInfo.getSpecializedType(), Serialized,
-            /*isReAbstracted*/ false);
-
-        ThunkName = Mangler.mangle();
-      }
+      ThunkName = Mangler.mangle();
     }
   }
 
@@ -2104,7 +2124,7 @@ protected:
 SILFunction *ReabstractionThunkGenerator::createThunk() {
   SILFunction *Thunk = FunctionBuilder.getOrCreateSharedFunction(
       Loc, ThunkName, ReInfo.getSubstitutedType(), IsBare, IsTransparent,
-      Serialized, ProfileCounter(), IsThunk, IsNotDynamic);
+      ReInfo.isSerialized(), ProfileCounter(), IsThunk, IsNotDynamic);
   // Re-use an existing thunk.
   if (!Thunk->empty())
     return Thunk;
@@ -2291,6 +2311,15 @@ void swift::trySpecializeApplyOfGeneric(
   if (shouldNotSpecialize(RefF, F))
     return;
 
+  // If our callee has ownership, do not specialize for now. This should only
+  // occur with transparent referenced functions.
+  //
+  // FIXME: Support this.
+  if (RefF->hasOwnership()) {
+    assert(RefF->isTransparent());
+    return;
+  }
+
   // If the caller and callee are both fragile, preserve the fragility when
   // cloning the callee. Otherwise, strip it off so that we can optimize
   // the body more.
@@ -2306,7 +2335,8 @@ void swift::trySpecializeApplyOfGeneric(
     Serialized = IsNotSerialized;
 
   ReabstractionInfo ReInfo(Apply, RefF, Apply.getSubstitutionMap(),
-                           /*ConvertIndirectToDirect=*/true, &ORE);
+                           Serialized, /*ConvertIndirectToDirect=*/true,
+                           &ORE);
   if (!ReInfo.canBeSpecialized())
     return;
 
@@ -2351,7 +2381,7 @@ void swift::trySpecializeApplyOfGeneric(
 
   GenericFuncSpecializer FuncSpecializer(FuncBuilder,
                                          RefF, Apply.getSubstitutionMap(),
-                                         Serialized, ReInfo);
+                                         ReInfo);
   SILFunction *SpecializedF = FuncSpecializer.lookupSpecialization();
   if (SpecializedF) {
     // Even if the pre-specialization exists already, try to preserve it
@@ -2394,7 +2424,8 @@ void swift::trySpecializeApplyOfGeneric(
     auto *PAI = cast<PartialApplyInst>(Apply.getInstruction());
     SILBuilderWithScope Builder(PAI);
     SILFunction *Thunk =
-      ReabstractionThunkGenerator(FuncBuilder, ReInfo, PAI, SpecializedF).createThunk();
+      ReabstractionThunkGenerator(FuncBuilder, ReInfo, PAI, SpecializedF)
+        .createThunk();
     NewFunctions.push_back(Thunk);
     auto *FRI = Builder.createFunctionRef(PAI->getLoc(), Thunk);
     SmallVector<SILValue, 4> Arguments;
@@ -2404,7 +2435,8 @@ void swift::trySpecializeApplyOfGeneric(
     auto Subs = ReInfo.getCallerParamSubstitutionMap();
     auto *NewPAI = Builder.createPartialApply(
         PAI->getLoc(), FRI, Subs, Arguments,
-        PAI->getType().getAs<SILFunctionType>()->getCalleeConvention());
+        PAI->getType().getAs<SILFunctionType>()->getCalleeConvention(),
+        PAI->isOnStack());
     PAI->replaceAllUsesWith(NewPAI);
     DeadApplies.insert(PAI);
     return;
@@ -2467,36 +2499,39 @@ static bool linkSpecialization(SILModule &M, SILFunction *F) {
   return false;
 }
 
-/// The list of classes and functions from the stdlib
-/// whose specializations we want to preserve.
-static const char *const KnownPrespecializations[] = {
-    "Array",
-    "_ArrayBuffer",
-    "_ContiguousArrayBuffer",
-    "Range",
-    "RangeIterator",
-    "CountableRange",
-    "CountableRangeIterator",
-    "ClosedRange",
-    "ClosedRangeIterator",
-    "CountableClosedRange",
-    "CountableClosedRangeIterator",
-    "IndexingIterator",
-    "Collection",
-    "ReversedCollection",
-    "MutableCollection",
-    "BidirectionalCollection",
-    "RandomAccessCollection",
-    "ReversedRandomAccessCollection",
-    "RangeReplaceableCollection",
-    "_allocateUninitializedArray",
-    "UTF8",
-    "UTF16",
-    "String",
-    "_StringBuffer",
-};
-
 bool swift::isKnownPrespecialization(StringRef SpecName) {
+  // Completely disable for now.
+#if false
+
+  /// The list of classes and functions from the stdlib
+  /// whose specializations we want to preserve.
+  static const char *const KnownPrespecializations[] = {
+      "Array",
+      "_ArrayBuffer",
+      "_ContiguousArrayBuffer",
+      "Range",
+      "RangeIterator",
+      "CountableRange",
+      "CountableRangeIterator",
+      "ClosedRange",
+      "ClosedRangeIterator",
+      "CountableClosedRange",
+      "CountableClosedRangeIterator",
+      "IndexingIterator",
+      "Collection",
+      "ReversedCollection",
+      "MutableCollection",
+      "BidirectionalCollection",
+      "RandomAccessCollection",
+      "ReversedRandomAccessCollection",
+      "RangeReplaceableCollection",
+      "_allocateUninitializedArray",
+      "UTF8",
+      "UTF16",
+      "String",
+      "_StringBuffer",
+  };
+
   // TODO: Once there is an efficient API to check if
   // a given symbol is a specialization of a specific type,
   // use it instead. Doing demangling just for this check
@@ -2547,6 +2582,7 @@ bool swift::isKnownPrespecialization(StringRef SpecName) {
     }
   }
 
+#endif
   return false;
 }
 

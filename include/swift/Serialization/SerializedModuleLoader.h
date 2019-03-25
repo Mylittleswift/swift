@@ -51,22 +51,32 @@ protected:
                   std::unique_ptr<llvm::MemoryBuffer> *moduleDocBuffer,
                   bool &isFramework);
 
-  virtual std::error_code
-  openModuleFiles(AccessPathElem ModuleID, StringRef DirName,
-                  StringRef ModuleFilename, StringRef ModuleDocFilename,
+  virtual std::error_code findModuleFilesInDirectory(
+      AccessPathElem ModuleID, StringRef DirPath, StringRef ModuleFilename,
+      StringRef ModuleDocFilename,
+      std::unique_ptr<llvm::MemoryBuffer> *ModuleBuffer,
+      std::unique_ptr<llvm::MemoryBuffer> *ModuleDocBuffer) = 0;
+
+  std::error_code
+  openModuleFiles(AccessPathElem ModuleID,
+                  StringRef ModulePath, StringRef ModuleDocPath,
                   std::unique_ptr<llvm::MemoryBuffer> *ModuleBuffer,
-                  std::unique_ptr<llvm::MemoryBuffer> *ModuleDocBuffer,
-                  llvm::SmallVectorImpl<char> &Scratch);
+                  std::unique_ptr<llvm::MemoryBuffer> *ModuleDocBuffer);
+
+  std::error_code
+  openModuleDocFile(AccessPathElem ModuleID,
+                    StringRef ModuleDocPath,
+                    std::unique_ptr<llvm::MemoryBuffer> *ModuleDocBuffer);
 
   /// If the module loader subclass knows that all options have been tried for
   /// loading an architecture-specific file out of a swiftmodule bundle, try
   /// to list the architectures that \e are present.
   ///
   /// \returns true if an error diagnostic was emitted
-  virtual bool maybeDiagnoseArchitectureMismatch(SourceLoc sourceLocation,
-                                                 StringRef moduleName,
-                                                 StringRef archName,
-                                                 StringRef directoryPath) {
+  virtual bool maybeDiagnoseTargetMismatch(SourceLoc sourceLocation,
+                                           StringRef moduleName,
+                                           StringRef archName,
+                                           StringRef directoryPath) {
     return false;
   }
 
@@ -128,17 +138,16 @@ class SerializedModuleLoader : public SerializedModuleLoaderBase {
     : SerializedModuleLoaderBase(ctx, tracker, loadMode)
   {}
 
-  std::error_code
-  openModuleFiles(AccessPathElem ModuleID, StringRef DirName,
-                  StringRef ModuleFilename, StringRef ModuleDocFilename,
-                  std::unique_ptr<llvm::MemoryBuffer> *ModuleBuffer,
-                  std::unique_ptr<llvm::MemoryBuffer> *ModuleDocBuffer,
-                  llvm::SmallVectorImpl<char> &Scratch) override;
+  std::error_code findModuleFilesInDirectory(
+      AccessPathElem ModuleID, StringRef DirPath, StringRef ModuleFilename,
+      StringRef ModuleDocFilename,
+      std::unique_ptr<llvm::MemoryBuffer> *ModuleBuffer,
+      std::unique_ptr<llvm::MemoryBuffer> *ModuleDocBuffer) override;
 
-  bool maybeDiagnoseArchitectureMismatch(SourceLoc sourceLocation,
-                                         StringRef moduleName,
-                                         StringRef archName,
-                                         StringRef directoryPath) override;
+  bool maybeDiagnoseTargetMismatch(SourceLoc sourceLocation,
+                                   StringRef moduleName,
+                                   StringRef archName,
+                                   StringRef directoryPath) override;
 
 public:
   virtual ~SerializedModuleLoader();

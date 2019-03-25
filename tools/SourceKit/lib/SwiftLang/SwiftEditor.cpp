@@ -36,6 +36,7 @@
 #include "swift/IDE/SourceEntityWalker.h"
 #include "swift/IDE/SyntaxModel.h"
 #include "swift/Subsystems.h"
+#include "swift/SyntaxParse/SyntaxTreeCreator.h"
 #include "swift/Syntax/Serialization/SyntaxSerialization.h"
 #include "swift/Syntax/SyntaxNodes.h"
 
@@ -658,6 +659,7 @@ private:
 class SwiftDocumentSyntaxInfo {
   SourceManager SM;
   EditorDiagConsumer DiagConsumer;
+  std::shared_ptr<SyntaxTreeCreator> SynTreeCreator;
   std::unique_ptr<ParserUnit> Parser;
   unsigned BufferID;
   std::vector<std::string> Args;
@@ -680,10 +682,17 @@ public:
     BufferID = SM.addNewSourceBuffer(std::move(BufCopy));
     DiagConsumer.setInputBufferIDs(BufferID);
 
+    if (CompInv.getLangOptions().BuildSyntaxTree) {
+      RC<SyntaxArena> syntaxArena{new syntax::SyntaxArena()};
+      SynTreeCreator = std::make_shared<SyntaxTreeCreator>(
+          SM, BufferID, CompInv.getMainFileSyntaxParsingCache(), syntaxArena);
+    }
+
     Parser.reset(
                  new ParserUnit(SM, SourceFileKind::Main, BufferID,
                      CompInv.getLangOptions(),
                      CompInv.getModuleName(),
+                     SynTreeCreator,
                      CompInv.getMainFileSyntaxParsingCache())
     );
 
@@ -698,7 +707,9 @@ public:
   }
 
   void parse() {
-    Parser->parse();
+    auto root = Parser->parse();
+    if (SynTreeCreator)
+      SynTreeCreator->acceptSyntaxRoot(root, Parser->getSourceFile());
   }
 
   SourceFile &getSourceFile() {
@@ -1260,8 +1271,8 @@ public:
   }
 
   StringRef getObjCSelectorName(const Decl *D, SmallString<64> &Buf) {
-    if (auto FuncD = dyn_cast_or_null<AbstractFunctionDecl>(D)) {
-      // We only vend the selector name for @IBAction methods.
+    // We only vend the selector name for @IBAction methods.
+    if (auto FuncD = dyn_cast_or_null<FuncDecl>(D)) {
       if (FuncD->getAttrs().hasAttribute<IBActionAttr>())
         return FuncD->getObjCSelector().getString(Buf);
     }

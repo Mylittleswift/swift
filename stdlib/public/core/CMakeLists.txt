@@ -30,7 +30,6 @@ set(SWIFTLIB_ESSENTIAL
   ASCII.swift
   Assert.swift
   AssertCommon.swift
-  AtomicInt.swift.gyb
   BidirectionalCollection.swift
   Bitset.swift
   Bool.swift
@@ -38,10 +37,8 @@ set(SWIFTLIB_ESSENTIAL
   BridgeStorage.swift
   BridgingBuffer.swift
   Builtin.swift
-  BuiltinMath.swift.gyb
   Character.swift
   CocoaArray.swift
-  Codable.swift.gyb
   Collection.swift
   CollectionAlgorithms.swift
   Comparable.swift
@@ -65,12 +62,9 @@ set(SWIFTLIB_ESSENTIAL
   Equatable.swift
   ErrorType.swift
   Filter.swift
-  FixedArray.swift.gyb
   FlatMap.swift
   Flatten.swift
   FloatingPoint.swift
-  FloatingPointParsing.swift.gyb
-  FloatingPointTypes.swift.gyb
   Hashable.swift
   # WORKAROUND: This file name is not sorted alphabetically in the list because
   # if we do so, the compiler crashes.
@@ -84,7 +78,6 @@ set(SWIFTLIB_ESSENTIAL
   InputStream.swift
   IntegerParsing.swift
   Integers.swift
-  IntegerTypes.swift.gyb
   Join.swift
   KeyPath.swift
   KeyValuePairs.swift
@@ -95,13 +88,11 @@ set(SWIFTLIB_ESSENTIAL
   Map.swift
   MemoryLayout.swift
   UnicodeScalar.swift # ORDER DEPENDENCY: Must precede Mirrors.swift
-  Mirrors.swift.gyb
   Misc.swift
   MutableCollection.swift
   NativeDictionary.swift
   NativeSet.swift
   NewtypeWrapper.swift
-  NormalizedCodeUnitIterator.swift
   ObjectIdentifier.swift
   Optional.swift
   OptionSet.swift
@@ -119,7 +110,6 @@ set(SWIFTLIB_ESSENTIAL
   REPL.swift
   Result.swift
   Reverse.swift
-  Runtime.swift.gyb
   RuntimeFunctionCounters.swift
   SipHash.swift
   Sequence.swift
@@ -167,12 +157,10 @@ set(SWIFTLIB_ESSENTIAL
   StringUTF16View.swift
   StringUTF8View.swift
   StringUTF8Validation.swift
-  StringVariant.swift
   Substring.swift
   SwiftNativeNSArray.swift
   ThreadLocalStorage.swift
   UIntBuffer.swift
-  UnavailableStringAPIs.swift.gyb
   UnicodeEncoding.swift
   UnicodeHelpers.swift
   UnicodeParser.swift
@@ -181,8 +169,6 @@ set(SWIFTLIB_ESSENTIAL
   Unmanaged.swift
   UnmanagedOpaqueString.swift
   UnmanagedString.swift
-  UnsafeBufferPointer.swift.gyb
-  UnsafeRawBufferPointer.swift.gyb
   UnsafePointer.swift
   UnsafeRawPointer.swift
   UTFEncoding.swift
@@ -193,7 +179,21 @@ set(SWIFTLIB_ESSENTIAL
   StringGraphemeBreaking.swift # ORDER DEPENDENCY: Must follow UTF16.swift
   ValidUTF8Buffer.swift
   WriteBackMutableSlice.swift
-  MigrationSupport.swift
+  MigrationSupport.swift)
+
+set(SWIFTLIB_ESSENTIAL_GYB_SOURCES
+  AtomicInt.swift.gyb
+  BuiltinMath.swift.gyb
+  Codable.swift.gyb
+  FixedArray.swift.gyb
+  FloatingPointParsing.swift.gyb
+  FloatingPointTypes.swift.gyb
+  IntegerTypes.swift.gyb
+  Mirrors.swift.gyb
+  Runtime.swift.gyb
+  UnavailableStringAPIs.swift.gyb
+  UnsafeBufferPointer.swift.gyb
+  UnsafeRawBufferPointer.swift.gyb
   )
 
 # The complete list of sources in the core standard library.  Includes
@@ -202,25 +202,30 @@ set(SWIFTLIB_SOURCES
   ${SWIFTLIB_ESSENTIAL}
   ### PLEASE KEEP THIS LIST IN ALPHABETICAL ORDER ###
   Availability.swift
+  CollectionDifference.swift
   CollectionOfOne.swift
-  ExistentialCollection.swift.gyb
+  Diffing.swift
   Mirror.swift
   PlaygroundDisplay.swift
   CommandLine.swift
   SliceBuffer.swift
   SIMDVector.swift
-  SIMDVectorTypes.swift.gyb
-  Tuple.swift.gyb
   UnfoldSequence.swift
   VarArgs.swift
-  Zip.swift
+  Zip.swift)
+
+set(SWIFTLIB_GYB_SOURCES
+    ${SWIFTLIB_ESSENTIAL_GYB_SOURCES}
+    ExistentialCollection.swift.gyb
+    SIMDVectorTypes.swift.gyb
+    Tuple.swift.gyb
   )
 set(GROUP_INFO_JSON_FILE ${CMAKE_CURRENT_SOURCE_DIR}/GroupInfo.json)
 set(swift_core_link_flags "${SWIFT_RUNTIME_SWIFT_LINK_FLAGS}")
 set(swift_core_framework_depends)
 set(swift_core_private_link_libraries)
 set(swift_stdlib_compile_flags "${SWIFT_RUNTIME_SWIFT_COMPILE_FLAGS}")
-if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+if(SWIFT_PRIMARY_VARIANT_SDK IN_LIST SWIFT_APPLE_PLATFORMS)
   list(APPEND swift_core_link_flags "-all_load")
   list(APPEND swift_core_framework_depends Foundation)
   list(APPEND swift_core_framework_depends CoreFoundation)
@@ -239,23 +244,32 @@ else()
   #  -Wl,--whole-archive swiftRuntime -Wl,--no-whole-archive)
   if("${SWIFT_PATH_TO_LIBICU_BUILD}" STREQUAL "")
     list(APPEND swift_core_private_link_libraries
-      ICU_UC ICU_I18N)
+      ${SWIFT_${SWIFT_PRIMARY_VARIANT_SDK}_${SWIFT_PRIMARY_VARIANT_ARCH}_ICU_UC}
+      ${SWIFT_${SWIFT_PRIMARY_VARIANT_SDK}_${SWIFT_PRIMARY_VARIANT_ARCH}_ICU_I18N})
   else()
     list(APPEND swift_core_private_link_libraries -licui18nswift -licuucswift -licudataswift)
   endif()
 endif()
 
-if("${CMAKE_SYSTEM_NAME}" STREQUAL "CYGWIN")
-  execute_process(COMMAND "cygpath" "-u" "$ENV{SYSTEMROOT}"
-      OUTPUT_VARIABLE ENV_SYSTEMROOT)
-
-  list(APPEND swift_core_link_flags "${ENV_SYSTEMROOT}/system32/psapi.dll")
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+if(SWIFT_PRIMARY_VARIANT_SDK STREQUAL ANDROID)
+  # workaround for libatomic needing to be after object files for swiftCore.so
+  list(APPEND swift_core_private_link_libraries atomic)
+elseif(SWIFT_PRIMARY_VARIANT_SDK STREQUAL CYGWIN)
+  # TODO(compnerd) cache this variable to permit re-configuration
+  execute_process(COMMAND "cygpath" "-u" "$ENV{SYSTEMROOT}" OUTPUT_VARIABLE ENV_SYSTEMROOT)
+  list(APPEND swift_core_private_link_libraries "${ENV_SYSTEMROOT}/system32/psapi.dll")
+elseif(SWIFT_PRIMARY_VARIANT_SDK STREQUAL FREEBSD)
   find_library(EXECINFO_LIBRARY execinfo)
+  list(APPEND swift_core_private_link_libraries ${EXECINFO_LIBRARY})
+  # workaround for libatomic needing to be after object files for swiftCore.so
   list(APPEND swift_core_private_link_libraries
-      ${EXECINFO_LIBRARY})
+    ${SWIFTLIB_DIR}/clang/lib/freebsd/libclang_rt.builtins-${SWIFT_PRIMARY_VARIANT_ARCH}.a)
+elseif(SWIFT_PRIMARY_VARIANT_SDK STREQUAL LINUX)
+  if(SWIFT_BUILD_STATIC_STDLIB)
+    list(APPEND swift_core_private_link_libraries swiftImageInspectionShared)
+  endif()
+elseif(SWIFT_PRIMARY_VARIANT_SDK STREQUAL WINDOWS)
+  list(APPEND swift_core_private_link_libraries shell32;DbgHelp)
 endif()
 
 option(SWIFT_CHECK_ESSENTIAL_STDLIB
@@ -274,19 +288,17 @@ endif()
 
 if(SWIFT_CHECK_ESSENTIAL_STDLIB)
   add_swift_target_library(swift_stdlib_essential ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_STDLIB IS_STDLIB_CORE
-      ${SWIFTLIB_ESSENTIAL})
+      ${SWIFTLIB_ESSENTIAL}
+      GYB_SOURCES
+        ${SWIFTLIB_ESSENTIAL_GYB_SOURCES})
   target_link_libraries(swift_stdlib_essential ${RUNTIME_DEPENDENCY})
-endif()
-
-
-set(shared_only_libs)
-if(SWIFT_BUILD_STATIC_STDLIB AND "${SWIFT_HOST_VARIANT_SDK}" STREQUAL "LINUX")
-   list(APPEND swift_core_private_link_libraries swiftImageInspectionShared)
 endif()
 
 add_swift_target_library(swiftCore
                   ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_STDLIB IS_STDLIB_CORE
                     ${SWIFTLIB_SOURCES}
+                  GYB_SOURCES
+                    ${SWIFTLIB_GYB_SOURCES}
                   # The copy_shim_headers target dependency is required to let the
                   # build system know that there's a rule to produce the shims
                   # directory, but is not sufficient to cause the object file to be rebuilt
@@ -302,8 +314,6 @@ add_swift_target_library(swiftCore
                     ${swift_core_private_link_libraries}
                   INCORPORATE_OBJECT_LIBRARIES
                     swiftRuntime swiftStdlibStubs
-                  INCORPORATE_OBJECT_LIBRARIES_SHARED_ONLY
-                    ${shared_only_libs}
                   FRAMEWORK_DEPENDS
                     ${swift_core_framework_depends}
                   INSTALL_IN_COMPONENT

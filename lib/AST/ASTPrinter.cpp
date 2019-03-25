@@ -77,7 +77,7 @@ static bool isPublicOrUsableFromInline(Type ty) {
   return !ty.findIf([](Type typePart) -> bool {
     // FIXME: If we have an internal typealias for a non-internal type, we ought
     // to be able to print it by desugaring.
-    if (auto *aliasTy = dyn_cast<NameAliasType>(typePart.getPointer()))
+    if (auto *aliasTy = dyn_cast<TypeAliasType>(typePart.getPointer()))
       return !isPublicOrUsableFromInline(aliasTy->getDecl());
     if (auto *nominal = typePart->getAnyNominal())
       return !isPublicOrUsableFromInline(nominal);
@@ -99,12 +99,16 @@ PrintOptions PrintOptions::printParseableInterfaceFile() {
   result.TypeDefinitions = true;
   result.PrintIfConfig = false;
   result.FullyQualifiedTypes = true;
+  result.UseExportedModuleNames = true;
   result.AllowNullTypes = false;
   result.SkipImports = true;
   result.OmitNameOfInaccessibleProperties = true;
   result.FunctionDefinitions = true;
   result.CollapseSingleGetterProperty = false;
   result.VarInitializers = true;
+
+  // We should print __consuming, __owned, etc for the module interface file.
+  result.SkipUnderscoredKeywords = false;
 
   result.FunctionBody = [](const ValueDecl *decl, ASTPrinter &printer) {
     auto AFD = dyn_cast<AbstractFunctionDecl>(decl);
@@ -178,7 +182,7 @@ PrintOptions PrintOptions::printParseableInterfaceFile() {
   result.PrintAccess = true;
 
   result.ExcludeAttrList = {DAK_ImplicitlyUnwrappedOptional, DAK_AccessControl,
-                            DAK_SetterAccess};
+                            DAK_SetterAccess, DAK_Lazy};
 
   return result;
 }
@@ -270,6 +274,22 @@ void ASTPrinter::printTextImpl(StringRef Text) {
   printText(Text);
 }
 
+void ASTPrinter::printEscapedStringLiteral(StringRef str) {
+  SmallString<128> encodeBuf;
+  StringRef escaped =
+    Lexer::getEncodedStringSegment(str, encodeBuf,
+                                   /*isFirstSegment*/true,
+                                   /*isLastSegment*/true,
+                                   /*indentToStrip*/~0U /* sentinel */);
+
+  // FIXME: This is wasteful, but ASTPrinter is an abstract class that doesn't
+  //        have a directly-accessible ostream.
+  SmallString<128> escapeBuf;
+  llvm::raw_svector_ostream os(escapeBuf);
+  os << QuotedString(escaped);
+  printTextImpl(escapeBuf.str());
+}
+
 void ASTPrinter::printTypeRef(Type T, const TypeDecl *RefTo, Identifier Name) {
   PrintNameContext Context = PrintNameContext::Normal;
   if (isa<GenericTypeParamDecl>(RefTo)) {
@@ -350,7 +370,7 @@ ASTPrinter &operator<<(ASTPrinter &printer, tok keyword) {
   SmallString<16> Buffer;
   llvm::raw_svector_ostream OS(Buffer);
   OS << keyword;
-  printer.printKeyword(Buffer.str());
+  printer.printKeyword(Buffer.str(), PrintOptions());
   return printer;
 }
 
@@ -468,6 +488,24 @@ class PrintAST : public ASTVisitor<PrintAST> {
     Printer << Ctx.SourceMgr.extractText(Range);
   }
 
+  static std::string sanitizeClangDocCommentStyle(StringRef Line) {
+    static StringRef ClangStart = "/*!";
+    static StringRef SwiftStart = "/**";
+    auto Pos = Line.find(ClangStart);
+    if (Pos == StringRef::npos)
+      return Line.str();
+    StringRef Segment[2];
+    // The text before "/*!"
+    Segment[0] = Line.substr(0, Pos);
+    // The text after "/*!"
+    Segment[1] = Line.substr(Pos).substr(ClangStart.size());
+    // Only sanitize when "/*!" appears at the start of this line.
+    if (Segment[0].trim().empty()) {
+      return (llvm::Twine(Segment[0]) + SwiftStart + Segment[1]).str();
+    }
+    return Line.str();
+  }
+
   void printClangDocumentationComment(const clang::Decl *D) {
     const auto &ClangContext = D->getASTContext();
     const clang::RawComment *RC = ClangContext.getRawCommentForAnyRedecl(D);
@@ -477,7 +515,7 @@ class PrintAST : public ASTVisitor<PrintAST> {
     bool Invalid;
     unsigned StartLocCol =
         ClangContext.getSourceManager().getSpellingColumnNumber(
-            RC->getLocStart(), &Invalid);
+            RC->getBeginLoc(), &Invalid);
     if (Invalid)
       StartLocCol = 0;
 
@@ -488,10 +526,14 @@ class PrintAST : public ASTVisitor<PrintAST> {
     StringRef RawText =
         RC->getRawText(ClangContext.getSourceManager()).rtrim("\n\r");
     trimLeadingWhitespaceFromLines(RawText, WhitespaceToTrim, Lines);
-
+    bool FirstLine = true;
     for (auto Line : Lines) {
-      Printer << ASTPrinter::sanitizeUtf8(Line);
+      if (FirstLine)
+        Printer << sanitizeClangDocCommentStyle(ASTPrinter::sanitizeUtf8(Line));
+      else
+        Printer << ASTPrinter::sanitizeUtf8(Line);
       Printer.printNewline();
+      FirstLine = false;
     }
   }
 
@@ -575,7 +617,7 @@ class PrintAST : public ASTVisitor<PrintAST> {
       Printer << tok::kw_public;
       break;
     case AccessLevel::Open:
-      Printer.printKeyword("open");
+      Printer.printKeyword("open", Options);
       break;
     }
     Printer << suffix << " ";
@@ -785,6 +827,10 @@ public:
   using ASTVisitor::visit;
 
   bool visit(Decl *D) {
+    #if SWIFT_BUILD_ONLY_SYNTAXPARSERLIB
+      return false; // not needed for the parser library.
+    #endif
+
     if (!shouldPrint(D, true))
       return false;
 
@@ -889,8 +935,8 @@ void PrintAST::printAttributes(const Decl *D) {
 
     if (auto vd = dyn_cast<VarDecl>(D)) {
       // Don't print @_hasInitialValue if we're printing an initializer
-      // expression.
-      if (vd->isInitExposedToClients())
+      // expression or if the storage is resilient.
+      if (vd->isInitExposedToClients() || vd->isResilient())
         Options.ExcludeAttrList.push_back(DAK_HasInitialValue);
 
       if (!Options.PrintForSIL) {
@@ -1460,6 +1506,10 @@ bool ShouldPrintChecker::shouldPrint(const Pattern *P,
 
 bool ShouldPrintChecker::shouldPrint(const Decl *D,
                                      const PrintOptions &Options) {
+  #if SWIFT_BUILD_ONLY_SYNTAXPARSERLIB
+    return false; // not needed for the parser library.
+  #endif
+
   if (auto *ED= dyn_cast<ExtensionDecl>(D)) {
     if (Options.printExtensionContentAsMembers(ED))
       return false;
@@ -1614,11 +1664,9 @@ static StringRef getAccessorLabel(AccessorDecl *accessor) {
 
 void PrintAST::printMutatingModifiersIfNeeded(const AccessorDecl *accessor) {
   if (accessor->isAssumedNonMutating() && accessor->isMutating()) {
-    Printer.printKeyword("mutating");
-    Printer << " ";
+    Printer.printKeyword("mutating", Options, " ");
   } else if (accessor->isExplicitNonMutating()) {
-    Printer.printKeyword("nonmutating");
-    Printer << " ";
+    Printer.printKeyword("nonmutating", Options, " ");
   }
 }
 
@@ -1675,17 +1723,17 @@ void PrintAST::printAccessors(const AbstractStorageDecl *ASD) {
     Printer << " {";
     if (mutatingGetter) {
       Printer << " ";
-      Printer.printKeyword("mutating");
+      Printer.printKeyword("mutating", Options);
     }
     Printer << " ";
-    Printer.printKeyword("get");
+    Printer.printKeyword("get", Options);
     if (settable) {
       if (nonmutatingSetter) {
         Printer << " ";
-        Printer.printKeyword("nonmutating");
+        Printer.printKeyword("nonmutating", Options);
       }
       Printer << " ";
-      Printer.printKeyword("set");
+      Printer.printKeyword("set", Options);
     }
     Printer << " }";
     return;
@@ -1728,7 +1776,7 @@ void PrintAST::printAccessors(const AbstractStorageDecl *ASD) {
     if (!PrintAccessorBody) {
       Printer << " ";
       printMutatingModifiersIfNeeded(Accessor);
-      Printer.printKeyword(getAccessorLabel(Accessor));
+      Printer.printKeyword(getAccessorLabel(Accessor), Options);
     } else {
       {
         IndentRAII IndentMore(*this);
@@ -2364,13 +2412,13 @@ static void printParameterFlags(ASTPrinter &printer, PrintOptions options,
     /* nothing */
     break;
   case ValueOwnership::InOut:
-    printer << "inout ";
+    printer.printKeyword("inout", options, " ");
     break;
   case ValueOwnership::Shared:
-    printer << "__shared ";
+    printer.printKeyword("__shared", options, " ");
     break;
   case ValueOwnership::Owned:
-    printer << "__owned ";
+    printer.printKeyword("__owned", options, " ");
     break;
   }
 }
@@ -2386,7 +2434,7 @@ void PrintAST::visitVarDecl(VarDecl *decl) {
   printAttributes(decl);
   printAccess(decl);
   if (!Options.SkipIntroducerKeywords) {
-    if (decl->isStatic())
+    if (decl->isStatic() && Options.PrintStaticKeyword)
       printStaticKeyword(decl->getCorrectStaticSpelling());
     if (decl->getKind() == DeclKind::Var
         || Options.PrintParameterSpecifiers) {
@@ -2530,7 +2578,7 @@ void PrintAST::printOneParameter(const ParamDecl *param,
     case DefaultArgumentKind::Function:
     case DefaultArgumentKind::DSOHandle:
     case DefaultArgumentKind::NilLiteral:
-      Printer.printKeyword(defaultArgStr);
+      Printer.printKeyword(defaultArgStr, Options);
       break;
     default:
       Printer << defaultArgStr;
@@ -2662,14 +2710,12 @@ void PrintAST::visitFuncDecl(FuncDecl *decl) {
     printSourceRange(Range, Ctx);
   } else {
     if (!Options.SkipIntroducerKeywords) {
-      if (decl->isStatic())
+      if (decl->isStatic() && Options.PrintStaticKeyword)
         printStaticKeyword(decl->getCorrectStaticSpelling());
       if (decl->isMutating() && !decl->getAttrs().hasAttribute<MutatingAttr>()) {
-        Printer.printKeyword("mutating");
-        Printer << " ";
+        Printer.printKeyword("mutating", Options, " ");
       } else if (decl->isConsuming() && !decl->getAttrs().hasAttribute<ConsumingAttr>()) {
-        Printer.printKeyword("__consuming");
-        Printer << " ";
+        Printer.printKeyword("__consuming", Options, " ");
       }
       Printer << tok::kw_func << " ";
     }
@@ -2846,8 +2892,7 @@ void PrintAST::visitConstructorDecl(ConstructorDecl *decl) {
       isClassContext = dc->getSelfClassDecl() != nullptr;
     }
     if (isClassContext) {
-      Printer.printKeyword("convenience");
-      Printer << " ";
+      Printer.printKeyword("convenience", Options, " ");
     } else {
       assert(decl->getDeclContext()->getExtendedProtocolDecl() &&
              "unexpected convenience initializer");
@@ -2896,8 +2941,8 @@ void PrintAST::visitDestructorDecl(DestructorDecl *decl) {
 }
 
 void PrintAST::visitInfixOperatorDecl(InfixOperatorDecl *decl) {
-  Printer.printKeyword("infix");
-  Printer << " " << tok::kw_operator << " ";
+  Printer.printKeyword("infix", Options, " ");
+  Printer << tok::kw_operator << " ";
   recordDeclLoc(decl,
     [&]{
       Printer.printName(decl->getName());
@@ -2928,17 +2973,16 @@ void PrintAST::visitPrecedenceGroupDecl(PrecedenceGroupDecl *decl) {
     if (!decl->isAssociativityImplicit() ||
         !decl->isNonAssociative()) {
       indent();
-      Printer.printKeyword("associativity");
-      Printer << ": ";
+      Printer.printKeyword("associativity", Options, ": ");
       switch (decl->getAssociativity()) {
       case Associativity::None:
-        Printer.printKeyword("none");
+        Printer.printKeyword("none", Options);
         break;
       case Associativity::Left:
-        Printer.printKeyword("left");
+        Printer.printKeyword("left", Options);
         break;
       case Associativity::Right:
-        Printer.printKeyword("right");
+        Printer.printKeyword("right", Options);
         break;
       }
       Printer.printNewline();
@@ -2946,15 +2990,13 @@ void PrintAST::visitPrecedenceGroupDecl(PrecedenceGroupDecl *decl) {
     if (!decl->isAssignmentImplicit() ||
         decl->isAssignment()) {
       indent();
-      Printer.printKeyword("assignment");
-      Printer << ": ";
-      Printer.printKeyword(decl->isAssignment() ? "true" : "false");
+      Printer.printKeyword("assignment", Options, ": ");
+      Printer.printKeyword(decl->isAssignment() ? "true" : "false", Options);
       Printer.printNewline();
     }
     if (!decl->getHigherThan().empty()) {
       indent();
-      Printer.printKeyword("higherThan");
-      Printer << ": ";
+      Printer.printKeyword("higherThan", Options, ": ");
       if (!decl->getHigherThan().empty()) {
         Printer << decl->getHigherThan()[0].Name;
         for (auto &rel : decl->getHigherThan().slice(1))
@@ -2964,8 +3006,7 @@ void PrintAST::visitPrecedenceGroupDecl(PrecedenceGroupDecl *decl) {
     }
     if (!decl->getLowerThan().empty()) {
       indent();
-      Printer.printKeyword("lowerThan");
-      Printer << ": ";
+      Printer.printKeyword("lowerThan", Options, ": ");
       if (!decl->getLowerThan().empty()) {
         Printer << decl->getLowerThan()[0].Name;
         for (auto &rel : decl->getLowerThan().slice(1))
@@ -2979,8 +3020,8 @@ void PrintAST::visitPrecedenceGroupDecl(PrecedenceGroupDecl *decl) {
 }
 
 void PrintAST::visitPrefixOperatorDecl(PrefixOperatorDecl *decl) {
-  Printer.printKeyword("prefix");
-  Printer << " " << tok::kw_operator << " ";
+  Printer.printKeyword("prefix", Options, " ");
+  Printer << tok::kw_operator << " ";
   recordDeclLoc(decl,
     [&]{
       Printer.printName(decl->getName());
@@ -2997,8 +3038,8 @@ void PrintAST::visitPrefixOperatorDecl(PrefixOperatorDecl *decl) {
 }
 
 void PrintAST::visitPostfixOperatorDecl(PostfixOperatorDecl *decl) {
-  Printer.printKeyword("postfix");
-  Printer << " " << tok::kw_operator << " ";
+  Printer.printKeyword("postfix", Options, " ");
+  Printer << tok::kw_operator << " ";
   recordDeclLoc(decl,
     [&]{
       Printer.printName(decl->getName());
@@ -3035,8 +3076,7 @@ void PrintAST::visitReturnStmt(ReturnStmt *stmt) {
 }
 
 void PrintAST::visitYieldStmt(YieldStmt *stmt) {
-  Printer.printKeyword("yield");
-  Printer << " ";
+  Printer.printKeyword("yield", Options, " ");
   bool parens = (stmt->getYields().size() != 1
                  || stmt->getLParenLoc().isValid());
   if (parens) Printer << "(";
@@ -3303,8 +3343,14 @@ class TypePrinter : public TypeVisitor<TypePrinter> {
 
   template <typename T>
   void printModuleContext(T *Ty) {
-    ModuleDecl *Mod = Ty->getDecl()->getModuleContext();
-    Printer.printModuleRef(Mod, Mod->getName());
+    FileUnit *File = cast<FileUnit>(Ty->getDecl()->getModuleScopeContext());
+    ModuleDecl *Mod = File->getParentModule();
+
+    Identifier Name = Mod->getName();
+    if (Options.UseExportedModuleNames)
+      Name = Mod->getASTContext().getIdentifier(File->getExportedModuleName());
+
+    Printer.printModuleRef(Mod, Name);
     Printer << ".";
   }
 
@@ -3452,8 +3498,8 @@ public:
     Printer << BUILTIN_TYPE_NAME_SILTOKEN;
   }
 
-  void visitNameAliasType(NameAliasType *T) {
-    if (Options.PrintForSIL || Options.PrintNameAliasUnderlyingType) {
+  void visitTypeAliasType(TypeAliasType *T) {
+    if (Options.PrintForSIL || Options.PrintTypeAliasUnderlyingType) {
       visit(T->getSinglyDesugaredType());
       return;
     }
@@ -4472,7 +4518,7 @@ swift::getInheritedForPrinting(const Decl *decl,
   for (auto TL: inherited) {
     if (auto ty = TL.getType()) {
       bool foundUnprintable = ty.findIf([shouldPrint](Type subTy) {
-        if (auto aliasTy = dyn_cast<NameAliasType>(subTy.getPointer()))
+        if (auto aliasTy = dyn_cast<TypeAliasType>(subTy.getPointer()))
           return !shouldPrint(aliasTy->getDecl());
         if (auto NTD = subTy->getAnyNominal())
           return !shouldPrint(NTD);

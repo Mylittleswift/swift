@@ -218,8 +218,7 @@ SILGenBuilder::createConvertFunction(SILLocation loc, ManagedValue fn,
 }
 
 ManagedValue SILGenBuilder::createConvertEscapeToNoEscape(
-    SILLocation loc, ManagedValue fn, SILType resultTy,
-    bool isEscapedByUser) {
+    SILLocation loc, ManagedValue fn, SILType resultTy) {
 
   auto fnType = fn.getType().castTo<SILFunctionType>();
   auto resultFnType = resultTy.castTo<SILFunctionType>();
@@ -234,8 +233,8 @@ ManagedValue SILGenBuilder::createConvertEscapeToNoEscape(
   (void)fnType;
   (void)resultFnType;
   SILValue fnValue = fn.getValue();
-  SILValue result = createConvertEscapeToNoEscape(
-      loc, fnValue, resultTy, isEscapedByUser, false);
+  SILValue result =
+      createConvertEscapeToNoEscape(loc, fnValue, resultTy, false);
   return ManagedValue::forTrivialObjectRValue(result);
 }
 
@@ -808,9 +807,9 @@ ManagedValue SILGenBuilder::createOpenExistentialMetatype(SILLocation loc,
 ManagedValue SILGenBuilder::createStore(SILLocation loc, ManagedValue value,
                                         SILValue address,
                                         StoreOwnershipQualifier qualifier) {
-  SILModule &M = SGF.F.getModule();
   CleanupCloner cloner(*this, value);
-  if (value.getType().isTrivial(M) || value.getOwnershipKind() == ValueOwnershipKind::Any)
+  if (value.getType().isTrivial(SGF.F) ||
+      value.getOwnershipKind() == ValueOwnershipKind::Any)
     qualifier = StoreOwnershipQualifier::Trivial;
   createStore(loc, value.forward(SGF), address, qualifier);
   return cloner.clone(address);
@@ -910,7 +909,7 @@ ManagedValue SILGenBuilder::createTuple(SILLocation loc, SILType type,
   // We need to look for the first non-trivial value and use that as our cleanup
   // cloner value.
   auto iter = find_if(elements, [&](ManagedValue mv) -> bool {
-    return !mv.getType().isTrivial(getModule());
+    return !mv.getType().isTrivial(getFunction());
   });
 
   llvm::SmallVector<SILValue, 8> forwardedValues;

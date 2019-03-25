@@ -174,7 +174,7 @@ rewriteNewLoopEntryCheckBlock(SILBasicBlock *Header,
                               SILBasicBlock *EntryCheckBlock,
                         const llvm::DenseMap<ValueBase *, SILValue> &ValueMap) {
   SmallVector<SILPhiArgument *, 4> InsertedPHIs;
-  SILSSAUpdater Updater(Header->getParent()->getModule(), &InsertedPHIs);
+  SILSSAUpdater Updater(&InsertedPHIs);
 
   // Fix PHIs (incoming arguments).
   for (auto *Arg : Header->getArguments())
@@ -421,6 +421,10 @@ class LoopRotation : public SILFunctionTransform {
 
     SILFunction *F = getFunction();
     assert(F);
+    // FIXME: Add ownership support.
+    if (F->hasOwnership())
+      return;
+
     SILLoopInfo *LI = LA->get(F);
     assert(LI);
     DominanceInfo *DT = DA->get(F);

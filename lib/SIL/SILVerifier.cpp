@@ -77,16 +77,14 @@ static llvm::cl::opt<bool> SkipConvertEscapeToNoescapeAttributes(
 /// Returns true if A is an opened existential type or is equal to an
 /// archetype from F's generic context.
 static bool isArchetypeValidInFunction(ArchetypeType *A, const SILFunction *F) {
-  if (isa<OpenedArchetypeType>(A))
+  auto root = dyn_cast<PrimaryArchetypeType>(A->getRoot());
+  if (!root)
     return true;
-
-  // Find the primary archetype.
-  auto P = A->getPrimary();
 
   // Ok, we have a primary archetype, make sure it is in the nested generic
   // environment of our caller.
   if (auto *genericEnv = F->getGenericEnvironment())
-    if (P->getGenericEnvironment() == genericEnv)
+    if (root->getGenericEnvironment() == genericEnv)
       return true;
 
   return false;
@@ -119,6 +117,7 @@ namespace {
 
 /// Verify invariants on a key path component.
 void verifyKeyPathComponent(SILModule &M,
+                            ResilienceExpansion expansion,
                             llvm::function_ref<void(bool, StringRef)> require,
                             CanType &baseTy,
                             CanType leafTy,
@@ -129,13 +128,14 @@ void verifyKeyPathComponent(SILModule &M,
                             bool forPropertyDescriptor,
                             bool hasIndices) {
   auto &C = M.getASTContext();
-  
+
+  auto opaque = AbstractionPattern::getOpaque();
   auto loweredBaseTy =
-    M.Types.getLoweredType(AbstractionPattern::getOpaque(), baseTy);
+    M.Types.getLoweredType(opaque, baseTy, expansion);
   auto componentTy = component.getComponentType().subst(patternSubs)
     ->getCanonicalType();
   auto loweredComponentTy =
-    M.Types.getLoweredType(AbstractionPattern::getOpaque(), componentTy);
+    M.Types.getLoweredType(opaque, componentTy, expansion);
 
   auto checkIndexEqualsAndHash = [&]{
     if (!component.getSubscriptIndices().empty()) {
@@ -211,6 +211,12 @@ void verifyKeyPathComponent(SILModule &M,
   switch (auto kind = component.getKind()) {
   case KeyPathPatternComponent::Kind::StoredProperty: {
     auto property = component.getStoredPropertyDecl();
+    if (expansion == ResilienceExpansion::Minimal) {
+      require(property->getEffectiveAccess() >= AccessLevel::Public,
+              "Key path in serialized function cannot reference non-public "
+              "property");
+    }
+
     auto fieldTy = baseTy->getTypeOfMember(M.getSwiftModule(), property)
                          ->getReferenceStorageReferent()
                          ->getCanonicalType();
@@ -218,6 +224,8 @@ void verifyKeyPathComponent(SILModule &M,
             "property decl should be a member of the base with the same type "
             "as the component");
     require(property->hasStorage(), "property must be stored");
+    require(!property->isResilient(M.getSwiftModule(), expansion),
+            "cannot access storage of resilient property");
     auto propertyTy = loweredBaseTy.getFieldType(property, M);
     require(propertyTy.getObjectType()
               == loweredComponentTy.getObjectType(),
@@ -247,6 +255,12 @@ void verifyKeyPathComponent(SILModule &M,
     // Getter should be <Sig...> @convention(thin) (@in_guaranteed Base) -> @out Result
     {
       auto getter = component.getComputedPropertyGetter();
+      if (expansion == ResilienceExpansion::Minimal) {
+        require(getter->hasValidLinkageForFragileRef(),
+                "Key path in serialized function should not reference "
+                "less visible getters");
+      }
+
       auto substGetterType = getter->getLoweredFunctionType()
         ->substGenericArgs(M, patternSubs);
       require(substGetterType->getRepresentation() ==
@@ -286,6 +300,12 @@ void verifyKeyPathComponent(SILModule &M,
       // <Sig...> @convention(thin) (@in_guaranteed Result, @in Base) -> ()
       
       auto setter = component.getComputedPropertySetter();
+      if (expansion == ResilienceExpansion::Minimal) {
+        require(setter->hasValidLinkageForFragileRef(),
+                "Key path in serialized function should not reference "
+                "less visible setters");
+      }
+
       auto substSetterType = setter->getLoweredFunctionType()
         ->substGenericArgs(M, patternSubs);
       
@@ -363,6 +383,24 @@ void verifyKeyPathComponent(SILModule &M,
             "wrapping component should wrap optional");
     break;
   }
+  case KeyPathPatternComponent::Kind::TupleElement: {
+    require(loweredBaseTy.is<TupleType>(),
+            "invalid baseTy, should have been a TupleType");
+      
+    auto tupleTy = loweredBaseTy.castTo<TupleType>();
+    auto eltIdx = component.getTupleIndex();
+      
+    require(eltIdx < tupleTy->getNumElements(),
+            "invalid element index, greater than # of tuple elements");
+
+    auto eltTy = tupleTy.getElementType(eltIdx)
+      .getReferenceStorageReferent();
+    
+    require(eltTy == componentTy,
+            "tuple element type should match the type of the component");
+
+    break;
+  }
   }
   
   baseTy = componentTy;
@@ -391,7 +429,7 @@ class SILVerifier : public SILVerifierBase<SILVerifier> {
   void operator=(const SILVerifier&) = delete;
 public:
   bool isSILOwnershipEnabled() const {
-    return F.getModule().getOptions().EnableSILOwnership;
+    return F.getModule().getOptions().VerifySILOwnership;
   }
 
   void _require(bool condition, const Twine &complaint,
@@ -705,7 +743,7 @@ public:
     // ownership.
     if (!F->hasOwnership())
       return;
-    SILValue(V).verifyOwnership(F->getModule(), &DEBlocks);
+    SILValue(V).verifyOwnership(&DEBlocks);
   }
 
   void checkSILInstruction(SILInstruction *I) {
@@ -1456,8 +1494,13 @@ public:
   }
 
   void checkAllocGlobalInst(AllocGlobalInst *AGI) {
+    SILGlobalVariable *RefG = AGI->getReferencedGlobal();
+    if (auto *VD = RefG->getDecl()) {
+      require(!VD->isResilient(F.getModule().getSwiftModule(),
+                               F.getResilienceExpansion()),
+              "cannot access storage of resilient global");
+    }
     if (F.isSerialized()) {
-      SILGlobalVariable *RefG = AGI->getReferencedGlobal();
       require(RefG->isSerialized()
                 || hasPublicVisibility(RefG->getLinkage()),
               "alloc_global inside fragile function cannot "
@@ -1469,6 +1512,11 @@ public:
     SILGlobalVariable *RefG = GAI->getReferencedGlobal();
     require(GAI->getType().getObjectType() == RefG->getLoweredType(),
             "global_addr/value must be the type of the variable it references");
+    if (auto *VD = RefG->getDecl()) {
+      require(!VD->isResilient(F.getModule().getSwiftModule(),
+                               F.getResilienceExpansion()),
+              "cannot access storage of resilient global");
+    }
     if (F.isSerialized()) {
       require(RefG->isSerialized()
               || hasPublicVisibility(RefG->getLinkage()),
@@ -1503,7 +1551,7 @@ public:
   void checkLoadInst(LoadInst *LI) {
     require(LI->getType().isObject(), "Result of load must be an object");
     require(!fnConv.useLoweredAddresses()
-                || LI->getType().isLoadable(LI->getModule()),
+                || LI->getType().isLoadable(*LI->getFunction()),
             "Load must have a loadable type");
     require(LI->getOperand()->getType().isAddress(),
             "Load operand must be an address");
@@ -1523,14 +1571,14 @@ public:
       require(F.hasOwnership(),
               "Load with qualified ownership in an unqualified function");
       // TODO: Could probably make this a bit stricter.
-      require(!LI->getType().isTrivial(LI->getModule()),
+      require(!LI->getType().isTrivial(*LI->getFunction()),
               "load [copy] or load [take] can only be applied to non-trivial "
               "types");
       break;
     case LoadOwnershipQualifier::Trivial:
       require(F.hasOwnership(),
               "Load with qualified ownership in an unqualified function");
-      require(LI->getType().isTrivial(LI->getModule()),
+      require(LI->getType().isTrivial(*LI->getFunction()),
               "A load with trivial ownership must load a trivial type");
       break;
     }
@@ -1542,7 +1590,7 @@ public:
         "Inst with qualified ownership in a function that is not qualified");
     require(LBI->getType().isObject(), "Result of load must be an object");
     require(!fnConv.useLoweredAddresses()
-            || LBI->getType().isLoadable(LBI->getModule()),
+            || LBI->getType().isLoadable(*LBI->getFunction()),
             "Load must have a loadable type");
     require(LBI->getOperand()->getType().isAddress(),
             "Load operand must be an address");
@@ -1660,7 +1708,7 @@ public:
     require(SI->getSrc()->getType().isObject(),
             "Can't store from an address source");
     require(!fnConv.useLoweredAddresses()
-                || SI->getSrc()->getType().isLoadable(SI->getModule()),
+                || SI->getSrc()->getType().isLoadable(*SI->getFunction()),
             "Can't store a non loadable type");
     require(SI->getDest()->getType().isAddress(),
             "Must store to an address dest");
@@ -1681,7 +1729,7 @@ public:
           F.hasOwnership(),
           "Inst with qualified ownership in a function that is not qualified");
       // TODO: Could probably make this a bit stricter.
-      require(!SI->getSrc()->getType().isTrivial(SI->getModule()),
+      require(!SI->getSrc()->getType().isTrivial(*SI->getFunction()),
               "store [init] or store [assign] can only be applied to "
               "non-trivial types");
       break;
@@ -1690,7 +1738,7 @@ public:
           F.hasOwnership(),
           "Inst with qualified ownership in a function that is not qualified");
       SILValue Src = SI->getSrc();
-      require(Src->getType().isTrivial(SI->getModule()) ||
+      require(Src->getType().isTrivial(*SI->getFunction()) ||
               Src.getOwnershipKind() == ValueOwnershipKind::Any,
               "A store with trivial ownership must store a type with trivial "
               "ownership");
@@ -1766,42 +1814,12 @@ public:
             "Operand of " #name "_to_ref does not have the " \
             "operand's type as its referent type"); \
   }
-#define ALWAYS_LOADABLE_CHECKED_REF_STORAGE(Name, name, ...) \
-  LOADABLE_REF_STORAGE_HELPER(Name, name) \
-  void checkStrongRetain##Name##Inst(StrongRetain##Name##Inst *RI) { \
-    requireObjectType(Name##StorageType, RI->getOperand(), \
-                      "Operand of strong_retain_" #name); \
-    require(!F.hasOwnership(), "strong_retain_" #name " is only in " \
-                                        "functions with unqualified " \
-                                        "ownership"); \
-  } \
-  void check##Name##RetainInst(Name##RetainInst *RI) { \
-    requireObjectType(Name##StorageType, RI->getOperand(), \
-                      "Operand of " #name "_retain"); \
-    require(!F.hasOwnership(), \
-            #name "_retain is only in functions with unqualified ownership"); \
-  } \
-  void check##Name##ReleaseInst(Name##ReleaseInst *RI) { \
-    requireObjectType(Name##StorageType, RI->getOperand(), \
-                      "Operand of " #name "_release"); \
-    require(!F.hasOwnership(), \
-            #name "_release is only in functions with unqualified ownership"); \
-  } \
-  void checkCopy##Name##ValueInst(Copy##Name##ValueInst *I) { \
-    requireObjectType(Name##StorageType, I->getOperand(), \
-                      "Operand of " #name "_retain"); \
-    require(F.hasOwnership(), \
-            "copy_" #name "_value is only valid in functions with qualified " \
-            "ownership"); \
-  }
-#define SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, name, ...) \
-  NEVER_LOADABLE_CHECKED_REF_STORAGE(Name, name, "...") \
-  LOADABLE_REF_STORAGE_HELPER(Name, name) \
+#define ALWAYS_LOADABLE_CHECKED_REF_STORAGE_HELPER(Name, name, closure) \
   void checkStrongRetain##Name##Inst(StrongRetain##Name##Inst *RI) { \
     auto ty = requireObjectType(Name##StorageType, RI->getOperand(), \
                                 "Operand of strong_retain_" #name); \
-    require(ty->isLoadable(ResilienceExpansion::Maximal), \
-          "strong_retain_" #name " requires '" #name "' type to be loadable"); \
+    closure(); \
+    (void)ty; \
     require(!F.hasOwnership(), "strong_retain_" #name " is only in " \
                                         "functions with unqualified " \
                                         "ownership"); \
@@ -1809,31 +1827,42 @@ public:
   void check##Name##RetainInst(Name##RetainInst *RI) { \
     auto ty = requireObjectType(Name##StorageType, RI->getOperand(), \
                                 "Operand of " #name "_retain"); \
-    require(ty->isLoadable(ResilienceExpansion::Maximal), \
-            #name "_retain requires '" #name "' type to be loadable"); \
+    closure(); \
+    (void)ty; \
     require(!F.hasOwnership(), \
             #name "_retain is only in functions with unqualified ownership"); \
   } \
   void check##Name##ReleaseInst(Name##ReleaseInst *RI) { \
     auto ty = requireObjectType(Name##StorageType, RI->getOperand(), \
                                 "Operand of " #name "_release"); \
-    require(ty->isLoadable(ResilienceExpansion::Maximal), \
-            #name "_release requires '" #name "' type to be loadable"); \
+    closure(); \
+    (void)ty; \
     require(!F.hasOwnership(), \
             #name "_release is only in functions with unqualified ownership"); \
   } \
   void checkCopy##Name##ValueInst(Copy##Name##ValueInst *I) { \
     auto ty = requireObjectType(Name##StorageType, I->getOperand(), \
                                 "Operand of " #name "_retain"); \
-    require(ty->isLoadable(ResilienceExpansion::Maximal), \
-            #name "_retain requires '" #name "' type to be loadable"); \
+    closure(); \
+    (void)ty; \
     /* *NOTE* We allow copy_##name##_value to be used throughout the entire */ \
     /* pipeline even though it is a higher level instruction. */ \
   }
+#define ALWAYS_LOADABLE_CHECKED_REF_STORAGE(Name, name, ...) \
+  LOADABLE_REF_STORAGE_HELPER(Name, name) \
+  ALWAYS_LOADABLE_CHECKED_REF_STORAGE_HELPER(Name, name, []{})
+#define SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, name, ...) \
+  LOADABLE_REF_STORAGE_HELPER(Name, name) \
+  NEVER_LOADABLE_CHECKED_REF_STORAGE(Name, name, "...") \
+  ALWAYS_LOADABLE_CHECKED_REF_STORAGE_HELPER(Name, name, [&]{ \
+    require(ty->isLoadable(ResilienceExpansion::Maximal), \
+            "'" #name "' type must be loadable"); \
+  })
 #define UNCHECKED_REF_STORAGE(Name, name, ...) \
   LOADABLE_REF_STORAGE_HELPER(Name, name)
 #include "swift/AST/ReferenceStorage.def"
 #undef LOADABLE_REF_STORAGE_HELPER
+#undef ALWAYS_LOADABLE_CHECKED_REF_STORAGE_HELPER
 
   void checkMarkUninitializedInst(MarkUninitializedInst *MU) {
     SILValue Src = MU->getOperand();
@@ -1884,7 +1913,7 @@ public:
             "Dest address should be lvalue");
     require(SI->getDest()->getType() == SI->getSrc()->getType(),
             "Store operand type and dest type mismatch");
-    require(F.getModule().isTypeABIAccessible(SI->getDest()->getType()),
+    require(F.isTypeABIAccessible(SI->getDest()->getType()),
             "cannot directly copy type with inaccessible ABI");
   }
 
@@ -1905,6 +1934,8 @@ public:
   void checkCopyValueInst(CopyValueInst *I) {
     require(I->getOperand()->getType().isObject(),
             "Source value should be an object value");
+    require(!I->getOperand()->getType().isTrivial(*I->getFunction()),
+            "Source value should be non-trivial");
     require(!fnConv.useLoweredAddresses() || F.hasOwnership(),
             "copy_value is only valid in functions with qualified "
             "ownership");
@@ -1913,6 +1944,8 @@ public:
   void checkDestroyValueInst(DestroyValueInst *I) {
     require(I->getOperand()->getType().isObject(),
             "Source value should be an object value");
+    require(!I->getOperand()->getType().isTrivial(*I->getFunction()),
+            "Source value should be non-trivial");
     require(!fnConv.useLoweredAddresses() || F.hasOwnership(),
             "destroy_value is only valid in functions with qualified "
             "ownership");
@@ -2017,10 +2050,9 @@ public:
       SILType exType = AEBI->getExistentialType();
       auto archetype = OpenedArchetypeType::get(exType.getASTType());
 
-      auto loweredTy = F.getModule().Types.getLoweredType(
-                                      Lowering::AbstractionPattern(archetype),
-                                      AEBI->getFormalConcreteType())
-                                        .getAddressType();
+      auto loweredTy = F.getLoweredType(Lowering::AbstractionPattern(archetype),
+                                        AEBI->getFormalConcreteType())
+                                          .getAddressType();
 
       requireSameType(loweredTy, PEBI->getType(),
               "project_existential_box result should be the lowered "
@@ -2041,6 +2073,9 @@ public:
     require(!structDecl->hasUnreferenceableStorage(),
             "Cannot build a struct with unreferenceable storage from elements "
             "using StructInst");
+    require(!structDecl->isResilient(F.getModule().getSwiftModule(),
+                                     F.getResilienceExpansion()),
+            "cannot access storage of resilient struct");
     require(SI->getType().isObject(),
             "StructInst must produce an object");
 
@@ -2226,14 +2261,23 @@ public:
 
   void checkDeallocStackInst(DeallocStackInst *DI) {
     require(isa<SILUndef>(DI->getOperand()) ||
-                isa<AllocStackInst>(DI->getOperand()),
-            "Operand of dealloc_stack must be an alloc_stack");
+                isa<AllocStackInst>(DI->getOperand()) ||
+                (isa<PartialApplyInst>(DI->getOperand()) &&
+                 cast<PartialApplyInst>(DI->getOperand())->isOnStack()),
+            "Operand of dealloc_stack must be an alloc_stack or partial_apply "
+            "[stack]");
   }
   void checkDeallocRefInst(DeallocRefInst *DI) {
     require(DI->getOperand()->getType().isObject(),
             "Operand of dealloc_ref must be object");
-    require(DI->getOperand()->getType().getClassOrBoundGenericClass(),
-            "Operand of dealloc_ref must be of class type");
+    auto *cd = DI->getOperand()->getType().getClassOrBoundGenericClass();
+    require(cd, "Operand of dealloc_ref must be of class type");
+
+    if (!DI->canAllocOnStack()) {
+      require(!cd->isResilient(F.getModule().getSwiftModule(),
+                              F.getResilienceExpansion()),
+              "cannot directly deallocate resilient class");
+    }
   }
   void checkDeallocPartialRefInst(DeallocPartialRefInst *DPRI) {
     require(DPRI->getInstance()->getType().isObject(),
@@ -2284,7 +2328,7 @@ public:
   void checkDestroyAddrInst(DestroyAddrInst *DI) {
     require(DI->getOperand()->getType().isAddress(),
             "Operand of destroy_addr must be address");
-    require(F.getModule().isTypeABIAccessible(DI->getOperand()->getType()),
+    require(F.isTypeABIAccessible(DI->getOperand()->getType()),
             "cannot directly destroy type with inaccessible ABI");
   }
 
@@ -2343,6 +2387,9 @@ public:
             "result of struct_extract cannot be address");
     StructDecl *sd = operandTy.getStructOrBoundGenericStruct();
     require(sd, "must struct_extract from struct");
+    require(!sd->isResilient(F.getModule().getSwiftModule(),
+                             F.getResilienceExpansion()),
+            "cannot access storage of resilient struct");
     require(!EI->getField()->isStatic(),
             "cannot get address of static property with struct_element_addr");
     require(EI->getField()->hasStorage(),
@@ -2384,6 +2431,9 @@ public:
             "must derive struct_element_addr from address");
     StructDecl *sd = operandTy.getStructOrBoundGenericStruct();
     require(sd, "struct_element_addr operand must be struct address");
+    require(!sd->isResilient(F.getModule().getSwiftModule(),
+                             F.getResilienceExpansion()),
+            "cannot access storage of resilient struct");
     require(EI->getType().isAddress(),
             "result of struct_element_addr must be address");
     require(!EI->getField()->isStatic(),
@@ -2413,6 +2463,9 @@ public:
     SILType operandTy = EI->getOperand()->getType();
     ClassDecl *cd = operandTy.getClassOrBoundGenericClass();
     require(cd, "ref_element_addr operand must be a class instance");
+    require(!cd->isResilient(F.getModule().getSwiftModule(),
+                             F.getResilienceExpansion()),
+            "cannot access storage of resilient class");
 
     require(EI->getField()->getDeclContext() == cd,
             "ref_element_addr field must be a member of the class");
@@ -2433,8 +2486,21 @@ public:
     SILType operandTy = RTAI->getOperand()->getType();
     ClassDecl *cd = operandTy.getClassOrBoundGenericClass();
     require(cd, "ref_tail_addr operand must be a class instance");
+    require(!cd->isResilient(F.getModule().getSwiftModule(),
+                             F.getResilienceExpansion()),
+            "cannot access storage of resilient class");
+    require(cd, "ref_tail_addr operand must be a class instance");
   }
-  
+
+  void checkDestructureStructInst(DestructureStructInst *DSI) {
+    SILType operandTy = DSI->getOperand()->getType();
+    StructDecl *sd = operandTy.getStructOrBoundGenericStruct();
+    require(sd, "must struct_extract from struct");
+    require(!sd->isResilient(F.getModule().getSwiftModule(),
+                             F.getResilienceExpansion()),
+            "cannot access storage of resilient struct");
+  }
+
   SILType getMethodSelfType(CanSILFunctionType ft) {
     return fnConv.getSILType(ft->getParameters().back());
   }
@@ -2473,10 +2539,9 @@ public:
             selfRequirement->getKind() == RequirementKind::Conformance,
             "first non-same-typerequirement should be conformance requirement");
     auto conformsTo = genericSig->getConformsTo(selfGenericParam);
-    require(conformsTo.size() == 1,
-            "requirement Self parameter must conform to exactly one protocol");
-    require(conformsTo[0] == protocol,
-            "requirement Self parameter should be constrained by protocol");
+    require(std::find(conformsTo.begin(), conformsTo.end(), protocol)
+              != conformsTo.end(),
+            "requirement Self parameter must conform to called protocol");
 
     auto lookupType = AMI->getLookupType();
     if (getOpenedArchetypeOf(lookupType)) {
@@ -2493,8 +2558,6 @@ public:
       auto conformance = AMI->getConformance().getConcrete();
       require(conformance->getType()->isEqual(AMI->getLookupType()),
               "concrete type lookup requires conformance that matches type");
-      require(AMI->getModule().lookUpWitnessTable(conformance, false),
-              "Could not find witness table for conformance");
     }
 
     require(AMI->getMember().requiresNewWitnessTableEntry(),
@@ -3018,7 +3081,7 @@ public:
             "alloc_existential_box must be used with a boxed existential "
             "type");
     
-    checkExistentialProtocolConformances(exType,
+    checkExistentialProtocolConformances(exType.getASTType(),
                                          AEBI->getFormalConcreteType(),
                                          AEBI->getConformances());
     verifyOpenedArchetype(AEBI, AEBI->getFormalConcreteType());
@@ -3037,9 +3100,8 @@ public:
     // The lowered type must be the properly-abstracted form of the AST type.
     auto archetype = OpenedArchetypeType::get(exType.getASTType());
     
-    auto loweredTy = F.getModule().Types.getLoweredType(
-                                Lowering::AbstractionPattern(archetype),
-                                AEI->getFormalConcreteType())
+    auto loweredTy = F.getLoweredType(Lowering::AbstractionPattern(archetype),
+                                      AEI->getFormalConcreteType())
                       .getAddressType();
     
     requireSameType(loweredTy, AEI->getLoweredConcreteType(),
@@ -3051,7 +3113,7 @@ public:
             "init_existential_addr payload must be a lowering of the formal "
             "concrete type");
     
-    checkExistentialProtocolConformances(exType,
+    checkExistentialProtocolConformances(exType.getASTType(),
                                          AEI->getFormalConcreteType(),
                                          AEI->getConformances());
     verifyOpenedArchetype(AEI, AEI->getFormalConcreteType());
@@ -3066,8 +3128,8 @@ public:
     // The operand must be at the right abstraction level for the existential.
     SILType exType = IEI->getType();
     auto archetype = OpenedArchetypeType::get(exType.getASTType());
-    auto loweredTy = F.getModule().Types.getLoweredType(
-        Lowering::AbstractionPattern(archetype), IEI->getFormalConcreteType());
+    auto loweredTy = F.getLoweredType(Lowering::AbstractionPattern(archetype),
+                                      IEI->getFormalConcreteType());
     requireSameType(
         concreteType, loweredTy,
         "init_existential_value operand must be lowered to the right "
@@ -3078,7 +3140,7 @@ public:
             "init_existential_value operand must be a lowering of the formal "
             "concrete type");
 
-    checkExistentialProtocolConformances(exType,
+    checkExistentialProtocolConformances(exType.getASTType(),
                                          IEI->getFormalConcreteType(),
                                          IEI->getConformances());
     verifyOpenedArchetype(IEI, IEI->getFormalConcreteType());
@@ -3098,9 +3160,8 @@ public:
     // The operand must be at the right abstraction level for the existential.
     SILType exType = IEI->getType();
     auto archetype = OpenedArchetypeType::get(exType.getASTType());
-    auto loweredTy = F.getModule().Types.getLoweredType(
-                                       Lowering::AbstractionPattern(archetype),
-                                       IEI->getFormalConcreteType());
+    auto loweredTy = F.getLoweredType(Lowering::AbstractionPattern(archetype),
+                                      IEI->getFormalConcreteType());
     requireSameType(concreteType, loweredTy,
                     "init_existential_ref operand must be lowered to the right "
                     "abstraction level for the existential");
@@ -3110,7 +3171,7 @@ public:
             "init_existential_ref operand must be a lowering of the formal "
             "concrete type");
     
-    checkExistentialProtocolConformances(exType,
+    checkExistentialProtocolConformances(exType.getASTType(),
                                          IEI->getFormalConcreteType(),
                                          IEI->getConformances());
     verifyOpenedArchetype(IEI, IEI->getFormalConcreteType());
@@ -3167,21 +3228,25 @@ public:
             "init_existential_metatype result must match representation of "
             "operand");
 
-    while (resultType.is<ExistentialMetatypeType>()) {
-      resultType = resultType.getMetatypeInstanceType(F.getModule());
-      operandType = operandType.getMetatypeInstanceType(F.getModule());
+    auto resultInstanceType = resultType.getASTType();
+    auto operandInstanceType = operandType.getASTType();
+    while (isa<ExistentialMetatypeType>(resultInstanceType)) {
+      resultInstanceType =
+          cast<ExistentialMetatypeType>(resultInstanceType).getInstanceType();
+      operandInstanceType =
+          cast<MetatypeType>(operandInstanceType).getInstanceType();
     }
 
-    checkExistentialProtocolConformances(resultType,
-                                         operandType.getASTType(),
+    checkExistentialProtocolConformances(resultInstanceType,
+                                         operandInstanceType,
                                          I->getConformances());
     verifyOpenedArchetype(I, MetaTy.getInstanceType());
   }
 
-  void checkExistentialProtocolConformances(SILType resultType,
+  void checkExistentialProtocolConformances(CanType resultType,
                                             CanType concreteType,
                                 ArrayRef<ProtocolConformanceRef> conformances) {
-    auto layout = resultType.getASTType().getExistentialLayout();
+    auto layout = resultType.getExistentialLayout();
     auto protocols = layout.getProtocols();
 
     require(conformances.size() == protocols.size(),
@@ -3204,13 +3269,6 @@ public:
       require(conformances[i].getRequirement() == protocols[i]->getDecl(),
               "init_existential instruction must have conformances in "
               "proper order");
-
-      if (conformances[i].isConcrete()) {
-        auto conformance = conformances[i].getConcrete();
-        require(F.getModule().lookUpWitnessTable(conformance, false),
-                "Could not find witness table for conformance.");
-
-      }
     }
   }
 
@@ -3257,8 +3315,7 @@ public:
               "downcast operand must be a class type");
       require(toCanTy.getClassOrBoundGenericClass(),
               "downcast must convert to a class type");
-      require(SILType::getPrimitiveObjectType(fromCanTy).
-              isBindableToSuperclassOf(SILType::getPrimitiveObjectType(toCanTy)),
+      require(fromCanTy->isBindableToSuperclassOf(toCanTy),
               "downcast must convert to a subclass");
     }
   }
@@ -3322,20 +3379,17 @@ public:
                 CBI->getCastType(),
             "success dest block argument of checked_cast_br must match type of "
             "cast");
-    require(F.hasOwnership() || CBI->getFailureBB()->args_empty(),
-            "failure dest of checked_cast_br in unqualified ownership sil must "
-            "take no arguments");
-#if 0
-    require(F.hasUnqualifiedOwnership() ||
-                CBI->getFailureBB()->args_size() == 1,
+    require(!F.hasOwnership() || CBI->getFailureBB()->args_size() == 1,
             "failure dest of checked_cast_br must take one argument in "
             "ownership qualified sil");
-    require(F.hasUnqualifiedOwnership() ||
+    require(!F.hasOwnership() ||
                 CBI->getFailureBB()->args_begin()[0]->getType() ==
                     CBI->getOperand()->getType(),
             "failure dest block argument must match type of original type in "
             "ownership qualified sil");
-#endif
+    require(F.hasOwnership() || CBI->getFailureBB()->args_empty(),
+            "Failure dest of checked_cast_br must not take any argument in "
+            "non-ownership qualified sil");
   }
 
   void checkCheckedCastValueBranchInst(CheckedCastValueBranchInst *CBI) {
@@ -3531,7 +3585,7 @@ public:
             "unchecked_trivial_bit_cast must operate on a value");
     require(BI->getType().isObject(),
             "unchecked_trivial_bit_cast must produce a value");
-    require(BI->getType().isTrivial(F.getModule()),
+    require(BI->getType().isTrivial(F),
             "unchecked_trivial_bit_cast must produce a value of trivial type");
   }
 
@@ -3627,9 +3681,6 @@ public:
     // '[not_guaranteed]' or '[escaped]' attributes.
     if (!SkipConvertEscapeToNoescapeAttributes &&
         F.getModule().getStage() != SILStage::Raw) {
-      require(!ICI->isEscapedByUser(),
-              "convert_escape_to_noescape [escaped] not "
-              "allowed after mandatory passes");
       require(ICI->isLifetimeGuaranteed(),
               "convert_escape_to_noescape [not_guaranteed] not "
               "allowed after mandatory passes");
@@ -3876,8 +3927,6 @@ public:
 
     // Find the set of enum elements for the type so we can verify
     // exhaustiveness.
-    // FIXME: We also need to consider if the enum is resilient, in which case
-    // we're never guaranteed to be exhaustive.
     llvm::DenseSet<EnumElementDecl*> unswitchedElts;
     uDecl->getAllElements(unswitchedElts);
 
@@ -3963,8 +4012,6 @@ public:
 
     // Find the set of enum elements for the type so we can verify
     // exhaustiveness.
-    // FIXME: We also need to consider if the enum is resilient, in which case
-    // we're never guaranteed to be exhaustive.
     llvm::DenseSet<EnumElementDecl*> unswitchedElts;
     uDecl->getAllElements(unswitchedElts);
 
@@ -3988,9 +4035,12 @@ public:
     }
 
     // If the switch is non-exhaustive, we require a default.
-    require(unswitchedElts.empty() || SOI->hasDefault(),
-            "nonexhaustive switch_enum_addr must have a default "
-            "destination");
+    bool isExhaustive =
+        uDecl->isEffectivelyExhaustive(F.getModule().getSwiftModule(),
+                                       F.getResilienceExpansion());
+    require((isExhaustive && unswitchedElts.empty()) || SOI->hasDefault(),
+            "nonexhaustive switch_enum_addr must have a default destination");
+
     if (SOI->hasDefault())
       require(SOI->getDefaultBB()->args_empty(),
               "switch_enum_addr default destination must take "
@@ -4247,11 +4297,12 @@ public:
         case KeyPathPatternComponent::Kind::OptionalChain:
         case KeyPathPatternComponent::Kind::OptionalWrap:
         case KeyPathPatternComponent::Kind::OptionalForce:
+        case KeyPathPatternComponent::Kind::TupleElement:
           hasIndices = false;
           break;
         }
       
-        verifyKeyPathComponent(F.getModule(),
+        verifyKeyPathComponent(F.getModule(), F.getResilienceExpansion(),
           [&](bool reqt, StringRef message) { _require(reqt, message); },
           baseTy,
           leafTy,
@@ -4308,7 +4359,6 @@ public:
 
     bool matched = true;
     auto argI = entry->args_begin();
-    SILModule &M = F.getModule();
 
     auto check = [&](const char *what, SILType ty) {
       auto mappedTy = F.mapTypeIntoContext(ty);
@@ -4327,7 +4377,7 @@ public:
       }
 
       auto ownershipkind = ValueOwnershipKind(
-          M, mappedTy, fnConv.getSILArgumentConvention(bbarg->getIndex()));
+          F, mappedTy, fnConv.getSILArgumentConvention(bbarg->getIndex()));
 
       if (bbarg->getOwnershipKind() != ownershipkind) {
         llvm::errs() << what << " ownership kind mismatch!\n";
@@ -4444,7 +4494,7 @@ public:
   /// - accesses must be uniquely ended
   /// - flow-sensitive states must be equivalent on all paths into a block
   void verifyFlowSensitiveRules(SILFunction *F) {
-    // Do a breath-first search through the basic blocks.
+    // Do a traversal of the basic blocks.
     // Note that we intentionally don't verify these properties in blocks
     // that can't be reached from the entry block.
     llvm::DenseMap<SILBasicBlock*, VerifyFlowSensitiveRulesDetails::BBState> visitedBBs;
@@ -4888,15 +4938,16 @@ void SILProperty::verify(const SILModule &M) const {
 
   if (auto &component = getComponent()) {
     verifyKeyPathComponent(const_cast<SILModule&>(M),
-      require,
-      baseTy,
-      leafTy,
-      *component,
-      {},
-      canSig,
-      subs,
-      /*property descriptor*/true,
-      hasIndices);
+                           ResilienceExpansion::Maximal,
+                           require,
+                           baseTy,
+                           leafTy,
+                           *component,
+                           {},
+                           canSig,
+                           subs,
+                           /*property descriptor*/true,
+                           hasIndices);
     // verifyKeyPathComponent updates baseTy to be the projected type of the
     // component, which should be the same as the type of the declared storage
     require(baseTy == leafTy,
@@ -4971,8 +5022,6 @@ void SILWitnessTable::verify(const SILModule &M) const {
     assert(getEntries().empty() &&
            "A witness table declaration should not have any entries.");
 
-  auto *protocol = getConformance()->getProtocol();
-
   for (const Entry &E : getEntries())
     if (E.getKind() == SILWitnessTable::WitnessKind::Method) {
       SILFunction *F = E.getMethodWitness().Witness;
@@ -4988,15 +5037,6 @@ void SILWitnessTable::verify(const SILModule &M) const {
         assert(F->getLoweredFunctionType()->getRepresentation() ==
                SILFunctionTypeRepresentation::WitnessMethod &&
                "Witnesses must have witness_method representation.");
-        auto *witnessSelfProtocol = F->getLoweredFunctionType()
-            ->getDefaultWitnessMethodProtocol();
-        assert((witnessSelfProtocol == nullptr ||
-                witnessSelfProtocol == protocol) &&
-               "Witnesses must either have a concrete Self, or an "
-               "an abstract Self that is constrained to their "
-               "protocol.");
-        (void)protocol;
-        (void)witnessSelfProtocol;
       }
     }
 }
@@ -5021,12 +5061,6 @@ void SILDefaultWitnessTable::verify(const SILModule &M) const {
     assert(F->getLoweredFunctionType()->getRepresentation() ==
            SILFunctionTypeRepresentation::WitnessMethod &&
            "Default witnesses must have witness_method representation.");
-
-    auto *witnessSelfProtocol = F->getLoweredFunctionType()
-        ->getDefaultWitnessMethodProtocol();
-    assert(witnessSelfProtocol == getProtocol() &&
-           "Default witnesses must have an abstract Self parameter "
-           "constrained to their protocol.");
   }
 #endif
 }

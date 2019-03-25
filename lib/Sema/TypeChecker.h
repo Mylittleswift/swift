@@ -263,6 +263,14 @@ enum class TypeCheckExprFlags {
   /// If set, a conversion constraint should be specified so that the result of
   /// the expression is an optional type.
   ExpressionTypeMustBeOptional = 0x200,
+
+  /// FIXME(diagnostics): Once diagnostics are completely switched to new
+  /// framework, this flag could be removed as obsolete.
+  ///
+  /// If set, this is a sub-expression, and it is being re-typechecked
+  /// as part of the expression diagnostics, which is attempting to narrow
+  /// down failure location.
+  SubExpressionDiagnostics = 0x400,
 };
 
 using TypeCheckExprOptions = OptionSet<TypeCheckExprFlags>;
@@ -381,6 +389,18 @@ public:
   /// failure.
   virtual Expr *appliedSolution(constraints::Solution &solution,
                                 Expr *expr);
+
+  /// Callback invoked if expression is structurally unsound and can't
+  /// be correctly processed by the constraint solver.
+  virtual void preCheckFailed(Expr *expr);
+
+  /// Callback invoked if constraint system failed to generate
+  /// constraints for a given expression.
+  virtual void constraintGenerationFailed(Expr *expr);
+
+  /// Callback invoked if application of chosen solution to
+  /// expression has failed.
+  virtual void applySolutionFailed(constraints::Solution &solution, Expr *expr);
 };
 
 /// A conditional conformance that implied some other requirements. That is, \c
@@ -642,31 +662,11 @@ public:
   }
 
 private:
-  Type IntLiteralType;
   Type MaxIntegerType;
-  Type FloatLiteralType;
-  Type BooleanLiteralType;
-  Type UnicodeScalarType;
-  Type ExtendedGraphemeClusterType;
-  Type StringLiteralType;
-  Type ArrayLiteralType;
-  Type DictionaryLiteralType;
-  Type ColorLiteralType;
-  Type ImageLiteralType;
-  Type FileReferenceLiteralType;
-  Type StringType;
-  Type SubstringType;
-  Type IntType;
-  Type Int8Type;
-  Type UInt8Type;
   Type NSObjectType;
   Type NSNumberType;
   Type NSValueType;
   Type ObjCSelectorType;
-  Type ExceptionType;
-
-  /// The \c Swift.UnsafeMutablePointer<T> declaration.
-  Optional<NominalTypeDecl *> ArrayDecl;
 
   /// The set of expressions currently being analyzed for failures.
   llvm::DenseMap<Expr*, Expr*> DiagnosedExprs;
@@ -1099,6 +1099,7 @@ public:
   static void addImplicitDynamicAttribute(Decl *D);
   void checkDeclAttributes(Decl *D);
   void checkDynamicReplacementAttribute(ValueDecl *D);
+  static ValueDecl *findReplacedDynamicFunction(const ValueDecl *d);
   void checkTypeModifyingDeclAttributes(VarDecl *var);
 
   void checkReferenceOwnershipAttr(VarDecl *D, ReferenceOwnershipAttr *attr);
@@ -1330,7 +1331,15 @@ public:
                                TypeCheckExprOptions(), listener);
   }
 
+private:
+  Type typeCheckExpressionImpl(Expr *&expr, DeclContext *dc,
+                               TypeLoc convertType,
+                               ContextualTypePurpose convertTypePurpose,
+                               TypeCheckExprOptions options,
+                               ExprTypeCheckListener &listener,
+                               constraints::ConstraintSystem *baseCS);
 
+public:
   /// Type check the given expression and return its type without
   /// applying the solution.
   ///
@@ -1840,9 +1849,6 @@ public:
   /// operator \c name appended to the expression.
   Expr *findLHS(DeclContext *DC, Expr *E, Identifier name);
 
-  /// Look up the Bool type in the standard library.
-  Type lookupBoolType(const DeclContext *dc);
-
   /// @}
 
   /// \name Overload resolution
@@ -1920,6 +1926,7 @@ public:
   enum class FragileFunctionKind : unsigned {
     Transparent,
     Inlinable,
+    AlwaysEmitIntoClient,
     DefaultArgument,
     PropertyInitializer
   };
@@ -2099,6 +2106,20 @@ public:
 
   /// Attempt to omit needless words from the name of the given declaration.
   Optional<Identifier> omitNeedlessWords(VarDecl *var);
+
+  /// Calculate edit distance between declaration names.
+  static unsigned getCallEditDistance(DeclName writtenName,
+                                      DeclName correctedName,
+                                      unsigned maxEditDistance);
+
+  enum : unsigned {
+    /// Never consider a candidate that's this distance away or worse.
+    UnreasonableCallEditDistance = 8,
+
+    /// Don't consider candidates that score worse than the given distance
+    /// from the best candidate.
+    MaxCallEditDistanceFromBestCandidate = 1
+  };
 
   /// Check for a typo correction.
   void performTypoCorrection(DeclContext *DC,

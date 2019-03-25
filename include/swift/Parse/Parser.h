@@ -33,6 +33,7 @@
 #include "swift/Parse/ParserResult.h"
 #include "swift/Parse/SyntaxParserResult.h"
 #include "swift/Parse/SyntaxParsingContext.h"
+#include "swift/Syntax/References.h"
 #include "swift/Config.h"
 #include "llvm/ADT/SetVector.h"
 
@@ -47,6 +48,7 @@ namespace swift {
   class DiagnosticEngine;
   class Expr;
   class Lexer;
+  class ParsedTypeSyntax;
   class PersistentParserState;
   class SILParserTUStateBase;
   class ScopeInfo;
@@ -60,7 +62,6 @@ namespace swift {
     class AbsolutePosition;
     class RawSyntax;
     enum class SyntaxKind;
-    class TypeSyntax;
   }// end of syntax namespace
 
   /// Different contexts in which BraceItemList are parsed.
@@ -164,7 +165,9 @@ public:
 
   DelayedParsingCallbacks *DelayedParseCB = nullptr;
 
-  bool isDelayedParsingEnabled() const { return DelayedParseCB != nullptr; }
+  bool isDelayedParsingEnabled() const {
+    return DelayBodyParsing || DelayedParseCB != nullptr;
+  }
 
   void setDelayedParsingCallbacks(DelayedParsingCallbacks *DelayedParseCB) {
     this->DelayedParseCB = DelayedParseCB;
@@ -200,11 +203,21 @@ public:
 
   /// leading trivias for \c Tok.
   /// Always empty if !SF.shouldBuildSyntaxTree().
-  syntax::Trivia LeadingTrivia;
+  ParsedTrivia LeadingTrivia;
 
   /// trailing trivias for \c Tok.
   /// Always empty if !SF.shouldBuildSyntaxTree().
-  syntax::Trivia TrailingTrivia;
+  ParsedTrivia TrailingTrivia;
+
+  /// Whether we should delay parsing nominal type and extension bodies,
+  /// and skip function bodies.
+  ///
+  /// This is false in primary files, since we want to type check all
+  /// declarations and function bodies.
+  ///
+  /// This is true for non-primary files, where declarations only need to be
+  /// lazily parsed and type checked.
+  bool DelayBodyParsing;
 
   /// The receiver to collect all consumed tokens.
   ConsumeTokenReceiver *TokReceiver;
@@ -217,7 +230,22 @@ public:
     // Cut off parsing by acting as if we reached the end-of-file.
     Tok.setKind(tok::eof);
   }
-  
+
+  /// Use this to assert that the parser has advanced the lexing location, e.g.
+  /// before a specific parser function has returned.
+  class AssertParserMadeProgressBeforeLeavingScopeRAII {
+    Parser &P;
+    SourceLoc InitialLoc;
+  public:
+    AssertParserMadeProgressBeforeLeavingScopeRAII(Parser &parser) : P(parser) {
+      InitialLoc = P.Tok.getLoc();
+    }
+    ~AssertParserMadeProgressBeforeLeavingScopeRAII() {
+      assert(InitialLoc != P.Tok.getLoc() &&
+        "parser did not make progress, this can result in infinite loop");
+    }
+  };
+
   /// A RAII object for temporarily changing CurDeclContext.
   class ContextChange {
   protected:
@@ -351,21 +379,27 @@ public:
 public:
   Parser(unsigned BufferID, SourceFile &SF, DiagnosticEngine* LexerDiags,
          SILParserTUStateBase *SIL,
-         PersistentParserState *PersistentState);
+         PersistentParserState *PersistentState,
+         std::shared_ptr<SyntaxParseActions> SPActions = nullptr,
+         bool DelayBodyParsing = true);
   Parser(unsigned BufferID, SourceFile &SF, SILParserTUStateBase *SIL,
-         PersistentParserState *PersistentState = nullptr);
+         PersistentParserState *PersistentState = nullptr,
+         std::shared_ptr<SyntaxParseActions> SPActions = nullptr,
+         bool DelayBodyParsing = true);
   Parser(std::unique_ptr<Lexer> Lex, SourceFile &SF,
          SILParserTUStateBase *SIL = nullptr,
-         PersistentParserState *PersistentState = nullptr);
+         PersistentParserState *PersistentState = nullptr,
+         std::shared_ptr<SyntaxParseActions> SPActions = nullptr,
+         bool DelayBodyParsing = true);
   ~Parser();
 
   bool isInSILMode() const { return SIL != nullptr; }
 
   /// Calling this function to finalize libSyntax tree creation without destroying
   /// the parser instance.
-  void finalizeSyntaxTree() {
+  ParsedRawSyntaxNode finalizeSyntaxTree() {
     assert(Tok.is(tok::eof) && "not done parsing yet");
-    SyntaxContext->finalizeRoot();
+    return SyntaxContext->finalizeRoot();
   }
 
   //===--------------------------------------------------------------------===//
@@ -406,9 +440,38 @@ public:
     llvm::Optional<SyntaxParsingContext> SynContext;
     bool Backtrack = true;
 
+    /// A token receiver used by the parser in the back tracking scope. This
+    /// receiver will save any consumed tokens during this back tracking scope.
+    /// After the scope ends, it either transfers the saved tokens to the old receiver
+    /// or discard them.
+    struct DelayedTokenReceiver: ConsumeTokenReceiver {
+      /// Keep track of the old token receiver in the parser so that we can recover
+      /// after the backtracking sope ends.
+      llvm::SaveAndRestore<ConsumeTokenReceiver*> savedConsumer;
+
+      // Whether the tokens should be transferred to the original receiver.
+      // When the back tracking scope will actually back track, this should be false;
+      // otherwise true.
+      bool shouldTransfer = false;
+      std::vector<Token> delayedTokens;
+      DelayedTokenReceiver(ConsumeTokenReceiver *&receiver):
+        savedConsumer(receiver, this) {}
+      void receive(Token tok) override {
+        delayedTokens.push_back(tok);
+      }
+      ~DelayedTokenReceiver() {
+        if (!shouldTransfer)
+          return;
+        for (auto tok: delayedTokens) {
+          savedConsumer.get()->receive(tok);
+        }
+      }
+    } TempReceiver;
+
   public:
     BacktrackingScope(Parser &P)
-        : P(P), PP(P.getParserPosition()), DT(P.Diags) {
+        : P(P), PP(P.getParserPosition()), DT(P.Diags),
+          TempReceiver(P.TokReceiver) {
       SynContext.emplace(P.SyntaxContext);
       SynContext->setBackTracking();
     }
@@ -421,8 +484,8 @@ public:
       SynContext->setTransparent();
       SynContext.reset();
       DT.commit();
+      TempReceiver.shouldTransfer = true;
     }
-
   };
 
   /// RAII object that, when it is destructed, restores the parser and lexer to
@@ -627,6 +690,9 @@ public:
 
   /// Add the given Decl to the current scope.
   void addToScope(ValueDecl *D) {
+    if (Context.LangOpts.EnableASTScopeLookup)
+      return;
+
     getScopeInfo().addToScope(D, *this);
   }
 
@@ -785,6 +851,13 @@ public:
 
   void parseDeclListDelayed(IterableDeclContext *IDC);
 
+  bool canDelayMemberDeclParsing();
+
+  bool delayParsingDeclList(SourceLoc LBLoc, SourceLoc &RBLoc,
+                            SourceLoc PosBeforeLB,
+                            ParseDeclOptions Options,
+                            IterableDeclContext *IDC);
+
   ParserResult<TypeDecl> parseDeclTypeAlias(ParseDeclOptions Flags,
                                             DeclAttributes &Attributes);
 
@@ -881,7 +954,7 @@ public:
                              llvm::function_ref<void(Decl*)> handler);
   bool parseDeclList(SourceLoc LBLoc, SourceLoc &RBLoc,
                      Diag<> ErrorDiag, ParseDeclOptions Options,
-                     llvm::function_ref<void(Decl*)> handler);
+                     IterableDeclContext *IDC);
   ParserResult<ExtensionDecl> parseDeclExtension(ParseDeclOptions Flags,
                                                  DeclAttributes &Attributes);
   ParserResult<EnumDecl> parseDeclEnum(ParseDeclOptions Flags,
@@ -990,12 +1063,12 @@ public:
   ///   type-simple:
   ///     '[' type ']'
   ///     '[' type ':' type ']'
-  SyntaxParserResult<syntax::TypeSyntax, TypeRepr> parseTypeCollection();
+  SyntaxParserResult<ParsedTypeSyntax, TypeRepr> parseTypeCollection();
 
-  SyntaxParserResult<syntax::TypeSyntax, OptionalTypeRepr>
+  SyntaxParserResult<ParsedTypeSyntax, OptionalTypeRepr>
   parseTypeOptional(TypeRepr *Base);
 
-  SyntaxParserResult<syntax::TypeSyntax, ImplicitlyUnwrappedOptionalTypeRepr>
+  SyntaxParserResult<ParsedTypeSyntax, ImplicitlyUnwrappedOptionalTypeRepr>
   parseTypeImplicitlyUnwrappedOptional(TypeRepr *Base);
 
   bool isOptionalToken(const Token &T) const;
@@ -1333,8 +1406,7 @@ public:
   ParserResult<Expr> parseExprCallSuffix(ParserResult<Expr> fn,
                                          bool isExprBasic);
   ParserResult<Expr> parseExprCollection();
-  ParserResult<Expr> parseExprArray(SourceLoc LSquareLoc);
-  ParserResult<Expr> parseExprDictionary(SourceLoc LSquareLoc);
+  ParserResult<Expr> parseExprCollectionElement(Optional<bool> &isDictionary);
   ParserResult<Expr> parseExprPoundAssert();
   ParserResult<Expr> parseExprPoundUnknown(SourceLoc LSquareLoc);
   ParserResult<Expr>
@@ -1414,10 +1486,8 @@ public:
   ParserResult<AvailabilitySpec> parseAvailabilitySpec();
   ParserResult<PlatformVersionConstraintAvailabilitySpec>
   parsePlatformVersionConstraintSpec();
-  ParserResult<LanguageVersionConstraintAvailabilitySpec>
-  parseLanguageVersionConstraintSpec();
-
-  bool canDelayMemberDeclParsing();
+  ParserResult<PlatformAgnosticVersionConstraintAvailabilitySpec>
+  parsePlatformAgnosticVersionConstraintSpec();
 };
 
 /// Describes a parsed declaration name.

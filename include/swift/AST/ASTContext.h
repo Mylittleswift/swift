@@ -758,6 +758,10 @@ public:
     bool IsError;
   };
 
+  /// Check whether current context has any errors associated with
+  /// ill-formed protocol conformances which haven't been produced yet.
+  bool hasDelayedConformanceErrors() const;
+
   /// Add a delayed diagnostic produced while type-checking a
   /// particular protocol conformance.
   void addDelayedConformanceDiag(NormalProtocolConformance *conformance,
@@ -801,9 +805,6 @@ public:
   InheritedProtocolConformance *
   getInheritedConformance(Type type, ProtocolConformance *inherited);
 
-  /// Record compiler-known protocol information in the AST.
-  void recordKnownProtocols(ModuleDecl *Stdlib);
-  
   /// Get the lazy data for the given declaration.
   ///
   /// \param lazyLoader If non-null, the lazy loader to use when creating the
@@ -931,6 +932,15 @@ public:
   bool isSwiftVersionAtLeast(unsigned major, unsigned minor = 0) const {
     return LangOpts.isSwiftVersionAtLeast(major, minor);
   }
+
+  /// Check whether it's important to respect access control restrictions
+  /// in current context.
+  bool isAccessControlDisabled() const {
+    return !LangOpts.EnableAccessControl;
+  }
+
+  /// Each kind and SourceFile has its own cache for a Type.
+  Type &getDefaultTypeRequestCache(SourceFile *, KnownProtocolKind);
 
 private:
   friend Decl;

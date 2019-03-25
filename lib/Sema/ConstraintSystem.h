@@ -232,11 +232,6 @@ public:
     return getRawOptions() & TVO_PrefersSubtypeBinding;
   }
 
-  bool mustBeMaterializable() const {
-    return !(getRawOptions() & TVO_CanBindToInOut) &&
-           !(getRawOptions() & TVO_CanBindToLValue);
-  }
-
   /// Retrieve the corresponding node in the constraint graph.
   constraints::ConstraintGraphNode *getGraphNode() const { return GraphNode; }
 
@@ -343,10 +338,16 @@ public:
     if (record)
       otherRep->getImpl().recordBinding(*record);
     otherRep->getImpl().ParentOrFixed = getTypeVariable();
-    if (!mustBeMaterializable() && otherRep->getImpl().mustBeMaterializable()) {
+
+    if (canBindToLValue() && !otherRep->getImpl().canBindToLValue()) {
       if (record)
         recordBinding(*record);
       getTypeVariable()->Bits.TypeVariableType.Options &= ~TVO_CanBindToLValue;
+    }
+
+    if (canBindToInOut() && !otherRep->getImpl().canBindToInOut()) {
+      if (record)
+        recordBinding(*record);
       getTypeVariable()->Bits.TypeVariableType.Options &= ~TVO_CanBindToInOut;
     }
   }
@@ -380,15 +381,13 @@ public:
     rep->getImpl().ParentOrFixed = type.getPointer();
   }
 
-  void setMustBeMaterializable(constraints::SavedTypeVariableBindings *record) {
+  void setCannotBindToLValue(constraints::SavedTypeVariableBindings *record) {
     auto rep = getRepresentative(record);
-    if (!rep->getImpl().mustBeMaterializable()) {
+    if (rep->getImpl().canBindToLValue()) {
       if (record)
         rep->getImpl().recordBinding(*record);
       rep->getImpl().getTypeVariable()->Bits.TypeVariableType.Options
         &= ~TVO_CanBindToLValue;
-      rep->getImpl().getTypeVariable()->Bits.TypeVariableType.Options
-        &= ~TVO_CanBindToInOut;
     }
   }
 
@@ -593,6 +592,9 @@ public:
   /// The list of fixes that need to be applied to the initial expression
   /// to make the solution work.
   llvm::SmallVector<ConstraintFix *, 4> Fixes;
+  /// The list of member references which couldn't be resolved,
+  /// and had to be assumed based on their use.
+  llvm::SmallVector<ConstraintLocator *, 4> MissingMembers;
 
   /// The set of disjunction choices used to arrive at this solution,
   /// which informs constraint application.
@@ -635,19 +637,6 @@ public:
                      ConstraintLocator *locator,
                      bool ignoreTopLevelInjection = false,
                      Optional<Pattern*> typeFromPattern = None) const;
-
-  /// Convert the given expression to a logic value.
-  ///
-  /// This operation cannot fail.
-  ///
-  /// \param expr The expression to coerce. The type of this expression
-  /// must conform to the LogicValue protocol.
-  ///
-  /// \param locator Locator used to describe the location of this expression.
-  ///
-  /// \returns the expression converted to a logic value (Builtin i1).
-  Expr *convertBooleanTypeToBuiltinI1(Expr *expr,
-                                      ConstraintLocator *locator) const;
 
   /// Convert the given optional-producing expression to a Bool
   /// indicating whether the optional has a value.
@@ -884,11 +873,12 @@ struct MemberLookupResult {
     /// The member is inaccessible (e.g. a private member in another file).
     UR_Inaccessible,
   };
-  
-  /// This is a list of considered (but rejected) candidates, along with a
-  /// reason for their rejection.
-  SmallVector<std::pair<OverloadChoice, UnviableReason>, 4> UnviableCandidates;
 
+  /// This is a list of considered (but rejected) candidates, along with a
+  /// reason for their rejection. Split into separate collections to make
+  /// it easier to use in conjunction with viable candidates.
+  SmallVector<OverloadChoice, 4> UnviableCandidates;
+  SmallVector<UnviableReason, 4> UnviableReasons;
 
   /// Mark this as being an already-diagnosed error and return itself.
   MemberLookupResult &markErrorAlreadyDiagnosed() {
@@ -901,14 +891,13 @@ struct MemberLookupResult {
   }
   
   void addUnviable(OverloadChoice candidate, UnviableReason reason) {
-    UnviableCandidates.push_back({candidate, reason});
+    UnviableCandidates.push_back(candidate);
+    UnviableReasons.push_back(reason);
   }
-  
-  OverloadChoice *getFavoredChoice() {
-    if (FavoredChoice == ~0U) return nullptr;
-    return &ViableCandidates[FavoredChoice];
+
+  Optional<unsigned> getFavoredIndex() const {
+    return (FavoredChoice == ~0U) ? Optional<unsigned>() : FavoredChoice;
   }
-  
 };
 
 /// Stores the required methods for @dynamicCallable types.
@@ -955,6 +944,8 @@ public:
   friend class SplitterStep;
   friend class ComponentStep;
   friend class TypeVariableStep;
+  friend class RequirementFailure;
+  friend class MissingMemberFailure;
 
   class SolverScope;
 
@@ -971,6 +962,8 @@ public:
   unsigned CountDisjunctions = 0;
 
 private:
+
+  llvm::DenseMap<Expr *, std::pair<unsigned, Expr *>> ExprWeights;
 
   /// Allocator used for all of the related constraint systems.
   llvm::BumpPtrAllocator Allocator;
@@ -1051,6 +1044,8 @@ private:
 
   /// The set of fixes applied to make the solution work.
   llvm::SmallVector<ConstraintFix *, 4> Fixes;
+  /// The set of type variables representing types of missing members.
+  llvm::SmallSetVector<ConstraintLocator *, 4> MissingMembers;
 
   /// The set of remembered disjunction choices used to reach
   /// the current constraint system.
@@ -1171,11 +1166,9 @@ private:
 
   /// Describes the current solver state.
   struct SolverState {
-    SolverState(Expr *const expr, ConstraintSystem &cs,
+    SolverState(ConstraintSystem &cs,
                 FreeTypeVariableBinding allowFreeTypeVariables);
     ~SolverState();
-
-    llvm::DenseMap<Expr *, unsigned> ExprWeights;
 
     /// The constraint system.
     ConstraintSystem &CS;
@@ -1315,12 +1308,54 @@ private:
       }
 
       generatedConstraints.erase(genStart, genEnd);
+
+      for (unsigned constraintIdx :
+             range(scope->numDisabledConstraints, disabledConstraints.size())) {
+        if (disabledConstraints[constraintIdx]->isDisabled())
+          disabledConstraints[constraintIdx]->setEnabled();
+      }
+      disabledConstraints.erase(
+          disabledConstraints.begin() + scope->numDisabledConstraints,
+          disabledConstraints.end());
+
+      for (unsigned constraintIdx :
+             range(scope->numFavoredConstraints, favoredConstraints.size())) {
+        if (favoredConstraints[constraintIdx]->isFavored())
+          favoredConstraints[constraintIdx]->setFavored(false);
+      }
+      favoredConstraints.erase(
+          favoredConstraints.begin() + scope->numFavoredConstraints,
+          favoredConstraints.end());
     }
 
     /// Check whether constraint system is allowed to form solutions
     /// even with unbound type variables present.
     bool allowsFreeTypeVariables() const {
       return AllowFreeTypeVariables != FreeTypeVariableBinding::Disallow;
+    }
+
+    unsigned getNumDisabledConstraints() const {
+      return disabledConstraints.size();
+    }
+
+    /// Disable the given constraint; this change will be rolled back
+    /// when we exit the current solver scope.
+    void disableContraint(Constraint *constraint) {
+      constraint->setDisabled();
+      disabledConstraints.push_back(constraint);
+    }
+
+    unsigned getNumFavoredConstraints() const {
+      return favoredConstraints.size();
+    }
+
+    /// Favor the given constraint; this change will be rolled back
+    /// when we exit the current solver scope.
+    void favorConstraint(Constraint *constraint) {
+      assert(!constraint->isFavored());
+
+      constraint->setFavored();
+      favoredConstraints.push_back(constraint);
     }
 
   private:
@@ -1343,6 +1378,9 @@ private:
     /// each of the registered scopes correct (LIFO) order.
     llvm::SmallVector<
       std::tuple<SolverScope *, ConstraintList::iterator, unsigned>, 4> scopes;
+
+    SmallVector<Constraint *, 4> disabledConstraints;
+    SmallVector<Constraint *, 4> favoredConstraints;
   };
 
   class CacheExprTypes : public ASTWalker {
@@ -1499,6 +1537,12 @@ public:
 
     unsigned numCheckedConformances;
 
+    unsigned numMissingMembers;
+
+    unsigned numDisabledConstraints;
+
+    unsigned numFavoredConstraints;
+
     /// The previous score.
     Score PreviousScore;
 
@@ -1519,7 +1563,8 @@ public:
   };
 
   ConstraintSystem(TypeChecker &tc, DeclContext *dc,
-                   ConstraintSystemOptions options);
+                   ConstraintSystemOptions options,
+                   Expr *expr = nullptr);
   ~ConstraintSystem();
 
   /// Retrieve the type checker associated with this constraint system.
@@ -1569,13 +1614,13 @@ private:
   /// set of solutions should be filtered even if there is
   /// no single best solution, see `findBestSolution` for
   /// more details.
-  void filterSolutions(SmallVectorImpl<Solution> &solutions,
-                       llvm::DenseMap<Expr *, unsigned> &weights,
-                       bool minimize = false) {
+  void
+  filterSolutions(SmallVectorImpl<Solution> &solutions,
+                  bool minimize = false) {
     if (solutions.size() < 2)
       return;
 
-    if (auto best = findBestSolution(solutions, weights, minimize)) {
+    if (auto best = findBestSolution(solutions, minimize)) {
       if (*best != 0)
         solutions[0] = std::move(solutions[*best]);
       solutions.erase(solutions.begin() + 1, solutions.end());
@@ -1767,6 +1812,12 @@ public:
                                 pathElt.getNewSummaryFlags());
   }
 
+  ConstraintLocator *
+  getConstraintLocator(const Expr *anchor,
+                       ConstraintLocator::PathElement pathElt) {
+    return getConstraintLocator(const_cast<Expr *>(anchor), pathElt);
+  }
+
   /// Extend the given constraint locator with a path element.
   ConstraintLocator *
   getConstraintLocator(ConstraintLocator *locator,
@@ -1780,6 +1831,12 @@ public:
   ConstraintLocator *
   getConstraintLocator(const ConstraintLocatorBuilder &builder);
 
+  /// Lookup and return parent associated with given expression.
+  Expr *getParentExpr(Expr *expr) const {
+    auto e = ExprWeights.find(expr);
+    return e != ExprWeights.end() ? e->second.second : nullptr;
+  }
+
 public:
 
   /// Whether we should attempt to fix problems.
@@ -1789,6 +1846,8 @@ public:
 
     return !solverState || solverState->recordFixes;
   }
+
+  ArrayRef<ConstraintFix *> getFixes() const { return Fixes; }
 
   bool shouldSuppressDiagnostics() const {
     return Options.contains(ConstraintSystemFlags::SuppressDiagnostics);
@@ -1801,6 +1860,14 @@ public:
   /// Log and record the application of the fix. Return true iff any
   /// subsequent solution would be worse than the best known solution.
   bool recordFix(ConstraintFix *fix);
+
+  /// Determine whether constraint system already has a fix recorded
+  /// for a particular location.
+  bool hasFixFor(ConstraintLocator *locator) const {
+    return llvm::any_of(Fixes, [&locator](const ConstraintFix *fix) {
+      return fix->getLocator() == locator;
+    });
+  }
 
   /// If an UnresolvedDotExpr, SubscriptMember, etc has been resolved by the
   /// constraint system, return the decl that it references.
@@ -1940,16 +2007,14 @@ public:
                                        ConstraintLocatorBuilder locator);
 
   /// Add a disjunction constraint.
-  void addDisjunctionConstraint(ArrayRef<Constraint *> constraints,
-                                ConstraintLocatorBuilder locator,
-                                RememberChoice_t rememberChoice = ForgetChoice,
-                                bool isFavored = false) {
+  void
+  addDisjunctionConstraint(ArrayRef<Constraint *> constraints,
+                           ConstraintLocatorBuilder locator,
+                           RememberChoice_t rememberChoice = ForgetChoice) {
     auto constraint =
       Constraint::createDisjunction(*this, constraints,
                                     getConstraintLocator(locator),
                                     rememberChoice);
-    if (isFavored)
-      constraint->setFavored();
 
     addUnsolvedConstraint(constraint);
   }
@@ -2016,6 +2081,20 @@ public:
     if (constraint->isActive())
       deactivateConstraint(constraint);
     removeInactiveConstraint(constraint);
+  }
+
+  /// Note that this constraint is "favored" within its disjunction, and
+  /// should be tried first to the exclusion of non-favored constraints in
+  /// the same disjunction.
+  void favorConstraint(Constraint *constraint) {
+    if (constraint->isFavored())
+      return;
+
+    if (solverState) {
+      solverState->favorConstraint(constraint);
+    } else {
+      constraint->setFavored();
+    }
   }
 
   /// Retrieve the list of inactive constraints.
@@ -2117,11 +2196,6 @@ public:
   /// a complete solution from partial solutions.
   void assignFixedType(TypeVariableType *typeVar, Type type,
                        bool updateState = true);
-
-  /// Set the TVO_MustBeMaterializable bit on all type variables
-  /// necessary to ensure that the type in question is materializable in a
-  /// viable solution.
-  void setMustBeMaterializableRecursive(Type type);
   
   /// Determine if the type in question is an Array<T> and, if so, provide the
   /// element type of the array.
@@ -2275,8 +2349,7 @@ public:
                           ValueDecl *decl,
                           FunctionRefKind functionRefKind,
                           ConstraintLocatorBuilder locator,
-                          DeclContext *useDC,
-                          const DeclRefExpr *base = nullptr);
+                          DeclContext *useDC);
 
   /// Return the type-of-reference of the given value.
   ///
@@ -2314,12 +2387,40 @@ public:
                           const DeclRefExpr *base = nullptr,
                           OpenedTypeMap *replacements = nullptr);
 
+  /// Attempt to simplify the set of overloads corresponding to a given
+  /// function application constraint.
+  ///
+  /// \param fnTypeVar The type variable that describes the set of
+  /// overloads for the function.
+  ///
+  /// \param argFnType The call signature, which includes the call arguments
+  /// (as the function parameters) and the expected result type of the
+  /// call.
+  ///
+  /// \param argumentLabels The argument labels provided at the call site,
+  /// if known.
+  ///
+  /// \returns \c fnType, or some simplified form of it if this function
+  /// was able to find a single overload or derive some common structure
+  /// among the overloads.
+  Type simplifyAppliedOverloads(TypeVariableType *fnTypeVar,
+                                const FunctionType *argFnType,
+                                Optional<ArgumentLabelState> argumentLabels,
+                                ConstraintLocatorBuilder locator);
+
+  /// Retrieve the type that will be used when matching the given overload.
+  Type getEffectiveOverloadType(const OverloadChoice &overload,
+                                bool allowMembers,
+                                DeclContext *useDC);
+
   /// Add a new overload set to the list of unresolved overload
   /// sets.
   void addOverloadSet(Type boundType, ArrayRef<OverloadChoice> choices,
                       DeclContext *useDC, ConstraintLocator *locator,
-                      OverloadChoice *favored = nullptr,
-                      ArrayRef<OverloadChoice> outerAlternatives = {});
+                      Optional<unsigned> favoredIndex = None);
+
+  void addOverloadSet(ArrayRef<Constraint *> choices,
+                      ConstraintLocator *locator);
 
   /// Retrieve the allocator used by this constraint system.
   llvm::BumpPtrAllocator &getAllocator() { return Allocator; }
@@ -2355,6 +2456,37 @@ public:
   ///
   /// \returns a possibly-sanitized initializer, or null if an error occurred.
   Type generateConstraints(Pattern *P, ConstraintLocatorBuilder locator);
+
+  /// Generate constraints for a given set of overload choices.
+  ///
+  /// \param constraints The container of generated constraint choices.
+  ///
+  /// \param type The type each choice should be bound to.
+  ///
+  /// \param choices The set of choices to convert into bind overload
+  /// constraints so solver could attempt each one.
+  ///
+  /// \param useDC The declaration context where each choice is used.
+  ///
+  /// \param locator The locator to use when generating constraints.
+  ///
+  /// \param favoredIndex If there is a "favored" or preferred choice
+  /// this is its index in the set of choices.
+  ///
+  /// \param requiresFix Determines whether choices require a fix to
+  /// be included in the result. If the fix couldn't be provided by
+  /// `getFix` for any given choice, such choice would be filtered out.
+  ///
+  /// \param getFix Optional callback to determine a fix for a given
+  /// choice (first argument is a position of current choice,
+  /// second - the choice in question).
+  void generateConstraints(
+      SmallVectorImpl<Constraint *> &constraints, Type type,
+      ArrayRef<OverloadChoice> choices, DeclContext *useDC,
+      ConstraintLocator *locator, Optional<unsigned> favoredIndex = None,
+      bool requiresFix = false,
+      llvm::function_ref<ConstraintFix *(unsigned, const OverloadChoice &)>
+          getFix = [](unsigned, const OverloadChoice &) { return nullptr; });
 
   /// Propagate constraints in an effort to enforce local
   /// consistency to reduce the time to solve the system.
@@ -2880,7 +3012,8 @@ private:
     /// A set of all constraints which contribute to pontential bindings.
     llvm::SmallPtrSet<Constraint *, 8> Sources;
 
-    PotentialBindings(TypeVariableType *typeVar) : TypeVar(typeVar) {}
+    PotentialBindings(TypeVariableType *typeVar)
+        : TypeVar(typeVar), PotentiallyIncomplete(isGenericParameter()) {}
 
     /// Determine whether the set of bindings is non-empty.
     explicit operator bool() const { return !Bindings.empty(); }
@@ -2945,6 +3078,16 @@ private:
 
     /// Check if this binding is viable for inclusion in the set.
     bool isViable(PotentialBinding &binding) const;
+
+    bool isGenericParameter() const {
+      if (auto *locator = TypeVar->getImpl().getLocator()) {
+        auto path = locator->getPath();
+        return path.empty() ? false
+                            : path.back().getKind() ==
+                                  ConstraintLocator::GenericParameter;
+      }
+      return false;
+    }
 
     void dump(llvm::raw_ostream &out,
               unsigned indent = 0) const LLVM_ATTRIBUTE_USED {
@@ -3025,6 +3168,45 @@ private:
   /// Collect the current inactive disjunction constraints.
   void collectDisjunctions(SmallVectorImpl<Constraint *> &disjunctions);
 
+  /// Record a particular disjunction choice of
+  void recordDisjunctionChoice(ConstraintLocator *disjunctionLocator,
+                               unsigned index) {
+    DisjunctionChoices.push_back({disjunctionLocator, index});
+  }
+
+  /// Filter the set of disjunction terms, keeping only those where the
+  /// predicate returns \c true.
+  ///
+  /// The terms of the disjunction that are filtered out will be marked as
+  /// "disabled" so they won't be visited later. If only one term remains
+  /// enabled, the disjunction itself will be returned and that term will
+  /// be made active.
+  ///
+  /// \param restoreOnFail If true, then all of the disabled terms will
+  /// be re-enabled when this function returns \c Error.
+  ///
+  /// \returns One of \c Solved (only a single term remained),
+  /// \c Unsolved (more than one disjunction terms remain), or
+  /// \c Error (all terms were filtered out).
+  SolutionKind filterDisjunction(Constraint *disjunction,
+                                  bool restoreOnFail,
+                                  llvm::function_ref<bool(Constraint *)> pred);
+
+public:
+  // Given a type variable, attempt to find the disjunction of
+  // bind overloads associated with it. This may return null in cases where
+  // the disjunction has either not been created or binds the type variable
+  // in some manner other than by binding overloads.
+  ///
+  /// \param numOptionalUnwraps If non-null, this will receive the number
+  /// of "optional object of" constraints that this function looked through
+  /// to uncover the disjunction. The actual overloads will have this number
+  /// of optionals wrapping the type.
+  Constraint *getUnboundBindOverloadDisjunction(
+    TypeVariableType *tyvar,
+    unsigned *numOptionalUnwraps = nullptr);
+
+private:
   /// Solve the system of constraints after it has already been
   /// simplified.
   ///
@@ -3048,16 +3230,6 @@ private:
   Constraint *selectDisjunction();
 
   Constraint *selectApplyDisjunction();
-
-  bool simplifyForConstraintPropagation();
-  void collectNeighboringBindOverloadDisjunctions(
-      llvm::SetVector<Constraint *> &neighbors);
-  bool isBindOverloadConsistent(Constraint *bindConstraint,
-                                llvm::SetVector<Constraint *> &workList);
-  void reviseBindOverloadDisjunction(Constraint *disjunction,
-                                     llvm::SetVector<Constraint *> &workList,
-                                     bool *foundConsistent);
-  bool areBindPairConsistent(Constraint *first, Constraint *second);
 
   /// Solve the system of constraints generated from provided expression.
   ///
@@ -3142,11 +3314,10 @@ private:
   /// \param diff The differences among the solutions.
   /// \param idx1 The index of the first solution.
   /// \param idx2 The index of the second solution.
-  /// \param weights The weights of the sub-expressions used for ranking.
   static SolutionCompareResult
   compareSolutions(ConstraintSystem &cs, ArrayRef<Solution> solutions,
                    const SolutionDiff &diff, unsigned idx1, unsigned idx2,
-                   llvm::DenseMap<Expr *, unsigned> &weights);
+                   llvm::DenseMap<Expr *, std::pair<unsigned, Expr *>> &weights);
 
 public:
   /// Increase the score of the given kind for the current (partial) solution
@@ -3161,7 +3332,6 @@ public:
   /// solution.
   ///
   /// \param solutions The set of viable solutions to consider.
-  /// \param weights The weights of the sub-expressions used for ranking.
   ///
   /// \param minimize If true, then in the case where there is no single
   /// best solution, minimize the set of solutions by removing any solutions
@@ -3170,9 +3340,9 @@ public:
   ///
   /// \returns The index of the best solution, or nothing if there was no
   /// best solution.
-  Optional<unsigned> findBestSolution(SmallVectorImpl<Solution> &solutions,
-                                      llvm::DenseMap<Expr *, unsigned> &weights,
-                                      bool minimize);
+  Optional<unsigned>
+  findBestSolution(SmallVectorImpl<Solution> &solutions,
+                   bool minimize);
 
   /// Apply a given solution to the expression, producing a fully
   /// type-checked expression.
@@ -3397,7 +3567,10 @@ public:
   ///
   /// \param argIdx The argument that came too late in the argument list.
   /// \param prevArgIdx The argument that the \c argIdx should have preceded.
-  virtual void outOfOrderArgument(unsigned argIdx, unsigned prevArgIdx);
+  ///
+  /// \returns true to indicate that this should cause a failure, false
+  /// otherwise.
+  virtual bool outOfOrderArgument(unsigned argIdx, unsigned prevArgIdx);
 
   /// Indicates that the arguments need to be relabeled to match the parameters.
   ///
@@ -3435,11 +3608,14 @@ matchCallArguments(ConstraintSystem &cs,
                    ArrayRef<AnyFunctionType::Param> params,
                    ConstraintLocatorBuilder locator);
 
+/// Given an expression that is the target of argument labels (for a call,
+/// subscript, etc.), find the underlying target expression.
+Expr *getArgumentLabelTargetExpr(Expr *fn);
+
 /// Attempt to prove that arguments with the given labels at the
 /// given parameter depth cannot be used with the given value.
 /// If this cannot be proven, conservatively returns true.
-bool areConservativelyCompatibleArgumentLabels(ValueDecl *decl,
-                                               bool hasCurriedSelf,
+bool areConservativelyCompatibleArgumentLabels(OverloadChoice choice,
                                                ArrayRef<Identifier> labels,
                                                bool hasTrailingClosure);
 
@@ -3503,6 +3679,10 @@ public:
   bool attempt(ConstraintSystem &cs) const;
 
   bool isDisabled() const { return Choice->isDisabled(); }
+
+  bool hasFix() const {
+    return bool(Choice->getFix());
+  }
 
   bool isUnavailable() const {
     if (auto *decl = getDecl(Choice))
@@ -3646,7 +3826,7 @@ private:
 /// easy to work with disjunction and encapsulates
 /// some other important information such as locator.
 class DisjunctionChoiceProducer : public BindingProducer<DisjunctionChoice> {
-  // The disjunciton choices that this producer will iterate through.
+  // The disjunction choices that this producer will iterate through.
   ArrayRef<Constraint *> Choices;
 
   // The ordering of disjunction choices. We index into Choices

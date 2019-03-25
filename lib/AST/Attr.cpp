@@ -131,6 +131,48 @@ DeclAttributes::isUnavailableInSwiftVersion(
   return false;
 }
 
+const AvailableAttr *
+DeclAttributes::getPotentiallyUnavailable(const ASTContext &ctx) const {
+  const AvailableAttr *potential = nullptr;
+  const AvailableAttr *conditional = nullptr;
+
+  for (auto Attr : *this)
+    if (auto AvAttr = dyn_cast<AvailableAttr>(Attr)) {
+      if (AvAttr->isInvalid())
+        continue;
+
+      if (!AvAttr->isActivePlatform(ctx) &&
+          !AvAttr->isLanguageVersionSpecific() &&
+          !AvAttr->isPackageDescriptionVersionSpecific())
+        continue;
+
+      // Definitely not available.
+      if (AvAttr->isUnconditionallyUnavailable())
+        return AvAttr;
+
+      switch (AvAttr->getVersionAvailability(ctx)) {
+      case AvailableVersionComparison::Available:
+        // Doesn't limit the introduced version.
+        break;
+
+      case AvailableVersionComparison::PotentiallyUnavailable:
+        // We'll return this if we don't see something that proves it's
+        // not available in this version.
+        potential = AvAttr;
+        break;
+
+      case AvailableVersionComparison::Unavailable:
+      case AvailableVersionComparison::Obsoleted:
+        conditional = AvAttr;
+        break;
+      }
+    }
+
+  if (conditional)
+    return conditional;
+  return potential;
+}
+
 const AvailableAttr *DeclAttributes::getUnavailable(
                           const ASTContext &ctx) const {
   const AvailableAttr *conditional = nullptr;
@@ -142,7 +184,8 @@ const AvailableAttr *DeclAttributes::getUnavailable(
 
       // If this attribute doesn't apply to the active platform, we're done.
       if (!AvAttr->isActivePlatform(ctx) &&
-          !AvAttr->isLanguageVersionSpecific())
+          !AvAttr->isLanguageVersionSpecific() &&
+          !AvAttr->isPackageDescriptionVersionSpecific())
         continue;
 
       // Unconditional unavailable.
@@ -172,7 +215,8 @@ DeclAttributes::getDeprecated(const ASTContext &ctx) const {
         continue;
 
       if (!AvAttr->isActivePlatform(ctx) &&
-          !AvAttr->isLanguageVersionSpecific())
+          !AvAttr->isLanguageVersionSpecific() &&
+          !AvAttr->isPackageDescriptionVersionSpecific())
         continue;
 
       // Unconditional deprecated.
@@ -183,10 +227,7 @@ DeclAttributes::getDeprecated(const ASTContext &ctx) const {
       if (!DeprecatedVersion.hasValue())
         continue;
 
-      llvm::VersionTuple MinVersion =
-        AvAttr->isLanguageVersionSpecific() ?
-        ctx.LangOpts.EffectiveLanguageVersion :
-        ctx.LangOpts.getMinPlatformVersion();
+      llvm::VersionTuple MinVersion = AvAttr->getActiveVersion(ctx);
 
       // We treat the declaration as deprecated if it is deprecated on
       // all deployment targets.
@@ -240,6 +281,7 @@ static bool isShortAvailable(const DeclAttribute *DA) {
     return false;
   case PlatformAgnosticAvailabilityKind::None:
   case PlatformAgnosticAvailabilityKind::SwiftVersionSpecific:
+  case PlatformAgnosticAvailabilityKind::PackageDescriptionVersionSpecific:
     return true;
   }
 
@@ -261,10 +303,16 @@ static void printShortFormAvailable(ArrayRef<const DeclAttribute *> Attrs,
   Printer << "@available(";
   auto FirstAvail = cast<AvailableAttr>(Attrs.front());
   if (Attrs.size() == 1 &&
-      FirstAvail->isLanguageVersionSpecific()) {
+      FirstAvail->getPlatformAgnosticAvailability() !=
+      PlatformAgnosticAvailabilityKind::None) {
     assert(FirstAvail->Introduced.hasValue());
-    Printer << "swift "
-            << FirstAvail->Introduced.getValue().getAsString()
+    if (FirstAvail->isLanguageVersionSpecific()) {
+      Printer << "swift ";
+    } else {
+      assert(FirstAvail->isPackageDescriptionVersionSpecific());
+      Printer << "_PackageDescription ";
+    }
+    Printer << FirstAvail->Introduced.getValue().getAsString()
             << ")";
   } else {
     for (auto *DA : Attrs) {
@@ -290,6 +338,7 @@ void DeclAttributes::print(ASTPrinter &Printer, const PrintOptions &Options,
   // Process attributes in passes.
   AttributeVector shortAvailableAttributes;
   const DeclAttribute *swiftVersionAvailableAttribute = nullptr;
+  const DeclAttribute *packageDescriptionVersionAvailableAttribute = nullptr;
   AttributeVector longAttributes;
   AttributeVector attributes;
   AttributeVector modifiers;
@@ -311,6 +360,11 @@ void DeclAttributes::print(ASTPrinter &Printer, const PrintOptions &Options,
         swiftVersionAvailableAttribute = availableAttr;
         continue;
       }
+      if (availableAttr->isPackageDescriptionVersionSpecific() &&
+          isShortAvailable(availableAttr)) {
+        packageDescriptionVersionAvailableAttribute = availableAttr;
+        continue;
+      }
     }
 
     AttributeVector &which = DA->isDeclModifier() ? modifiers :
@@ -322,6 +376,8 @@ void DeclAttributes::print(ASTPrinter &Printer, const PrintOptions &Options,
 
   if (swiftVersionAvailableAttribute)
     printShortFormAvailable(swiftVersionAvailableAttribute, Printer, Options);
+  if (packageDescriptionVersionAvailableAttribute)
+    printShortFormAvailable(packageDescriptionVersionAvailableAttribute, Printer, Options);
   if (!shortAvailableAttributes.empty())
     printShortFormAvailable(shortAvailableAttributes, Printer, Options);
 
@@ -360,7 +416,6 @@ bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options,
   case DAK_RawDocComment:
   case DAK_ObjCBridged:
   case DAK_SynthesizedProtocol:
-  case DAK_ShowInInterface:
   case DAK_Rethrows:
   case DAK_Infix:
     return false;
@@ -382,15 +437,14 @@ bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options,
   case DAK_Effects:
   case DAK_Optimize:
     if (DeclAttribute::isDeclModifier(getKind())) {
-      Printer.printKeyword(getAttrName());
+      Printer.printKeyword(getAttrName(), Options);
     } else {
       Printer.printSimpleAttr(getAttrName(), /*needAt=*/true);
     }
     return true;
 
   case DAK_SetterAccess:
-    Printer.printKeyword(getAttrName());
-    Printer << "(set)";
+    Printer.printKeyword(getAttrName(), Options, "(set)");
     return true;
 
   default:
@@ -424,6 +478,8 @@ bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options,
     auto Attr = cast<AvailableAttr>(this);
     if (Attr->isLanguageVersionSpecific())
       Printer << "swift";
+    else if (Attr->isPackageDescriptionVersionSpecific())
+      Printer << "_PackageDescription";
     else
       Printer << Attr->platformString();
 
@@ -445,8 +501,10 @@ bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options,
     // If there's no message, but this is specifically an imported
     // "unavailable in Swift" attribute, synthesize a message to look good in
     // the generated interface.
-    if (!Attr->Message.empty())
-      Printer << ", message: \"" << Attr->Message << "\"";
+    if (!Attr->Message.empty()) {
+      Printer << ", message: ";
+      Printer.printEscapedStringLiteral(Attr->Message);
+    }
     else if (Attr->getPlatformAgnosticAvailability()
                == PlatformAgnosticAvailabilityKind::UnavailableInSwift)
       Printer << ", message: \"Not available in Swift\"";
@@ -536,10 +594,10 @@ bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options,
   }
 
   case DAK_ObjCRuntimeName: {
-    Printer.printAttrName("@objc");
+    Printer.printAttrName("@_objcRuntimeName");
     Printer << "(";
     auto *attr = cast<ObjCRuntimeNameAttr>(this);
-    Printer << "\"" << attr->Name << "\"";
+    Printer << attr->Name;
     Printer << ")";
     break;
   }
@@ -890,11 +948,25 @@ bool AvailableAttr::isLanguageVersionSpecific() const {
   return false;
 }
 
+bool AvailableAttr::isPackageDescriptionVersionSpecific() const {
+  if (PlatformAgnostic ==
+      PlatformAgnosticAvailabilityKind::PackageDescriptionVersionSpecific)
+    {
+      assert(Platform == PlatformKind::none &&
+             (Introduced.hasValue() ||
+              Deprecated.hasValue() ||
+              Obsoleted.hasValue()));
+      return true;
+    }
+  return false;
+}
+
 bool AvailableAttr::isUnconditionallyUnavailable() const {
   switch (PlatformAgnostic) {
   case PlatformAgnosticAvailabilityKind::None:
   case PlatformAgnosticAvailabilityKind::Deprecated:
   case PlatformAgnosticAvailabilityKind::SwiftVersionSpecific:
+  case PlatformAgnosticAvailabilityKind::PackageDescriptionVersionSpecific:
     return false;
 
   case PlatformAgnosticAvailabilityKind::Unavailable:
@@ -911,6 +983,7 @@ bool AvailableAttr::isUnconditionallyDeprecated() const {
   case PlatformAgnosticAvailabilityKind::Unavailable:
   case PlatformAgnosticAvailabilityKind::UnavailableInSwift:
   case PlatformAgnosticAvailabilityKind::SwiftVersionSpecific:
+  case PlatformAgnosticAvailabilityKind::PackageDescriptionVersionSpecific:
     return false;
 
   case PlatformAgnosticAvailabilityKind::Deprecated:
@@ -920,6 +993,16 @@ bool AvailableAttr::isUnconditionallyDeprecated() const {
   llvm_unreachable("Unhandled PlatformAgnosticAvailabilityKind in switch.");
 }
 
+llvm::VersionTuple AvailableAttr::getActiveVersion(const ASTContext &ctx) const {
+  if (isLanguageVersionSpecific()) {
+    return ctx.LangOpts.EffectiveLanguageVersion;
+  } else if (isPackageDescriptionVersionSpecific()) {
+    return ctx.LangOpts.PackageDescriptionVersion;
+  } else {
+    return ctx.LangOpts.getMinPlatformVersion();
+  }
+}
+
 AvailableVersionComparison AvailableAttr::getVersionAvailability(
   const ASTContext &ctx) const {
 
@@ -927,10 +1010,7 @@ AvailableVersionComparison AvailableAttr::getVersionAvailability(
   if (isUnconditionallyUnavailable())
     return AvailableVersionComparison::Unavailable;
 
-  llvm::VersionTuple queryVersion =
-    isLanguageVersionSpecific() ?
-    ctx.LangOpts.EffectiveLanguageVersion :
-    ctx.LangOpts.getMinPlatformVersion();
+  llvm::VersionTuple queryVersion = getActiveVersion(ctx);
 
   // If this entity was obsoleted before or at the query platform version,
   // consider it obsolete.
@@ -943,7 +1023,7 @@ AvailableVersionComparison AvailableAttr::getVersionAvailability(
   // static requirement, so we treat "introduced later" as just plain
   // unavailable.
   if (Introduced && *Introduced > queryVersion) {
-    if (isLanguageVersionSpecific())
+    if (isLanguageVersionSpecific() || isPackageDescriptionVersionSpecific())
       return AvailableVersionComparison::Unavailable;
     else
       return AvailableVersionComparison::PotentiallyUnavailable;

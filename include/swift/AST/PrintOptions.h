@@ -185,6 +185,12 @@ struct PrintOptions {
   /// type might be ambiguous.
   bool FullyQualifiedTypesIfAmbiguous = false;
 
+  /// If true, printed module names will use the "exported" name, which may be
+  /// different from the regular name.
+  ///
+  /// \see FileUnit::getExportedModuleName
+  bool UseExportedModuleNames = false;
+
   /// Print Swift.Array and Swift.Optional with sugared syntax
   /// ([] and ?), even if there are no sugar type nodes.
   bool SynthesizeSugarOnTypes = false;
@@ -251,6 +257,9 @@ struct PrintOptions {
 
   bool PrintImplicitAttrs = true;
 
+  /// Whether to skip keywords with a prefix of underscore such as __consuming.
+  bool SkipUnderscoredKeywords = false;
+
   /// Whether to print decl attributes that are only used internally,
   /// such as _silgen_name, transparent, etc.
   bool PrintUserInaccessibleAttrs = true;
@@ -258,6 +267,7 @@ struct PrintOptions {
   /// List of attribute kinds that should not be printed.
   std::vector<AnyAttrKind> ExcludeAttrList = {DAK_Transparent, DAK_Effects,
                                               DAK_FixedLayout,
+                                              DAK_ShowInInterface,
                                               DAK_ImplicitlyUnwrappedOptional};
 
   /// List of attribute kinds that should be printed exclusively.
@@ -270,6 +280,9 @@ struct PrintOptions {
   /// Whether to print storage representation attributes on types, e.g.
   /// '@sil_weak', '@sil_unmanaged'.
   bool PrintStorageRepresentationAttrs = false;
+
+  /// Whether to print 'static' or 'class' on static decls.
+  bool PrintStaticKeyword = true;
 
   /// Whether to print 'override' keyword on overridden decls.
   bool PrintOverrideKeyword = true;
@@ -335,9 +348,9 @@ struct PrintOptions {
   /// formatting.
   bool PrintOriginalSourceText = false;
 
-  /// When printing a name alias type, whether print the underlying type instead
+  /// When printing a type alias type, whether print the underlying type instead
   /// of the alias.
-  bool PrintNameAliasUnderlyingType = false;
+  bool PrintTypeAliasUnderlyingType = false;
 
   /// When printing an Optional<T>, rather than printing 'T?', print
   /// 'T!'. Used as a modifier only when we know we're printing
@@ -446,6 +459,7 @@ struct PrintOptions {
     result.ShouldQualifyNestedDeclarations =
         QualifyNestedDeclarations::Always;
     result.PrintDocumentationComments = true;
+    result.SkipUnderscoredKeywords = true;
     return result;
   }
 
@@ -530,6 +544,7 @@ struct PrintOptions {
   /// Print in the style of quick help declaration.
   static PrintOptions printQuickHelpDeclaration() {
     PrintOptions PO;
+    PO.SkipUnderscoredKeywords = true;
     PO.EnumRawValues = true;
     PO.PrintImplicitAttrs = false;
     PO.PrintFunctionRepresentationAttrs = false;

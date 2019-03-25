@@ -48,7 +48,10 @@ function(get_test_dependencies SDK result_var_name)
     list(APPEND deps_binaries FileCheck arcmt-test c-arcmt-test c-index-test
          clang llc llvm-cov llvm-dwarfdump llvm-link llvm-as llvm-dis
          llvm-bcanalyzer llvm-nm llvm-readobj llvm-profdata count not
-         llvm-strings)
+         llvm-strings dsymutil)
+  endif()
+  if(SWIFT_BUILD_SYNTAXPARSERLIB)
+    list(APPEND deps_binaries swift-syntax-parser-test)
   endif()
   if(SWIFT_BUILD_SOURCEKIT)
     list(APPEND deps_binaries sourcekitd-test complete-test)
@@ -85,15 +88,7 @@ function(get_test_dependencies SDK result_var_name)
   set("${result_var_name}" "${deps}" PARENT_SCOPE)
 endfunction()
 
-if(PATH_TO_LLVM_SOURCE)
-  set(LIT "${PATH_TO_LLVM_SOURCE}/utils/lit/lit.py")
-else()
-  set(LIT "${PATH_TO_LLVM_BUILD}/${CMAKE_CFG_INTDIR}/bin/llvm-lit")
-  # Installed LLVM does not contain ${CMAKE_CFG_INTDIR} in paths.
-  if(NOT EXISTS "${LIT}")
-    set(LIT "${PATH_TO_LLVM_BUILD}/llvm-lit/bin")
-  endif()
-endif()
+set(LIT "${LLVM_MAIN_SRC_DIR}/utils/lit/lit.py")
 
 # Incremental mode in lit orders test files by the last modification time
 # instead of by the path, which is good for CI. In this mode lit also updates
@@ -131,6 +126,7 @@ normalize_boolean_spelling(LLVM_ENABLE_ASSERTIONS)
 normalize_boolean_spelling(SWIFT_STDLIB_ASSERTIONS)
 normalize_boolean_spelling(SWIFT_AST_VERIFIER)
 normalize_boolean_spelling(SWIFT_ASAN_BUILD)
+normalize_boolean_spelling(SWIFT_BUILD_SYNTAXPARSERLIB)
 normalize_boolean_spelling(SWIFT_ENABLE_SOURCEKIT_TESTS)
 is_build_type_optimized("${SWIFT_STDLIB_BUILD_TYPE}" SWIFT_OPTIMIZED)
 
@@ -139,6 +135,7 @@ set(profdata_merge_worker
 
 set(TEST_MODES
     optimize_none optimize optimize_unchecked optimize_size
+    optimize_none_with_implicit_dynamic
     only_executable only_non_executable
 )
 set(TEST_SUBSETS
@@ -174,6 +171,12 @@ foreach(SDK ${SWIFT_SDKS})
     set(test_bin_dir "${CMAKE_CURRENT_BINARY_DIR}${VARIANT_SUFFIX}")
     set(validation_test_bin_dir
         "${CMAKE_CURRENT_BINARY_DIR}/../validation-test${VARIANT_SUFFIX}")
+
+    if(LibXml2_FOUND)
+      set(SWIFT_HAVE_LIBXML2 TRUE)
+    else()
+      set(SWIFT_HAVE_LIBXML2 FALSE)
+    endif()
 
     swift_configure_lit_site_cfg(
         "${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.in"
@@ -233,13 +236,15 @@ foreach(SDK ${SWIFT_SDKS})
               ${PYTHON_EXECUTABLE} "${SWIFT_SOURCE_DIR}/utils/android/adb_push_built_products.py"
               --ndk "${SWIFT_ANDROID_NDK_PATH}"
               --destination "${SWIFT_ANDROID_DEPLOY_DEVICE_PATH}"
+              --destination-arch "${ARCH}"
               # Build products like libswiftCore.so.
               "${SWIFTLIB_DIR}/android"
               # These two directories may contain the same libraries,
               # but upload both to device just in case. Duplicates will be
               # overwritten, and uploading doesn't take very long anyway.
               "${SWIFT_ANDROID_${ARCH}_ICU_UC}"
-              "${SWIFT_ANDROID_${ARCH}_ICU_I18N}")
+              "${SWIFT_ANDROID_${ARCH}_ICU_I18N}"
+              "${SWIFT_ANDROID_${ARCH}_ICU_DATA}")
     endif()
     add_custom_target("upload-stdlib${VARIANT_SUFFIX}"
         ${command_upload_stdlib}

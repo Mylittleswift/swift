@@ -24,6 +24,7 @@
 #include "swift/Basic/SourceManager.h"
 #include "swift/Basic/Statistic.h"
 #include "swift/DWARFImporter/DWARFImporter.h"
+#include "swift/Frontend/ParseableInterfaceModuleLoader.h"
 #include "swift/Parse/DelayedParsingCallbacks.h"
 #include "swift/Parse/Lexer.h"
 #include "swift/SIL/SILModule.h"
@@ -213,8 +214,8 @@ bool CompilerInstance::setup(const CompilerInvocation &Invok) {
 
 static bool loadAndValidateVFSOverlay(
     const std::string &File,
-    const llvm::IntrusiveRefCntPtr<clang::vfs::FileSystem> &BaseFS,
-    const llvm::IntrusiveRefCntPtr<clang::vfs::OverlayFileSystem> &OverlayFS,
+    const llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> &BaseFS,
+    const llvm::IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> &OverlayFS,
     DiagnosticEngine &Diag) {
   // FIXME: It should be possible to allow chained lookup of later VFS overlays
   // through the mapping defined by earlier overlays.
@@ -226,7 +227,7 @@ static bool loadAndValidateVFSOverlay(
     return true;
   }
 
-  auto VFS = clang::vfs::getVFSFromYAML(std::move(Buffer.get()),
+  auto VFS = llvm::vfs::getVFSFromYAML(std::move(Buffer.get()),
                                         nullptr, File);
   if (!VFS) {
     Diag.diagnose(SourceLoc(), diag::invalid_vfs_overlay_file, File);
@@ -237,9 +238,9 @@ static bool loadAndValidateVFSOverlay(
 }
 
 bool CompilerInstance::setUpVirtualFileSystemOverlays() {
-  auto BaseFS = clang::vfs::getRealFileSystem();
-  auto OverlayFS = llvm::IntrusiveRefCntPtr<clang::vfs::OverlayFileSystem>(
-                    new clang::vfs::OverlayFileSystem(BaseFS));
+  auto BaseFS = llvm::vfs::getRealFileSystem();
+  auto OverlayFS = llvm::IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem>(
+                    new llvm::vfs::OverlayFileSystem(BaseFS));
   bool hadAnyFailure = false;
   for (const auto &File : Invocation.getSearchPathOptions().VFSOverlayFiles) {
     hadAnyFailure |=
@@ -285,16 +286,14 @@ bool CompilerInstance::setUpModuleLoaders() {
   if (hasSourceImport()) {
     bool immediate = FrontendOptions::isActionImmediate(
         Invocation.getFrontendOptions().RequestedAction);
-    bool enableResilience = Invocation.getFrontendOptions().EnableResilience;
+    bool enableLibraryEvolution =
+      Invocation.getFrontendOptions().EnableLibraryEvolution;
     Context->addModuleLoader(SourceLoader::create(*Context,
                                                   !immediate,
-                                                  enableResilience,
+                                                  enableLibraryEvolution,
                                                   getDependencyTracker()));
   }
-  auto MLM = ModuleLoadingMode::OnlySerialized;
-  if (Invocation.getFrontendOptions().EnableParseableModuleInterface) {
-    MLM = ModuleLoadingMode::PreferSerialized;
-  }
+  auto MLM = ModuleLoadingMode::PreferSerialized;
   if (auto forceModuleLoadingMode =
       llvm::sys::Process::GetEnv("SWIFT_FORCE_MODULE_LOADING")) {
     if (*forceModuleLoadingMode == "prefer-parseable")
@@ -331,8 +330,11 @@ bool CompilerInstance::setUpModuleLoaders() {
   if (MLM != ModuleLoadingMode::OnlySerialized) {
     auto const &Clang = clangImporter->getClangInstance();
     std::string ModuleCachePath = getModuleCachePathFromClang(Clang);
+    StringRef PrebuiltModuleCachePath =
+        Invocation.getFrontendOptions().PrebuiltModuleCachePath;
     auto PIML = ParseableInterfaceModuleLoader::create(*Context,
                                                        ModuleCachePath,
+                                                       PrebuiltModuleCachePath,
                                                        getDependencyTracker(),
                                                        MLM);
     Context->addModuleLoader(std::move(PIML));
@@ -527,7 +529,7 @@ ModuleDecl *CompilerInstance::getMainModule() {
     if (Invocation.getFrontendOptions().EnableImplicitDynamic)
       MainModule->setImplicitDynamicEnabled();
 
-    if (Invocation.getFrontendOptions().EnableResilience)
+    if (Invocation.getFrontendOptions().EnableLibraryEvolution)
       MainModule->setResilienceStrategy(ResilienceStrategy::Resilient);
   }
   return MainModule;
@@ -732,12 +734,10 @@ void CompilerInstance::createREPLFile(const ImplicitImports &implicitImports) {
 }
 
 std::unique_ptr<DelayedParsingCallbacks>
-CompilerInstance::computeDelayedParsingCallback(bool isPrimary) {
+CompilerInstance::computeDelayedParsingCallback() {
   if (Invocation.isCodeCompletion())
     return llvm::make_unique<CodeCompleteDelayedCallbacks>(
         SourceMgr.getCodeCompletionLoc());
-  if (!isPrimary)
-    return llvm::make_unique<AlwaysDelayedCallbacks>();
   return nullptr;
 }
 
@@ -751,22 +751,13 @@ void CompilerInstance::addMainFileToModule(
 void CompilerInstance::parseAndCheckTypesUpTo(
     const ImplicitImports &implicitImports, SourceFile::ASTStage_t limitStage) {
   FrontendStatsTracer tracer(Context->Stats, "parse-and-check-types");
-  // Delayed parsing callback for the primary file, or all files
-  // in non-WMO mode.
-  std::unique_ptr<DelayedParsingCallbacks> PrimaryDelayedCB{
-      computeDelayedParsingCallback(true)};
-
-  // Delayed parsing callback for non-primary files. Not used in
-  // WMO mode.
-  std::unique_ptr<DelayedParsingCallbacks> SecondaryDelayedCB{
-      computeDelayedParsingCallback(false)};
+  std::unique_ptr<DelayedParsingCallbacks> DelayedCB{
+      computeDelayedParsingCallback()};
 
   PersistentParserState PersistentState(getASTContext());
 
   bool hadLoadError = parsePartialModulesAndLibraryFiles(
-      implicitImports, PersistentState,
-      PrimaryDelayedCB.get(),
-      SecondaryDelayedCB.get());
+      implicitImports, PersistentState, DelayedCB.get());
   if (Invocation.isCodeCompletion()) {
     // When we are doing code completion, make sure to emit at least one
     // diagnostic, so that ASTContext is marked as erroneous.  In this case
@@ -785,7 +776,7 @@ void CompilerInstance::parseAndCheckTypesUpTo(
   // interwined.
   if (MainBufferID != NO_SUCH_BUFFER) {
     parseAndTypeCheckMainFileUpTo(limitStage, PersistentState,
-                                  PrimaryDelayedCB.get(), TypeCheckOptions);
+                                  DelayedCB.get(), TypeCheckOptions);
   }
 
   assert(llvm::all_of(MainModule->getFiles(), [](const FileUnit *File) -> bool {
@@ -811,11 +802,6 @@ void CompilerInstance::parseAndCheckTypesUpTo(
                         options.SwitchCheckingInvocationThreshold);
   });
 
-  // Even if there were no source files, we should still record known
-  // protocols.
-  if (auto *stdlib = Context->getStdlibModule())
-    Context->recordKnownProtocols(stdlib);
-
   if (Invocation.isCodeCompletion()) {
     performDelayedParsing(MainModule, PersistentState,
                           Invocation.getCodeCompletionFactory());
@@ -826,8 +812,7 @@ void CompilerInstance::parseAndCheckTypesUpTo(
 void CompilerInstance::parseLibraryFile(
     unsigned BufferID, const ImplicitImports &implicitImports,
     PersistentParserState &PersistentState,
-    DelayedParsingCallbacks *PrimaryDelayedCB,
-    DelayedParsingCallbacks *SecondaryDelayedCB) {
+    DelayedParsingCallbacks *DelayedCB) {
   FrontendStatsTracer tracer(Context->Stats, "parse-library-file");
 
   auto *NextInput = createSourceFileForMainModule(
@@ -835,7 +820,6 @@ void CompilerInstance::parseLibraryFile(
   addAdditionalInitialImportsTo(NextInput, implicitImports);
 
   auto IsPrimary = isWholeModuleCompilation() || isPrimaryInput(BufferID);
-  auto *DelayedCB = IsPrimary ? PrimaryDelayedCB : SecondaryDelayedCB;
 
   auto &Diags = NextInput->getASTContext().Diags;
   auto DidSuppressWarnings = Diags.getSuppressWarnings();
@@ -846,7 +830,7 @@ void CompilerInstance::parseLibraryFile(
     // Parser may stop at some erroneous constructions like #else, #endif
     // or '}' in some cases, continue parsing until we are done
     parseIntoSourceFile(*NextInput, BufferID, &Done, nullptr, &PersistentState,
-                        DelayedCB);
+                        DelayedCB, /*DelayedBodyParsing=*/!IsPrimary);
   } while (!Done);
 
   Diags.setSuppressWarnings(DidSuppressWarnings);
@@ -875,8 +859,7 @@ OptionSet<TypeCheckingFlags> CompilerInstance::computeTypeCheckingOptions() {
 bool CompilerInstance::parsePartialModulesAndLibraryFiles(
     const ImplicitImports &implicitImports,
     PersistentParserState &PersistentState,
-    DelayedParsingCallbacks *PrimaryDelayedCB,
-    DelayedParsingCallbacks *SecondaryDelayedCB) {
+    DelayedParsingCallbacks *DelayedCB) {
   FrontendStatsTracer tracer(Context->Stats,
                              "parse-partial-modules-and-library-files");
   bool hadLoadError = false;
@@ -891,8 +874,7 @@ bool CompilerInstance::parsePartialModulesAndLibraryFiles(
   // Then parse all the library files.
   for (auto BufferID : InputSourceCodeBufferIDs) {
     if (BufferID != MainBufferID) {
-      parseLibraryFile(BufferID, implicitImports, PersistentState,
-                       PrimaryDelayedCB, SecondaryDelayedCB);
+      parseLibraryFile(BufferID, implicitImports, PersistentState, DelayedCB);
     }
   }
   return hadLoadError;
@@ -925,7 +907,7 @@ void CompilerInstance::parseAndTypeCheckMainFileUpTo(
     // with 'sil' definitions.
     parseIntoSourceFile(MainFile, MainFile.getBufferID().getValue(), &Done,
                         TheSILModule ? &SILContext : nullptr, &PersistentState,
-                        DelayedParseCB);
+                        DelayedParseCB, /*DelayedBodyParsing=*/false);
 
     if (mainIsPrimary && (Done || CurTUElem < MainFile.Decls.size())) {
       switch (LimitStage) {
@@ -1052,11 +1034,14 @@ void CompilerInstance::performParseOnly(bool EvaluateConditionals,
     if (BufferID == MainBufferID)
       continue;
 
+    auto IsPrimary = isWholeModuleCompilation() || isPrimaryInput(BufferID);
+
     SourceFile *NextInput = createSourceFileForMainModule(
         SourceFileKind::Library, SourceFile::ImplicitModuleImportKind::None,
         BufferID);
 
-    parseIntoSourceFileFull(*NextInput, BufferID, &PersistentState);
+    parseIntoSourceFileFull(*NextInput, BufferID, &PersistentState,
+                            nullptr, /*DelayBodyParsing=*/!IsPrimary);
   }
 
   // Now parse the main file.
@@ -1066,7 +1051,8 @@ void CompilerInstance::performParseOnly(bool EvaluateConditionals,
     MainFile.SyntaxParsingCache = Invocation.getMainFileSyntaxParsingCache();
 
     parseIntoSourceFileFull(MainFile, MainFile.getBufferID().getValue(),
-                            &PersistentState);
+                            &PersistentState, nullptr,
+                            /*DelayBodyParsing=*/false);
   }
 
   assert(Context->LoadedModules.size() == 1 &&

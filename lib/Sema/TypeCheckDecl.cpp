@@ -30,6 +30,7 @@
 #include "swift/AST/ForeignErrorConvention.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/GenericSignatureBuilder.h"
+#include "swift/AST/Initializer.h"
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/ProtocolConformance.h"
@@ -2062,6 +2063,9 @@ public:
   explicit DeclChecker(TypeChecker &TC) : TC(TC) {}
 
   void visit(Decl *decl) {
+    if (TC.Context.Stats)
+      TC.Context.Stats->getFrontendCounters().NumDeclsTypechecked++;
+
     FrontendStatsTracer StatsTracer(TC.Context.Stats, "typecheck-decl", decl);
     PrettyStackTraceDecl StackTrace("type-checking", decl);
     
@@ -2120,14 +2124,17 @@ public:
   }
 
   void visitBoundVariable(VarDecl *VD) {
-    TC.validateDecl(VD);
-
-    // Set up accessors.
-    maybeAddAccessorsToStorage(VD);
-
     // WARNING: Anything you put in this function will only be run when the
     // VarDecl is fully type-checked within its own file. It will NOT be run
     // when the VarDecl is merely used from another file.
+    TC.validateDecl(VD);
+
+    // Set up accessors, also lowering lazy and @NSManaged properties.
+    maybeAddAccessorsToStorage(VD);
+
+    // Add the '@_hasStorage' attribute if this property is stored.
+    if (VD->hasStorage() && !VD->getAttrs().hasAttribute<HasStorageAttr>())
+      VD->getAttrs().add(new (TC.Context) HasStorageAttr(/*isImplicit=*/true));
 
     // Reject cases where this is a variable that has storage but it isn't
     // allowed.
@@ -2145,7 +2152,8 @@ public:
         TC.diagnose(VD->getLoc(), diag::enum_stored_property);
         VD->markInvalid();
       } else if (isa<ExtensionDecl>(VD->getDeclContext()) &&
-                 !VD->isStatic()) {
+                 !VD->isStatic() &&
+                 !VD->getAttrs().getAttribute<DynamicReplacementAttr>()) {
         TC.diagnose(VD->getLoc(), diag::extension_stored_property);
         VD->markInvalid();
       }
@@ -2223,16 +2231,17 @@ public:
           .fixItRemove(attr->getRange());
       }
     }
-  }
 
+    if (VD->getAttrs().hasAttribute<DynamicReplacementAttr>())
+      TC.checkDynamicReplacementAttribute(VD);
+  }
 
   void visitBoundVars(Pattern *P) {
     P->forEachVariable([&] (VarDecl *VD) { this->visitBoundVariable(VD); });
   }
 
   void visitPatternBindingDecl(PatternBindingDecl *PBD) {
-    if (PBD->isBeingValidated())
-      return;
+    DeclContext *DC = PBD->getDeclContext();
 
     // Check all the pattern/init pairs in the PBD.
     validatePatternBindingEntries(TC, PBD);
@@ -2249,10 +2258,6 @@ public:
           !PBD->getInit(i) &&
           PBD->getPattern(i)->hasStorage() &&
           !PBD->getPattern(i)->getType()->hasError()) {
-
-        // If we have a type-adjusting attribute (like ownership), apply it now.
-        if (auto var = PBD->getSingleVar())
-          TC.checkTypeModifyingDeclAttributes(var);
 
         // Decide whether we should suppress default initialization.
         //
@@ -2280,15 +2285,27 @@ public:
           // If we got a default initializer, install it and re-type-check it
           // to make sure it is properly coerced to the pattern type.
           PBD->setInit(i, defaultInit);
-          TC.typeCheckPatternBinding(PBD, i);
         }
+      }
+
+      if (PBD->getInit(i)) {
+        // Add the attribute that preserves the "has an initializer" value across
+        // module generation, as required for TBDGen.
+        PBD->getPattern(i)->forEachVariable([&](VarDecl *VD) {
+          if (VD->hasStorage() &&
+              !VD->getAttrs().hasAttribute<HasInitialValueAttr>()) {
+            auto *attr = new (TC.Context) HasInitialValueAttr(
+                /*IsImplicit=*/true);
+            VD->getAttrs().add(attr);
+          }
+        });
       }
     }
 
     bool isInSILMode = false;
-    if (auto sourceFile = PBD->getDeclContext()->getParentSourceFile())
+    if (auto sourceFile = DC->getParentSourceFile())
       isInSILMode = sourceFile->Kind == SourceFileKind::SIL;
-    bool isTypeContext = PBD->getDeclContext()->isTypeContext();
+    bool isTypeContext = DC->isTypeContext();
 
     // If this is a declaration without an initializer, reject code if
     // uninitialized vars are not allowed.
@@ -2304,8 +2321,6 @@ public:
 
         if (var->isInvalid() || PBD->isInvalid())
           return;
-
-        auto *varDC = var->getDeclContext();
 
         auto markVarAndPBDInvalid = [PBD, var] {
           PBD->setInvalid();
@@ -2324,9 +2339,9 @@ public:
 
         // Static/class declarations require an initializer unless in a
         // protocol.
-        if (var->isStatic() && !isa<ProtocolDecl>(varDC)) {
+        if (var->isStatic() && !isa<ProtocolDecl>(DC)) {
           // ...but don't enforce this for SIL or parseable interface files.
-          switch (varDC->getParentSourceFile()->Kind) {
+          switch (DC->getParentSourceFile()->Kind) {
           case SourceFileKind::Interface:
           case SourceFileKind::SIL:
             return;
@@ -2343,8 +2358,8 @@ public:
         }
 
         // Global variables require an initializer in normal source files.
-        if (varDC->isModuleScopeContext()) {
-          switch (varDC->getParentSourceFile()->Kind) {
+        if (DC->isModuleScopeContext()) {
+          switch (DC->getParentSourceFile()->Kind) {
           case SourceFileKind::Main:
           case SourceFileKind::REPL:
           case SourceFileKind::Interface:
@@ -2368,8 +2383,35 @@ public:
 
     // If the initializers in the PBD aren't checked yet, do so now.
     for (unsigned i = 0, e = PBD->getNumPatternEntries(); i != e; ++i) {
-      if (!PBD->isInitializerChecked(i) && PBD->getInit(i))
+      if (!PBD->getInit(i))
+        continue;
+
+      if (!PBD->isInitializerChecked(i))
         TC.typeCheckPatternBinding(PBD, i);
+
+      if (!PBD->isInvalid()) {
+        auto &entry = PBD->getPatternList()[i];
+        auto *init = PBD->getInit(i);
+
+        // If we're performing an binding to a weak or unowned variable from a
+        // constructor call, emit a warning that the instance will be immediately
+        // deallocated.
+        diagnoseUnownedImmediateDeallocation(TC, PBD->getPattern(i),
+                                              entry.getEqualLoc(),
+                                              init);
+
+        // If we entered an initializer context, contextualize any
+        // auto-closures we might have created.
+        if (!DC->isLocalContext()) {
+          auto *initContext = cast_or_null<PatternBindingInitializer>(
+              entry.getInitContext());
+          if (initContext) {
+            // Check safety of error-handling in the declaration, too.
+            TC.checkInitializerErrorHandling(initContext, init);
+            (void) TC.contextualizeInitializer(initContext, init);
+          }
+        }
+      }
     }
   }
 
@@ -2737,28 +2779,29 @@ public:
         }
       }
 
-      // Require the superclass to be open if this is outside its
-      // defining module.  But don't emit another diagnostic if we
-      // already complained about the class being inherently
-      // un-subclassable.
-      if (!isInvalidSuperclass &&
-          !Super->hasOpenAccess(CD->getDeclContext()) &&
-          Super->getModuleContext() != CD->getModuleContext()) {
-        TC.diagnose(CD, diag::superclass_not_open, superclassTy);
-        isInvalidSuperclass = true;
-      }
+      if (!TC.Context.isAccessControlDisabled()) {
+        // Require the superclass to be open if this is outside its
+        // defining module.  But don't emit another diagnostic if we
+        // already complained about the class being inherently
+        // un-subclassable.
+        if (!isInvalidSuperclass &&
+            !Super->hasOpenAccess(CD->getDeclContext()) &&
+            Super->getModuleContext() != CD->getModuleContext()) {
+          TC.diagnose(CD, diag::superclass_not_open, superclassTy);
+          isInvalidSuperclass = true;
+        }
 
-      // Require superclasses to be open if the subclass is open.
-      // This is a restriction we can consider lifting in the future,
-      // e.g. to enable a "sealed" superclass whose subclasses are all
-      // of one of several alternatives.
-      if (!isInvalidSuperclass &&
-          CD->getFormalAccess() == AccessLevel::Open &&
-          Super->getFormalAccess() != AccessLevel::Open) {
-        TC.diagnose(CD, diag::superclass_of_open_not_open, superclassTy);
-        TC.diagnose(Super, diag::superclass_here);
+        // Require superclasses to be open if the subclass is open.
+        // This is a restriction we can consider lifting in the future,
+        // e.g. to enable a "sealed" superclass whose subclasses are all
+        // of one of several alternatives.
+        if (!isInvalidSuperclass &&
+            CD->getFormalAccess() == AccessLevel::Open &&
+            Super->getFormalAccess() != AccessLevel::Open) {
+          TC.diagnose(CD, diag::superclass_of_open_not_open, superclassTy);
+          TC.diagnose(Super, diag::superclass_here);
+        }
       }
-
     }
 
     CD->getAllConformances();
@@ -2845,12 +2888,6 @@ public:
   void visitVarDecl(VarDecl *VD) {
     // Delay type-checking on VarDecls until we see the corresponding
     // PatternBindingDecl.
-
-    // Except if there is a dynamic replacement attribute.
-    if (VD->getAttrs().hasAttribute<DynamicReplacementAttr>()) {
-      TC.validateDecl(VD);
-      TC.checkDynamicReplacementAttribute(VD);
-    }
   }
 
   /// Determine whether the given declaration requires a definition.
@@ -3699,10 +3736,6 @@ void TypeChecker::validateDecl(ValueDecl *D) {
     auto *VD = cast<VarDecl>(D);
     auto *PBD = VD->getParentPatternBinding();
 
-    // Add the '@_hasStorage' attribute if this property is stored.
-    if (VD->hasStorage() && !VD->getAttrs().hasAttribute<HasStorageAttr>())
-      VD->getAttrs().add(new (Context) HasStorageAttr(/*isImplicit=*/true));
-
     // Note that we need to handle the fact that some VarDecls don't
     // have a PatternBindingDecl, for example the iterator in a
     // 'for ... in ...' loop.
@@ -3833,13 +3866,8 @@ void TypeChecker::validateDecl(ValueDecl *D) {
       auto valueParams = accessor->getParameters();
 
       // Determine the value type.
-      Type valueIfaceTy;
-      if (auto VD = dyn_cast<VarDecl>(storage)) {
-        valueIfaceTy = VD->getInterfaceType()->getReferenceStorageReferent();
-      } else {
-        auto SD = cast<SubscriptDecl>(storage);
-        valueIfaceTy = SD->getElementInterfaceType();
-
+      Type valueIfaceTy = storage->getValueInterfaceType();
+      if (auto SD = dyn_cast<SubscriptDecl>(storage)) {
         // Copy the index types instead of re-validating them.
         auto indices = SD->getIndices();
         for (size_t i = 0, e = indices->size(); i != e; ++i) {
@@ -3968,7 +3996,6 @@ void TypeChecker::validateDecl(ValueDecl *D) {
     }
 
     checkDeclAttributes(FD);
-
     break;
   }
 
@@ -4020,7 +4047,8 @@ void TypeChecker::validateDecl(ValueDecl *D) {
       // (or the same file) to add vtable entries, we can re-evaluate this
       // restriction.
       if (extType->getClassOrBoundGenericClass() &&
-          isa<ExtensionDecl>(CD->getDeclContext())) {
+          isa<ExtensionDecl>(CD->getDeclContext()) &&
+          !(CD->getAttrs().hasAttribute<DynamicReplacementAttr>())) {
         diagnose(CD->getLoc(), diag::designated_init_in_extension, extType)
           .fixItInsert(CD->getLoc(), "convenience ");
         CD->setInitKind(CtorInitializerKind::Convenience);
@@ -4163,13 +4191,6 @@ void TypeChecker::validateDeclForNameLookup(ValueDecl *D) {
     if (proto->hasInterfaceType())
       return;
     proto->computeType();
-
-    auto *gp = proto->getGenericParams();
-    gp->setDepth(proto->getGenericContextDepth());
-
-    for (auto ATD : proto->getAssociatedTypeMembers()) {
-      validateDeclForNameLookup(ATD);
-    }
 
     // Compute the requirement signature later to avoid circularity.
     DelayedRequirementSignatures.insert(proto);
@@ -4391,6 +4412,9 @@ static void finalizeType(TypeChecker &TC, NominalTypeDecl *nominal) {
 }
 
 void TypeChecker::finalizeDecl(ValueDecl *decl) {
+  if (Context.Stats)
+    Context.Stats->getFrontendCounters().NumDeclsFinalized++;
+
   validateDecl(decl);
 
   if (auto nominal = dyn_cast<NominalTypeDecl>(decl)) {
@@ -4559,7 +4583,7 @@ static Type formExtensionInterfaceType(
       mustInferRequirements = true;
     }
 
-    resultType = NameAliasType::get(typealias, parentType, subMap,
+    resultType = TypeAliasType::get(typealias, parentType, subMap,
                                     resultType);
   }
 
@@ -4611,7 +4635,7 @@ checkExtensionGenericParams(TypeChecker &tc, ExtensionDecl *ext, Type type,
 
 static bool isNonGenericTypeAliasType(Type type) {
   // A non-generic typealias can extend a specialized type.
-  if (auto *aliasType = dyn_cast<NameAliasType>(type.getPointer()))
+  if (auto *aliasType = dyn_cast<TypeAliasType>(type.getPointer()))
     return aliasType->getDecl()->getGenericContextDepth() == (unsigned)-1;
 
   return false;

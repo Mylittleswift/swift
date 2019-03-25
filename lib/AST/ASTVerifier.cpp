@@ -540,10 +540,18 @@ public:
     void verifyParsed(Stmt *S) {}
     void verifyParsed(Pattern *P) {}
     void verifyParsed(Decl *D) {
+      PrettyStackTraceDecl debugStack("verifying ", D);
       if (!D->getDeclContext()) {
-        Out << "every Decl should have a DeclContext";
-        PrettyStackTraceDecl debugStack("verifying DeclContext", D);
+        Out << "every Decl should have a DeclContext\n";
         abort();
+      }
+      if (auto *DC = dyn_cast<DeclContext>(D)) {
+        if (D->getDeclContext() != DC->getParent()) {
+          Out << "Decl's DeclContext not in sync with DeclContext's parent\n";
+          D->getDeclContext()->dumpContext();
+          DC->getParent()->dumpContext();
+          abort();
+        }
       }
     }
     template<typename T>
@@ -624,13 +632,15 @@ public:
           // Only visit each archetype once.
           if (!visitedArchetypes.insert(archetype).second)
             return false;
+          
+          auto root = archetype->getRoot();
 
           // We should know about archetypes corresponding to opened
           // existential archetypes.
-          if (auto opened = dyn_cast<OpenedArchetypeType>(archetype)) {
+          if (auto opened = dyn_cast<OpenedArchetypeType>(root)) {
             if (OpenedExistentialArchetypes.count(opened) == 0) {
               Out << "Found opened existential archetype "
-                  << archetype->getString()
+                  << root->getString()
                   << " outside enclosing OpenExistentialExpr\n";
               return true;
             }
@@ -641,18 +651,18 @@ public:
           // Otherwise, the archetype needs to be from this scope.
           if (GenericEnv.empty() || !GenericEnv.back()) {
             Out << "AST verification error: archetype outside of generic "
-                   "context: " << archetype->getString() << "\n";
+                   "context: " << root->getString() << "\n";
             return true;
           }
 
           // Get the primary archetype.
-          auto *parent = archetype->getPrimary();
+          auto rootPrimary = cast<PrimaryArchetypeType>(root);
 
-          if (!GenericEnv.back().containsPrimaryArchetype(parent)) {
+          if (!GenericEnv.back().containsPrimaryArchetype(rootPrimary)) {
             Out << "AST verification error: archetype "
-                << archetype->getString() << " not allowed in this context\n";
+                << root->getString() << " not allowed in this context\n";
 
-            if (auto env = parent->getGenericEnvironment()) {
+            if (auto env = rootPrimary->getGenericEnvironment()) {
               if (auto owningDC = env->getOwningDeclContext()) {
                 llvm::errs() << "archetype came from:\n";
                 owningDC->dumpContext();
@@ -750,6 +760,7 @@ public:
     FUNCTION_LIKE(ConstructorDecl)
     FUNCTION_LIKE(DestructorDecl)
     FUNCTION_LIKE(FuncDecl)
+    FUNCTION_LIKE(EnumElementDecl)
     SCOPE_LIKE(NominalTypeDecl)
     SCOPE_LIKE(ExtensionDecl)
 
@@ -869,7 +880,8 @@ public:
 
       if (D->hasAccess()) {
         PrettyStackTraceDecl debugStack("verifying access", D);
-        if (D->getFormalAccessScope().isPublic() &&
+        if (!D->getASTContext().isAccessControlDisabled() &&
+            D->getFormalAccessScope().isPublic() &&
             D->getFormalAccess() < AccessLevel::Public) {
           Out << "non-public decl has no formal access scope\n";
           D->dump(Out);
@@ -996,7 +1008,7 @@ public:
       case StmtConditionElement::CK_Boolean: {
         auto *E = elt.getBoolean();
         if (shouldVerifyChecked(E))
-          checkSameType(E->getType(), BuiltinIntegerType::get(1, Ctx),
+          checkSameType(E->getType(), Ctx.getBoolDecl()->getDeclaredType(),
                         "condition type");
         break;
       }
@@ -1697,10 +1709,10 @@ public:
         }
       };
 
-      // If we have a tuple_shuffle, strip it off. We want to visit the
+      // If we have an argument shuffle, strip it off. We want to visit the
       // underlying paren or tuple expr.
-      if (auto *TupleShuffle = dyn_cast<TupleShuffleExpr>(Arg)) {
-        Arg = TupleShuffle->getSubExpr();
+      if (auto *ArgShuffle = dyn_cast<ArgumentShuffleExpr>(Arg)) {
+        Arg = ArgShuffle->getSubExpr();
       }
 
       if (auto *ParentExprArg = dyn_cast<ParenExpr>(Arg)) {
@@ -1980,6 +1992,30 @@ public:
       PrettyStackTraceExpr debugStack(Ctx, "verifying TupleShuffleExpr", E);
 
       auto getSubElementType = [&](unsigned i) {
+        return (E->getSubExpr()->getType()->castTo<TupleType>()
+                 ->getElementType(i));
+      };
+
+      /// Retrieve the ith element type from the resulting tuple type.
+      auto getOuterElementType = [&](unsigned i) -> Type {
+        return E->getType()->castTo<TupleType>()->getElementType(i);
+      };
+
+      for (unsigned i = 0, e = E->getElementMapping().size(); i != e; ++i) {
+        int subElem = E->getElementMapping()[i];
+        if (!getOuterElementType(i)->isEqual(getSubElementType(subElem))) {
+          Out << "Type mismatch in TupleShuffleExpr\n";
+          abort();
+        }
+      }
+
+      verifyCheckedBase(E);
+    }
+    
+    void verifyChecked(ArgumentShuffleExpr *E) {
+      PrettyStackTraceExpr debugStack(Ctx, "verifying ArgumentShuffleExpr", E);
+
+      auto getSubElementType = [&](unsigned i) {
         if (E->isSourceScalar()) {
           assert(i == 0);
           return E->getSubExpr()->getType();
@@ -2003,30 +2039,30 @@ public:
       unsigned callerDefaultArgIndex = 0;
       for (unsigned i = 0, e = E->getElementMapping().size(); i != e; ++i) {
         int subElem = E->getElementMapping()[i];
-        if (subElem == TupleShuffleExpr::DefaultInitialize)
+        if (subElem == ArgumentShuffleExpr::DefaultInitialize)
           continue;
-        if (subElem == TupleShuffleExpr::Variadic) {
+        if (subElem == ArgumentShuffleExpr::Variadic) {
           varargsType = (E->getType()->castTo<TupleType>()
                           ->getElement(i).getVarargBaseTy());
           break;
         }
-        if (subElem == TupleShuffleExpr::CallerDefaultInitialize) {
+        if (subElem == ArgumentShuffleExpr::CallerDefaultInitialize) {
           auto init = E->getCallerDefaultArgs()[callerDefaultArgIndex++];
           if (!getOuterElementType(i)->isEqual(init->getType())) {
-            Out << "Type mismatch in TupleShuffleExpr\n";
+            Out << "Type mismatch in ArgumentShuffleExpr\n";
             abort();
           }
           continue;
         }
         if (!getOuterElementType(i)->isEqual(getSubElementType(subElem))) {
-          Out << "Type mismatch in TupleShuffleExpr\n";
+          Out << "Type mismatch in ArgumentShuffleExpr\n";
           abort();
         }
       }
       if (varargsType) {
         for (auto sourceIdx : E->getVariadicArgs()) {
           if (!getSubElementType(sourceIdx)->isEqual(varargsType)) {
-            Out << "Vararg type mismatch in TupleShuffleExpr\n";
+            Out << "Vararg type mismatch in ArgumentShuffleExpr\n";
             abort();
           }
         }
@@ -2070,8 +2106,8 @@ public:
       PrettyStackTraceExpr debugStack(Ctx, "verifying IfExpr", E);
 
       auto condTy = E->getCondExpr()->getType();
-      if (!condTy->isBuiltinIntegerType(1)) {
-        Out << "IfExpr condition is not an i1\n";
+      if (!condTy->isBool()) {
+        Out << "IfExpr condition is not Bool\n";
         abort();
       }
 

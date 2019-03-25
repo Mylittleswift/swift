@@ -2100,7 +2100,9 @@ TypeDecl *EquivalenceClass::lookupNestedType(
   // Infer same-type constraints among same-named associated type anchors.
   if (assocTypeAnchors.size() > 1) {
     auto anchorType = getAnchor(builder, builder.getGenericParams());
-    auto inferredSource = FloatingRequirementSource::forInferred(nullptr);
+    auto inferredSource =
+      FloatingRequirementSource::forNestedTypeNameMatch(
+        assocTypeAnchors.front()->getName());
     for (auto assocType : assocTypeAnchors) {
       if (assocType == bestAssocType) continue;
 
@@ -2809,6 +2811,8 @@ static void concretizeNestedTypeFromConcreteParent(
         ->getTypeWitness(assocType, builder.getLazyResolver());
     if (!witnessType || witnessType->hasError())
       return; // FIXME: should we delay here?
+  } else if (auto archetype = concreteParent->getAs<ArchetypeType>()) {
+    witnessType = archetype->getNestedType(assocType->getName());
   } else {
     witnessType = DependentMemberType::get(concreteParent, assocType);
   }
@@ -2900,7 +2904,7 @@ PotentialArchetype *PotentialArchetype::updateNestedTypeForConformance(
 
 void ArchetypeType::resolveNestedType(
                                     std::pair<Identifier, Type> &nested) const {
-  auto genericEnv = getPrimary()->getGenericEnvironment();
+  auto genericEnv = getGenericEnvironment();
   auto &builder = *genericEnv->getGenericSignatureBuilder();
 
   Type interfaceType = getInterfaceType();
@@ -2929,11 +2933,7 @@ Type GenericSignatureBuilder::PotentialArchetype::getDependentType(
     if (parentType->hasError())
       return parentType;
 
-    // If we've resolved to an associated type, use it.
-    if (auto assocType = getResolvedType())
-      return DependentMemberType::get(parentType, assocType);
-
-    return DependentMemberType::get(parentType, getNestedName());
+    return DependentMemberType::get(parentType, getResolvedType());
   }
   
   assert(isGenericParam() && "Not a generic parameter?");
@@ -3856,7 +3856,7 @@ static Type substituteConcreteType(GenericSignatureBuilder &builder,
 
   // If we had a typealias, form a sugared type.
   if (typealias) {
-    type = NameAliasType::get(typealias, parentType, subMap, type);
+    type = TypeAliasType::get(typealias, parentType, subMap, type);
   }
 
   return type;
@@ -3884,7 +3884,7 @@ ResolvedType GenericSignatureBuilder::maybeResolveEquivalenceClass(
   }
 
   // The equivalence class of a dependent member type is determined by its
-  // base equivalence class.
+  // base equivalence class, if there is one.
   if (auto depMemTy = type->getAs<DependentMemberType>()) {
     // Find the equivalence class of the base.
     auto resolvedBase =
@@ -3892,6 +3892,9 @@ ResolvedType GenericSignatureBuilder::maybeResolveEquivalenceClass(
                                    resolutionKind,
                                    wantExactPotentialArchetype);
     if (!resolvedBase) return resolvedBase;
+    // If the base is concrete, so is this member.
+    if (resolvedBase.getAsConcreteType())
+      return ResolvedType::forConcrete(type);
 
     // Find the nested type declaration for this.
     auto baseEquivClass = resolvedBase.getEquivalenceClass(*this);
@@ -4629,8 +4632,14 @@ ConstraintResult GenericSignatureBuilder::addTypeRequirement(
                         ->getDependentType(getGenericParams());
 
       Impl->HadAnyError = true;
-      Diags.diagnose(source.getLoc(), diag::requires_conformance_nonprotocol,
-                     subjectType, constraintType);
+      
+      if (subjectType->is<DependentMemberType>()) {
+        subjectType = resolveDependentMemberTypes(*this, subjectType);
+      }
+
+      auto invalidConstraint = Constraint<Type>(
+          {subject, constraintType, source.getSource(*this, subjectType)});
+      invalidIsaConstraints.push_back(invalidConstraint);
     }
 
     return ConstraintResult::Conflicting;
@@ -4732,7 +4741,8 @@ void GenericSignatureBuilder::addedNestedType(PotentialArchetype *nestedPA) {
   if (allNested.size() > 1) {
     auto firstPA = allNested.front();
     auto inferredSource =
-      FloatingRequirementSource::forInferred(nullptr);
+      FloatingRequirementSource::forNestedTypeNameMatch(
+        nestedPA->getNestedName());
 
     addSameTypeRequirement(firstPA, nestedPA, inferredSource,
                            UnresolvedHandlingKind::GenerateConstraints);
@@ -4799,8 +4809,12 @@ GenericSignatureBuilder::addSameTypeRequirementBetweenTypeParameters(
   auto T1 = OrigT1->getRepresentative();
   auto T2 = OrigT2->getRepresentative();
 
-  // Pick representative based on the canonical ordering of the type parameters.
-  if (compareDependentTypes(depType2, depType1) < 0) {
+  // Decide which potential archetype is to be considered the representative.
+  // We prefer potential archetypes with lower nesting depths, because it
+  // prevents us from unnecessarily building deeply nested potential archetypes.
+  unsigned nestingDepth1 = T1->getNestingDepth();
+  unsigned nestingDepth2 = T2->getNestingDepth();
+  if (nestingDepth2 < nestingDepth1) {
     std::swap(T1, T2);
     std::swap(OrigT1, OrigT2);
     std::swap(equivClass, equivClass2);
@@ -5311,13 +5325,13 @@ public:
 
   Action walkToTypePost(Type ty) override {
     // Infer from generic typealiases.
-    if (auto NameAlias = dyn_cast<NameAliasType>(ty.getPointer())) {
-      auto decl = NameAlias->getDecl();
+    if (auto TypeAlias = dyn_cast<TypeAliasType>(ty.getPointer())) {
+      auto decl = TypeAlias->getDecl();
       auto genericSig = decl->getGenericSignature();
       if (!genericSig)
         return Action::Continue;
 
-      auto subMap = NameAlias->getSubstitutionMap();
+      auto subMap = TypeAlias->getSubstitutionMap();
       for (const auto &rawReq : genericSig->getRequirements()) {
         if (auto req = rawReq.subst(subMap))
           Builder.addRequirement(*req, source, nullptr);
@@ -5745,6 +5759,43 @@ GenericSignatureBuilder::finalize(SourceLoc loc,
         break;
       }
     }
+  }
+  
+  // Emit a diagnostic if we recorded any constraints where the constraint
+  // type was not constrained to a protocol or class. Provide a fix-it if
+  // allowConcreteGenericParams is true or the subject type is a member type.
+  if (!invalidIsaConstraints.empty()) {
+    for (auto constraint : invalidIsaConstraints) {
+      auto subjectType = constraint.getSubjectDependentType(getGenericParams());
+      auto constraintType = constraint.value;
+      auto source = constraint.source;
+      auto loc = source->getLoc();
+
+      Diags.diagnose(loc, diag::requires_conformance_nonprotocol,
+                     subjectType, constraintType);
+      
+      auto getNameWithoutSelf = [&](std::string subjectTypeName) {
+        std::string selfSubstring = "Self.";
+        
+        if (subjectTypeName.rfind(selfSubstring, 0) == 0) {
+          return subjectTypeName.erase(0, selfSubstring.length());
+        }
+        
+        return subjectTypeName;
+      };
+
+      if (allowConcreteGenericParams ||
+          (subjectType->is<DependentMemberType>() &&
+           !source->isProtocolRequirement())) {
+        auto subjectTypeName = subjectType.getString();
+        auto subjectTypeNameWithoutSelf = getNameWithoutSelf(subjectTypeName);
+        Diags.diagnose(loc, diag::requires_conformance_nonprotocol_fixit,
+                       subjectTypeNameWithoutSelf, constraintType.getString())
+             .fixItReplace(loc, " == ");
+      }
+    }
+
+    invalidIsaConstraints.clear();
   }
 }
 
@@ -6830,6 +6881,14 @@ void GenericSignatureBuilder::checkSameTypeConstraints(
 
           auto locA = (*a)->constraint.source->getLoc();
           auto locB = (*b)->constraint.source->getLoc();
+
+          // Put invalid locations after valid ones.
+          if (locA.isInvalid() || locB.isInvalid()) {
+            if (locA.isInvalid() != locB.isInvalid())
+              return locA.isValid() ? 1 : -1;
+
+            return 0;
+          }
 
           auto bufferA = sourceMgr.findBufferContainingLoc(locA);
           auto bufferB = sourceMgr.findBufferContainingLoc(locB);

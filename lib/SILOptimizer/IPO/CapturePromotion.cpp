@@ -365,7 +365,9 @@ computeNewArgInterfaceTypes(SILFunction *F,
     assert(paramBoxTy->getLayout()->getFields().size() == 1
            && "promoting compound box not implemented yet");
     auto paramBoxedTy = paramBoxTy->getFieldType(F->getModule(), 0);
-    auto &paramTL = Types.getTypeLowering(paramBoxedTy);
+    // FIXME: Expansion
+    auto &paramTL = Types.getTypeLowering(paramBoxedTy,
+                                          ResilienceExpansion::Minimal);
     ParameterConvention convention;
     if (paramTL.isFormallyPassedIndirectly()) {
       convention = ParameterConvention::Indirect_In;
@@ -485,7 +487,7 @@ ClosureCloner::populateCloned() {
     if (Cloned->hasOwnership() &&
         MappedValue.getOwnershipKind() != ValueOwnershipKind::Any) {
       SILLocation Loc(const_cast<ValueDecl *>((*I)->getDecl()));
-      MappedValue = getBuilder().createBeginBorrow(Loc, MappedValue);
+      MappedValue = getBuilder().emitBeginBorrowOperation(Loc, MappedValue);
     }
     entryArgs.push_back(MappedValue);
 
@@ -544,8 +546,7 @@ ClosureCloner::visitStrongReleaseInst(StrongReleaseInst *Inst) {
     if (I != BoxArgumentMap.end()) {
       // Releases of the box arguments get replaced with ReleaseValue of the new
       // object type argument.
-      SILFunction &F = getBuilder().getFunction();
-      auto &typeLowering = F.getModule().getTypeLowering(I->second->getType());
+      auto &typeLowering = getBuilder().getTypeLowering(I->second->getType());
       SILBuilderWithPostProcess<ClosureCloner, 1> B(this, Inst);
       typeLowering.emitDestroyValue(B, Inst->getLoc(), I->second);
       return;
@@ -567,7 +568,7 @@ void ClosureCloner::visitDestroyValueInst(DestroyValueInst *Inst) {
       // Releases of the box arguments get replaced with an end_borrow,
       // destroy_value of the new object type argument.
       SILFunction &F = getBuilder().getFunction();
-      auto &typeLowering = F.getModule().getTypeLowering(I->second->getType());
+      auto &typeLowering = F.getTypeLowering(I->second->getType());
       SILBuilderWithPostProcess<ClosureCloner, 1> B(this, Inst);
 
       SILValue Value = I->second;
@@ -578,7 +579,7 @@ void ClosureCloner::visitDestroyValueInst(DestroyValueInst *Inst) {
           Value.getOwnershipKind() != ValueOwnershipKind::Any) {
         auto *BBI = cast<BeginBorrowInst>(Value);
         Value = BBI->getOperand();
-        B.createEndBorrow(Inst->getLoc(), BBI, Value);
+        B.emitEndBorrowOperation(Inst->getLoc(), BBI);
       }
 
       typeLowering.emitDestroyValue(B, Inst->getLoc(), Value);
@@ -1034,6 +1035,17 @@ static bool scanUsesForEscapesAndMutations(Operand *Op,
     return isPartialApplyNonEscapingUser(Op, PAI, State);
   }
 
+  // A mark_dependence user on a partial_apply is safe.
+  if (auto *MD = dyn_cast<MarkDependenceInst>(User)) {
+    if (MD->getBase() == Op->get()) {
+      auto parent = MD->getValue();
+      while ((MD = dyn_cast<MarkDependenceInst>(parent))) {
+        parent = MD->getValue();
+      }
+      return isa<PartialApplyInst>(parent);
+    }
+  }
+
   if (auto *PBI = dyn_cast<ProjectBoxInst>(User)) {
     // It is assumed in later code that we will only have 1 project_box. This
     // can be seen since there is no code for reasoning about multiple
@@ -1198,6 +1210,28 @@ static SILValue getOrCreateProjectBoxHelper(SILValue PartialOperand) {
   return B.createProjectBox(Box->getLoc(), Box, 0);
 }
 
+/// Change the base in mark_dependence.
+static void
+mapMarkDependenceArguments(SingleValueInstruction *root,
+                           llvm::DenseMap<SILValue, SILValue> &map,
+                           SmallVectorImpl<SILInstruction *> &Delete) {
+  SmallVector<Operand *, 16> Uses(root->getUses());
+  for (auto *Use : Uses) {
+    if (auto *MD = dyn_cast<MarkDependenceInst>(Use->getUser())) {
+      mapMarkDependenceArguments(MD, map, Delete);
+      auto iter = map.find(MD->getBase());
+      if (iter != map.end()) {
+        MD->setBase(iter->second);
+      }
+      // Remove mark_dependence on trivial values.
+      if (MD->getBase()->getType().isTrivial(*MD->getFunction())) {
+        MD->replaceAllUsesWith(MD->getValue());
+        Delete.push_back(MD);
+      }
+    }
+  }
+}
+
 /// Given a partial_apply instruction and a set of promotable indices,
 /// clone the closure with the promoted captures and replace the partial_apply
 /// with a partial_apply of the new closure, fixing up reference counting as
@@ -1207,6 +1241,7 @@ static SILFunction *
 processPartialApplyInst(SILOptFunctionBuilder &FuncBuilder,
                         PartialApplyInst *PAI, IndicesSet &PromotableIndices,
                         SmallVectorImpl<SILFunction*> &Worklist) {
+  SILFunction *F = PAI->getFunction();
   SILModule &M = PAI->getModule();
 
   auto *FRI = dyn_cast<FunctionRefInst>(PAI->getCallee());
@@ -1236,6 +1271,8 @@ processPartialApplyInst(SILOptFunctionBuilder &FuncBuilder,
   unsigned OpCount = PAI->getNumOperands() - PAI->getNumTypeDependentOperands();
   SmallVector<SILValue, 16> Args;
   auto NumIndirectResults = calleeConv.getNumIndirectSILResults();
+  llvm::DenseMap<SILValue, SILValue> capturedMap;
+  llvm::SmallSet<SILValue, 16> newCaptures;
   for (; OpNo != OpCount; ++OpNo) {
     unsigned Index = OpNo - 1 + FirstIndex;
     if (!PromotableIndices.count(Index)) {
@@ -1249,9 +1286,19 @@ processPartialApplyInst(SILOptFunctionBuilder &FuncBuilder,
     SILValue Box = PAI->getOperand(OpNo);
     SILValue Addr = getOrCreateProjectBoxHelper(Box);
 
-    auto &typeLowering = M.getTypeLowering(Addr->getType());
-    Args.push_back(
-        typeLowering.emitLoadOfCopy(B, PAI->getLoc(), Addr, IsNotTake));
+    auto &typeLowering = F->getTypeLowering(Addr->getType());
+    auto newCaptured =
+        typeLowering.emitLoadOfCopy(B, PAI->getLoc(), Addr, IsNotTake);
+    Args.push_back(newCaptured);
+
+    capturedMap[Box] = newCaptured;
+    newCaptures.insert(newCaptured);
+
+    // A partial_apply [stack] does not own the captured argument but we must
+    // destroy the projected object. We will do so after having created the new
+    // partial_apply below.
+    if (PAI->isOnStack())
+      continue;
 
     // Cleanup the captured argument.
     //
@@ -1268,7 +1315,8 @@ processPartialApplyInst(SILOptFunctionBuilder &FuncBuilder,
   // Create a new partial apply with the new arguments.
   auto *NewPAI = B.createPartialApply(
       PAI->getLoc(), FnVal, PAI->getSubstitutionMap(), Args,
-      PAI->getType().getAs<SILFunctionType>()->getCalleeConvention());
+      PAI->getType().getAs<SILFunctionType>()->getCalleeConvention(),
+      PAI->isOnStack());
   PAI->replaceAllUsesWith(NewPAI);
   PAI->eraseFromParent();
   if (FRI->use_empty()) {
@@ -1276,6 +1324,24 @@ processPartialApplyInst(SILOptFunctionBuilder &FuncBuilder,
     // TODO: If this is the last use of the closure, and if it has internal
     // linkage, we should remove it from the SILModule now.
   }
+
+  if (NewPAI->isOnStack()) {
+    // Insert destroy's of new captured arguments.
+    for (auto *Use : NewPAI->getUses()) {
+      if (auto *DS = dyn_cast<DeallocStackInst>(Use->getUser())) {
+        B.setInsertionPoint(std::next(SILBasicBlock::iterator(DS)));
+        insertDestroyOfCapturedArguments(NewPAI, B, [&](SILValue arg) -> bool {
+          return newCaptures.count(arg);
+        });
+      }
+    }
+    // Map the mark dependence arguments.
+    SmallVector<SILInstruction *, 16> Delete;
+    mapMarkDependenceArguments(NewPAI, capturedMap, Delete);
+    for (auto *inst : Delete)
+      inst->eraseFromParent();
+  }
+
   return ClonedFn;
 }
 

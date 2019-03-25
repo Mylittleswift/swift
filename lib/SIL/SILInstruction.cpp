@@ -41,7 +41,7 @@ const SILDebugScope *SILInstruction::getDebugScope() const {
   return Location.getScope();
 }
 
-void SILInstruction::setDebugScope(SILBuilder &B, const SILDebugScope *DS) {
+void SILInstruction::setDebugScope(const SILDebugScope *DS) {
   if (getDebugScope() && getDebugScope()->InlinedCallSite)
     assert(DS->InlinedCallSite && "throwing away inlined scope info");
 
@@ -1117,6 +1117,10 @@ bool SILInstruction::isAllocatingStack() const {
     if (ARI->canAllocOnStack())
       return true;
   }
+
+  if (auto *PA = dyn_cast<PartialApplyInst>(this))
+    return PA->isOnStack();
+
   return false;
 }
 
@@ -1188,6 +1192,9 @@ bool SILInstruction::isTriviallyDuplicatable() const {
   // nodes of objc_method type.
   if (isa<DynamicMethodBranchInst>(this))
     return false;
+
+  if (auto *PA = dyn_cast<PartialApplyInst>(this))
+    return !PA->isOnStack();
 
   // If you add more cases here, you should also update SILLoop:canDuplicate.
 

@@ -53,6 +53,7 @@ namespace swift {
   class IRGenOptions;
   class LangOptions;
   class ModuleDecl;
+  typedef void *OpaqueSyntaxNode;
   class Parser;
   class PersistentParserState;
   class SerializationOptions;
@@ -61,6 +62,7 @@ namespace swift {
   class SILParserTUState;
   class SourceFile;
   class SourceManager;
+  class SyntaxParseActions;
   class SyntaxParsingCache;
   class Token;
   class TopLevelContext;
@@ -119,7 +121,8 @@ namespace swift {
   bool parseIntoSourceFile(SourceFile &SF, unsigned BufferID, bool *Done,
                            SILParserState *SIL = nullptr,
                            PersistentParserState *PersistentState = nullptr,
-                           DelayedParsingCallbacks *DelayedParseCB = nullptr);
+                           DelayedParsingCallbacks *DelayedParseCB = nullptr,
+                           bool DelayBodyParsing = true);
 
   /// Parse a single buffer into the given source file, until the full source
   /// contents are parsed.
@@ -127,7 +130,8 @@ namespace swift {
   /// \return true if the parser found code with side effects.
   bool parseIntoSourceFileFull(SourceFile &SF, unsigned BufferID,
                              PersistentParserState *PersistentState = nullptr,
-                             DelayedParsingCallbacks *DelayedParseCB = nullptr);
+                             DelayedParsingCallbacks *DelayedParseCB = nullptr,
+                               bool DelayBodyParsing = true);
 
   /// Finish the parsing by going over the nodes that were delayed
   /// during the first parsing pass.
@@ -260,6 +264,18 @@ namespace swift {
   void serialize(ModuleOrSourceFile DC, const SerializationOptions &options,
                  const SILModule *M = nullptr);
 
+  /// Serializes a module or single source file to the given output file and
+  /// returns back the file's contents as a memory buffer.
+  ///
+  /// Use this if you intend to immediately load the serialized module, as that
+  /// will both avoid extra filesystem traffic and will ensure you read back
+  /// exactly what was written.
+  void serializeToBuffers(ModuleOrSourceFile DC,
+                          const SerializationOptions &opts,
+                          std::unique_ptr<llvm::MemoryBuffer> *moduleBuffer,
+                          std::unique_ptr<llvm::MemoryBuffer> *moduleDocBuffer,
+                          const SILModule *M = nullptr);
+
   /// Get the CPU, subtarget feature options, and triple to use when emitting code.
   std::tuple<llvm::TargetOptions, std::string, std::vector<std::string>,
              std::string>
@@ -335,6 +351,7 @@ namespace swift {
   public:
     ParserUnit(SourceManager &SM, SourceFileKind SFKind, unsigned BufferID,
                const LangOptions &LangOpts, StringRef ModuleName,
+               std::shared_ptr<SyntaxParseActions> spActions = nullptr,
                SyntaxParsingCache *SyntaxCache = nullptr);
     ParserUnit(SourceManager &SM, SourceFileKind SFKind, unsigned BufferID);
     ParserUnit(SourceManager &SM, SourceFileKind SFKind, unsigned BufferID,
@@ -342,7 +359,7 @@ namespace swift {
 
     ~ParserUnit();
 
-    void parse();
+    OpaqueSyntaxNode parse();
 
     Parser &getParser();
     SourceFile &getSourceFile();

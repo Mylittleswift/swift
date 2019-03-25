@@ -42,6 +42,7 @@
 #include "swift/Basic/Statistic.h"
 #include "swift/Basic/StringExtras.h"
 #include "swift/Parse/Lexer.h" // bad dependency
+#include "swift/Syntax/References.h"
 #include "swift/Syntax/SyntaxArena.h"
 #include "swift/Strings.h"
 #include "swift/Subsystems.h"
@@ -290,18 +291,32 @@ FOR_KNOWN_FOUNDATION_TYPES(CACHE_FOUNDATION_DECL)
                  ProtocolConformanceRef>
     DefaultAssociatedConformanceWitnesses;
 
+  /// Caches of default types for DefaultTypeRequest.
+  /// Used to be instance variables in the TypeChecker.
+  /// There is a logically separate cache for each SourceFile and
+  /// KnownProtocolKind.
+  llvm::DenseMap<SourceFile *, std::array<Type, NumKnownProtocols>>
+      DefaultTypeRequestCaches;
+
   /// Structure that captures data that is segregated into different
   /// arenas.
   struct Arena {
+    static_assert(alignof(TypeBase) >= 8, "TypeBase not 8-byte aligned?");
+    static_assert(alignof(TypeBase) > static_cast<unsigned>(
+               MetatypeRepresentation::Last_MetatypeRepresentation) + 1,
+               "Use std::pair for MetatypeTypes and ExistentialMetatypeTypes.");
+
     llvm::DenseMap<Type, ErrorType *> ErrorTypesWithOriginal;
-    llvm::FoldingSet<NameAliasType> NameAliasTypes;
+    llvm::FoldingSet<TypeAliasType> TypeAliasTypes;
     llvm::FoldingSet<TupleType> TupleTypes;
-    llvm::DenseMap<std::pair<Type,char>, MetatypeType*> MetatypeTypes;
-    llvm::DenseMap<std::pair<Type,char>,
+    llvm::DenseMap<llvm::PointerIntPair<TypeBase*, 3, unsigned>,
+                   MetatypeType*> MetatypeTypes;
+    llvm::DenseMap<llvm::PointerIntPair<TypeBase*, 3, unsigned>,
                    ExistentialMetatypeType*> ExistentialMetatypeTypes;
     llvm::DenseMap<Type, ArraySliceType*> ArraySliceTypes;
     llvm::DenseMap<std::pair<Type, Type>, DictionaryType *> DictionaryTypes;
     llvm::DenseMap<Type, OptionalType*> OptionalTypes;
+    llvm::DenseMap<Type, ParenType*> SimpleParenTypes; // Most are simple
     llvm::DenseMap<std::pair<Type, unsigned>, ParenType*> ParenTypes;
     llvm::DenseMap<uintptr_t, ReferenceStorageType*> ReferenceStorageTypes;
     llvm::DenseMap<Type, LValueType*> LValueTypes;
@@ -309,12 +324,12 @@ FOR_KNOWN_FOUNDATION_TYPES(CACHE_FOUNDATION_DECL)
     llvm::DenseMap<std::pair<Type, void*>, DependentMemberType *>
       DependentMemberTypes;
     llvm::DenseMap<Type, DynamicSelfType *> DynamicSelfTypes;
-    llvm::FoldingSet<EnumType> EnumTypes;
-    llvm::FoldingSet<StructType> StructTypes;
-    llvm::FoldingSet<ClassType> ClassTypes;
+    llvm::DenseMap<std::pair<EnumDecl*, Type>, EnumType*> EnumTypes;
+    llvm::DenseMap<std::pair<StructDecl*, Type>, StructType*> StructTypes;
+    llvm::DenseMap<std::pair<ClassDecl*, Type>, ClassType*> ClassTypes;
+    llvm::DenseMap<std::pair<ProtocolDecl*, Type>, ProtocolType*> ProtocolTypes;
     llvm::FoldingSet<UnboundGenericType> UnboundGenericTypes;
     llvm::FoldingSet<BoundGenericType> BoundGenericTypes;
-    llvm::FoldingSet<ProtocolType> ProtocolTypes;
     llvm::FoldingSet<ProtocolCompositionType> ProtocolCompositionTypes;
     llvm::FoldingSet<LayoutConstraintInfo> LayoutConstraints;
 
@@ -1026,13 +1041,17 @@ FuncDecl *ASTContext::getEqualIntDecl() const {
     return nullptr;
 
   auto intType = getIntDecl()->getDeclaredType();
+  auto isIntParam = [&](AnyFunctionType::Param param) {
+    return (!param.isVariadic() && !param.isInOut() &&
+            param.getPlainType()->isEqual(intType));
+  };
   auto boolType = getBoolDecl()->getDeclaredType();
   auto decl = lookupOperatorFunc(*this, "==",
                                  intType, [=](FunctionType *type) {
     // Check for the signature: (Int, Int) -> Bool
     if (type->getParams().size() != 2) return false;
-    if (!type->getParams()[0].getOldType()->isEqual(intType) ||
-        !type->getParams()[1].getOldType()->isEqual(intType)) return false;
+    if (!isIntParam(type->getParams()[0]) ||
+        !isIntParam(type->getParams()[1])) return false;
     return type->getResult()->isEqual(boolType);
   });
   getImpl().EqualIntDecl = decl;
@@ -1219,8 +1238,9 @@ FuncDecl *ASTContext::getIsOSVersionAtLeastDecl() const {
   if (intrinsicsParams.size() != 3)
     return nullptr;
 
-  if (llvm::any_of(intrinsicsParams, [](const AnyFunctionType::Param &p) {
-    return !isBuiltinWordType(p.getOldType());
+  if (llvm::any_of(intrinsicsParams, [](AnyFunctionType::Param param) {
+    return (param.isVariadic() || param.isInOut() ||
+            !isBuiltinWordType(param.getPlainType()));
   })) {
     return nullptr;
   }
@@ -1462,23 +1482,6 @@ void ASTContext::verifyAllLoadedModules() const {
 
 ClangModuleLoader *ASTContext::getClangModuleLoader() const {
   return getImpl().TheClangModuleLoader;
-}
-
-static void recordKnownProtocol(ModuleDecl *Stdlib, StringRef Name,
-                                KnownProtocolKind Kind) {
-  Identifier ID = Stdlib->getASTContext().getIdentifier(Name);
-  UnqualifiedLookup Lookup(ID, Stdlib, nullptr, SourceLoc(),
-                           UnqualifiedLookup::Flags::KnownPrivate |
-                               UnqualifiedLookup::Flags::TypeLookup);
-  if (auto Proto
-        = dyn_cast_or_null<ProtocolDecl>(Lookup.getSingleTypeResult()))
-    Proto->setKnownProtocolKind(Kind);
-}
-
-void ASTContext::recordKnownProtocols(ModuleDecl *Stdlib) {
-#define PROTOCOL_WITH_NAME(Id, Name) \
-  recordKnownProtocol(Stdlib, Name, KnownProtocolKind::Id);
-#include "swift/AST/KnownProtocols.def"
 }
 
 ModuleDecl *ASTContext::getLoadedModule(
@@ -1753,10 +1756,6 @@ ASTContext::getModule(ArrayRef<std::pair<Identifier, SourceLoc>> ModulePath) {
   auto moduleID = ModulePath[0];
   for (auto &importer : getImpl().ModuleLoaders) {
     if (ModuleDecl *M = importer->loadModule(moduleID.second, ModulePath)) {
-      if (ModulePath.size() == 1 &&
-          (ModulePath[0].first == StdlibModuleName ||
-           ModulePath[0].first == Id_Foundation))
-        recordKnownProtocols(M);
       return M;
     }
   }
@@ -1999,6 +1998,19 @@ LazyGenericContextData *ASTContext::getOrCreateLazyGenericContextData(
                                                               lazyLoader);
 }
 
+bool ASTContext::hasDelayedConformanceErrors() const {
+  for (const auto &entry : getImpl().DelayedConformanceDiags) {
+    auto &diagnostics = entry.getSecond();
+    if (std::any_of(diagnostics.begin(), diagnostics.end(),
+                    [](const ASTContext::DelayedConformanceDiag &diag) {
+                      return diag.IsError;
+                    }))
+      return true;
+  }
+
+  return false;
+}
+
 void ASTContext::addDelayedConformanceDiag(
        NormalProtocolConformance *conformance,
        DelayedConformanceDiag fn) {
@@ -2083,16 +2095,18 @@ size_t ASTContext::Implementation::Arena::getTotalMemory() const {
     llvm::capacity_in_bytes(ArraySliceTypes) +
     llvm::capacity_in_bytes(DictionaryTypes) +
     llvm::capacity_in_bytes(OptionalTypes) +
+    llvm::capacity_in_bytes(SimpleParenTypes) +
     llvm::capacity_in_bytes(ParenTypes) +
     llvm::capacity_in_bytes(ReferenceStorageTypes) +
     llvm::capacity_in_bytes(LValueTypes) +
     llvm::capacity_in_bytes(InOutTypes) +
     llvm::capacity_in_bytes(DependentMemberTypes) +
+    llvm::capacity_in_bytes(EnumTypes) +
+    llvm::capacity_in_bytes(StructTypes) +
+    llvm::capacity_in_bytes(ClassTypes) +
+    llvm::capacity_in_bytes(ProtocolTypes) +
     llvm::capacity_in_bytes(DynamicSelfTypes);
     // FunctionTypes ?
-    // EnumTypes ?
-    // StructTypes ?
-    // ClassTypes ?
     // UnboundGenericTypes ?
     // BoundGenericTypes ?
     // NormalConformances ?
@@ -2896,30 +2910,30 @@ StringRef ASTContext::getSwiftName(KnownFoundationEntity kind) {
 // Type manipulation routines.
 //===----------------------------------------------------------------------===//
 
-NameAliasType::NameAliasType(TypeAliasDecl *typealias, Type parent,
+TypeAliasType::TypeAliasType(TypeAliasDecl *typealias, Type parent,
                              SubstitutionMap substitutions,
                              Type underlying,
                              RecursiveTypeProperties properties)
-    : SugarType(TypeKind::NameAlias, underlying, properties),
+    : SugarType(TypeKind::TypeAlias, underlying, properties),
       typealias(typealias) {
   // Record the parent (or absence of a parent).
   if (parent) {
-    Bits.NameAliasType.HasParent = true;
+    Bits.TypeAliasType.HasParent = true;
     *getTrailingObjects<Type>() = parent;
   } else {
-    Bits.NameAliasType.HasParent = false;
+    Bits.TypeAliasType.HasParent = false;
   }
 
   // Record the substitutions.
   if (substitutions) {
-    Bits.NameAliasType.HasSubstitutionMap = true;
+    Bits.TypeAliasType.HasSubstitutionMap = true;
     *getTrailingObjects<SubstitutionMap>() = substitutions;
   } else {
-    Bits.NameAliasType.HasSubstitutionMap = false;
+    Bits.TypeAliasType.HasSubstitutionMap = false;
   }
 }
 
-NameAliasType *NameAliasType::get(TypeAliasDecl *typealias, Type parent,
+TypeAliasType *TypeAliasType::get(TypeAliasDecl *typealias, Type parent,
                                   SubstitutionMap substitutions,
                                   Type underlying) {
   // Compute the recursive properties.
@@ -2947,30 +2961,30 @@ NameAliasType *NameAliasType::get(TypeAliasDecl *typealias, Type parent,
 
   // Profile the type.
   llvm::FoldingSetNodeID id;
-  NameAliasType::Profile(id, typealias, parent, substitutions, underlying);
+  TypeAliasType::Profile(id, typealias, parent, substitutions, underlying);
 
   // Did we already record this type?
   void *insertPos;
-  auto &types = ctx.getImpl().getArena(arena).NameAliasTypes;
+  auto &types = ctx.getImpl().getArena(arena).TypeAliasTypes;
   if (auto result = types.FindNodeOrInsertPos(id, insertPos))
     return result;
 
   // Build a new type.
   auto size = totalSizeToAlloc<Type, SubstitutionMap>(parent ? 1 : 0,
                                                       genericSig ? 1 : 0);
-  auto mem = ctx.Allocate(size, alignof(NameAliasType), arena);
-  auto result = new (mem) NameAliasType(typealias, parent, substitutions,
+  auto mem = ctx.Allocate(size, alignof(TypeAliasType), arena);
+  auto result = new (mem) TypeAliasType(typealias, parent, substitutions,
                                         underlying, storedProperties);
   types.InsertNode(result, insertPos);
   return result;
 }
 
-void NameAliasType::Profile(llvm::FoldingSetNodeID &id) const {
+void TypeAliasType::Profile(llvm::FoldingSetNodeID &id) const {
   Profile(id, getDecl(), getParent(), getSubstitutionMap(),
           Type(getSinglyDesugaredType()));
 }
 
-void NameAliasType::Profile(
+void TypeAliasType::Profile(
                            llvm::FoldingSetNodeID &id,
                            TypeAliasDecl *typealias,
                            Type parent, SubstitutionMap substitutions,
@@ -3039,8 +3053,10 @@ ParenType *ParenType::get(const ASTContext &C, Type underlying,
   
   auto properties = underlying->getRecursiveProperties();
   auto arena = getArena(properties);
-  ParenType *&Result =
-      C.getImpl().getArena(arena).ParenTypes[{underlying, fl.toRaw()}];
+  auto flags = fl.toRaw();
+  ParenType *&Result = flags == 0
+      ? C.getImpl().getArena(arena).SimpleParenTypes[underlying]
+      : C.getImpl().getArena(arena).ParenTypes[{underlying, flags}];
   if (Result == nullptr) {
     Result = new (C, arena) ParenType(underlying,
                                       properties, fl);
@@ -3357,26 +3373,15 @@ EnumType::EnumType(EnumDecl *TheDecl, Type Parent, const ASTContext &C,
   : NominalType(TypeKind::Enum, &C, TheDecl, Parent, properties) { }
 
 EnumType *EnumType::get(EnumDecl *D, Type Parent, const ASTContext &C) {
-  llvm::FoldingSetNodeID id;
-  EnumType::Profile(id, D, Parent);
-
   RecursiveTypeProperties properties;
   if (Parent) properties |= Parent->getRecursiveProperties();
   auto arena = getArena(properties);
 
-  void *insertPos = nullptr;
-  if (auto enumTy
-        = C.getImpl().getArena(arena).EnumTypes.FindNodeOrInsertPos(id, insertPos))
-    return enumTy;
-
-  auto enumTy = new (C, arena) EnumType(D, Parent, C, properties);
-  C.getImpl().getArena(arena).EnumTypes.InsertNode(enumTy, insertPos);
-  return enumTy;
-}
-
-void EnumType::Profile(llvm::FoldingSetNodeID &ID, EnumDecl *D, Type Parent) {
-  ID.AddPointer(D);
-  ID.AddPointer(Parent.getPointer());
+  auto *&known = C.getImpl().getArena(arena).EnumTypes[{D, Parent}];
+  if (!known) {
+    known = new (C, arena) EnumType(D, Parent, C, properties);
+  }
+  return known;
 }
 
 StructType::StructType(StructDecl *TheDecl, Type Parent, const ASTContext &C,
@@ -3384,26 +3389,15 @@ StructType::StructType(StructDecl *TheDecl, Type Parent, const ASTContext &C,
   : NominalType(TypeKind::Struct, &C, TheDecl, Parent, properties) { }
 
 StructType *StructType::get(StructDecl *D, Type Parent, const ASTContext &C) {
-  llvm::FoldingSetNodeID id;
-  StructType::Profile(id, D, Parent);
-
   RecursiveTypeProperties properties;
   if (Parent) properties |= Parent->getRecursiveProperties();
   auto arena = getArena(properties);
 
-  void *insertPos = nullptr;
-  if (auto structTy
-        = C.getImpl().getArena(arena).StructTypes.FindNodeOrInsertPos(id, insertPos))
-    return structTy;
-
-  auto structTy = new (C, arena) StructType(D, Parent, C, properties);
-  C.getImpl().getArena(arena).StructTypes.InsertNode(structTy, insertPos);
-  return structTy;
-}
-
-void StructType::Profile(llvm::FoldingSetNodeID &ID, StructDecl *D, Type Parent) {
-  ID.AddPointer(D);
-  ID.AddPointer(Parent.getPointer());
+  auto *&known = C.getImpl().getArena(arena).StructTypes[{D, Parent}];
+  if (!known) {
+    known = new (C, arena) StructType(D, Parent, C, properties);
+  }
+  return known;
 }
 
 ClassType::ClassType(ClassDecl *TheDecl, Type Parent, const ASTContext &C,
@@ -3411,26 +3405,15 @@ ClassType::ClassType(ClassDecl *TheDecl, Type Parent, const ASTContext &C,
   : NominalType(TypeKind::Class, &C, TheDecl, Parent, properties) { }
 
 ClassType *ClassType::get(ClassDecl *D, Type Parent, const ASTContext &C) {
-  llvm::FoldingSetNodeID id;
-  ClassType::Profile(id, D, Parent);
-
   RecursiveTypeProperties properties;
   if (Parent) properties |= Parent->getRecursiveProperties();
   auto arena = getArena(properties);
 
-  void *insertPos = nullptr;
-  if (auto classTy
-        = C.getImpl().getArena(arena).ClassTypes.FindNodeOrInsertPos(id, insertPos))
-    return classTy;
-
-  auto classTy = new (C, arena) ClassType(D, Parent, C, properties);
-  C.getImpl().getArena(arena).ClassTypes.InsertNode(classTy, insertPos);
-  return classTy;
-}
-
-void ClassType::Profile(llvm::FoldingSetNodeID &ID, ClassDecl *D, Type Parent) {
-  ID.AddPointer(D);
-  ID.AddPointer(Parent.getPointer());
+  auto *&known = C.getImpl().getArena(arena).ClassTypes[{D, Parent}];
+  if (!known) {
+    known = new (C, arena) ClassType(D, Parent, C, properties);
+  }
+  return known;
 }
 
 ProtocolCompositionType *
@@ -3519,13 +3502,16 @@ MetatypeType *MetatypeType::get(Type T, Optional<MetatypeRepresentation> Repr,
   auto properties = T->getRecursiveProperties();
   auto arena = getArena(properties);
 
-  char reprKey;
+  unsigned reprKey;
   if (Repr.hasValue())
-    reprKey = static_cast<char>(*Repr) + 1;
+    reprKey = static_cast<unsigned>(*Repr) + 1;
   else
     reprKey = 0;
 
-  MetatypeType *&Entry = Ctx.getImpl().getArena(arena).MetatypeTypes[{T, reprKey}];
+  auto pair = llvm::PointerIntPair<TypeBase*, 3, unsigned>(T.getPointer(),
+                                                           reprKey);
+
+  MetatypeType *&Entry = Ctx.getImpl().getArena(arena).MetatypeTypes[pair];
   if (Entry) return Entry;
 
   return Entry = new (Ctx, arena) MetatypeType(
@@ -3544,13 +3530,16 @@ ExistentialMetatypeType::get(Type T, Optional<MetatypeRepresentation> repr,
   auto properties = T->getRecursiveProperties();
   auto arena = getArena(properties);
 
-  char reprKey;
+  unsigned reprKey;
   if (repr.hasValue())
-    reprKey = static_cast<char>(*repr) + 1;
+    reprKey = static_cast<unsigned>(*repr) + 1;
   else
     reprKey = 0;
 
-  auto &entry = ctx.getImpl().getArena(arena).ExistentialMetatypeTypes[{T, reprKey}];
+  auto pair = llvm::PointerIntPair<TypeBase*, 3, unsigned>(T.getPointer(),
+                                                           reprKey);
+
+  auto &entry = ctx.getImpl().getArena(arena).ExistentialMetatypeTypes[pair];
   if (entry) return entry;
 
   return entry = new (ctx, arena) ExistentialMetatypeType(
@@ -4166,34 +4155,21 @@ OptionalType *OptionalType::get(Type base) {
 
 ProtocolType *ProtocolType::get(ProtocolDecl *D, Type Parent,
                                 const ASTContext &C) {
-  llvm::FoldingSetNodeID id;
-  ProtocolType::Profile(id, D, Parent);
-
   RecursiveTypeProperties properties;
   if (Parent) properties |= Parent->getRecursiveProperties();
   auto arena = getArena(properties);
 
-  void *insertPos = nullptr;
-  if (auto protoTy
-        = C.getImpl().getArena(arena).ProtocolTypes.FindNodeOrInsertPos(id, insertPos))
-    return protoTy;
-
-  auto protoTy = new (C, arena) ProtocolType(D, Parent, C, properties);
-  C.getImpl().getArena(arena).ProtocolTypes.InsertNode(protoTy, insertPos);
-
-  return protoTy;
+  auto *&known = C.getImpl().getArena(arena).ProtocolTypes[{D, Parent}];
+  if (!known) {
+    known = new (C, arena) ProtocolType(D, Parent, C, properties);
+  }
+  return known;
 }
 
 ProtocolType::ProtocolType(ProtocolDecl *TheDecl, Type Parent,
                            const ASTContext &Ctx,
                            RecursiveTypeProperties properties)
   : NominalType(TypeKind::Protocol, &Ctx, TheDecl, Parent, properties) { }
-
-void ProtocolType::Profile(llvm::FoldingSetNodeID &ID, ProtocolDecl *D,
-                           Type Parent) {
-  ID.AddPointer(D);
-  ID.AddPointer(Parent.getPointer());
-}
 
 LValueType *LValueType::get(Type objectTy) {
   assert(!objectTy->hasError() &&
@@ -4311,9 +4287,26 @@ CanOpenedArchetypeType OpenedArchetypeType::get(Type existential,
       ::new (mem) OpenedArchetypeType(ctx, existential,
                                 protos, layoutSuperclass,
                                 layoutConstraint, *knownID);
+  result->InterfaceType = GenericTypeParamType::get(0, 0, ctx);
+  
   openedExistentialArchetypes[*knownID] = result;
-
   return CanOpenedArchetypeType(result);
+}
+
+GenericEnvironment *OpenedArchetypeType::getGenericEnvironment() const {
+  if (Environment)
+    return Environment;
+  
+  auto thisType = Type(const_cast<OpenedArchetypeType*>(this));
+  auto &ctx = thisType->getASTContext();
+  // Create a generic environment to represent the opened type.
+  auto signature = ctx.getExistentialSignature(Opened->getCanonicalType(),
+                                               nullptr);
+  auto env = signature->createGenericEnvironment();
+  env->addMapping(signature->getGenericParams()[0], thisType);
+  Environment = env;
+  
+  return env;
 }
 
 CanType OpenedArchetypeType::getAny(Type existential) {
@@ -5061,4 +5054,7 @@ LayoutConstraint LayoutConstraint::getLayoutConstraint(LayoutConstraintKind Kind
   return LayoutConstraint(New);
 }
 
-
+Type &ASTContext::getDefaultTypeRequestCache(SourceFile *SF,
+                                             KnownProtocolKind kind) {
+  return getImpl().DefaultTypeRequestCaches[SF][size_t(kind)];
+}

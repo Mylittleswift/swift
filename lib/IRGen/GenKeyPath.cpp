@@ -24,6 +24,7 @@
 #include "GenMeta.h"
 #include "GenProto.h"
 #include "GenStruct.h"
+#include "GenTuple.h"
 #include "GenType.h"
 #include "GenericRequirement.h"
 #include "IRGenDebugInfo.h"
@@ -36,6 +37,7 @@
 #include "TypeInfo.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Function.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILLocation.h"
 #include "swift/SIL/TypeLowering.h"
@@ -837,6 +839,15 @@ emitKeyPathComponent(IRGenModule &IGM,
     // ObjC-ness and resilience of the class hierarchy, there might be a few
     // different ways we need to go about this.
     if (loweredBaseTy.getClassOrBoundGenericClass()) {
+
+      // Use the property's class type to determine the field access.
+      auto propertyBaseDecl = property->getDeclContext()->getSelfClassDecl();
+      auto currentBaseTy =
+          loweredBaseTy.getASTType()->getSuperclassForDecl(propertyBaseDecl);
+      assert(currentBaseTy->getClassOrBoundGenericClass() == propertyBaseDecl);
+      loweredBaseTy =
+          IGM.getLoweredType(AbstractionPattern::getOpaque(), currentBaseTy);
+
       switch (getClassFieldAccess(IGM, loweredBaseTy, property)) {
       case FieldAccess::ConstantDirect: {
         // Known constant fixed offset.
@@ -938,7 +949,7 @@ emitKeyPathComponent(IRGenModule &IGM,
     auto id = component.getComputedPropertyId();
     KeyPathComponentHeader::ComputedPropertyIDKind idKind;
     llvm::Constant *idValue;
-    bool idResolved;
+    KeyPathComponentHeader::ComputedPropertyIDResolution idResolution;
     switch (id.getKind()) {
     case KeyPathPatternComponent::ComputedPropertyId::Function: {
       idKind = KeyPathComponentHeader::Pointer;
@@ -948,7 +959,9 @@ emitKeyPathComponent(IRGenModule &IGM,
       idValue = idRef.getValue();
       // If we got an indirect reference, we'll need to resolve it at
       // instantiation time.
-      idResolved = !idRef.isIndirect();
+      idResolution = idRef.isIndirect()
+        ? KeyPathComponentHeader::IndirectPointer
+        : KeyPathComponentHeader::Resolved;
       break;
     }
     case KeyPathPatternComponent::ComputedPropertyId::DeclRef: {
@@ -960,8 +973,35 @@ emitKeyPathComponent(IRGenModule &IGM,
       if (declRef.isForeign) {
         assert(IGM.ObjCInterop && "foreign keypath component w/o objc interop?!");
         idKind = KeyPathComponentHeader::Pointer;
-        idValue = IGM.getAddrOfObjCSelectorRef(declRef);
-        idResolved = false;
+        // FIXME: In non-JIT mode, ideally we would just refer to the selector
+        // reference variable here with an indirectpointer resolution,
+        // but ld64 section coalescing on the __objc_sel section can break
+        // relative references (and on some platforms, mach-o just doesn't
+        // support the necessary relocations).
+        // As a workaround, generate a stub function to resolve the selector.
+        //
+        // Note that we'd need to do this anyway in JIT mode because we would
+        // need to unique the selector at runtime anyway.
+        auto selectorName = IGM.getObjCSelectorName(declRef);
+        llvm::Type *fnParams[] = {IGM.Int8PtrTy};
+        auto fnTy = llvm::FunctionType::get(IGM.Int8PtrTy, fnParams, false);
+        SmallString<32> fnName;
+        fnName.append("keypath_get_selector_");
+        fnName.append(selectorName);
+        auto fn = cast<llvm::Function>(
+          IGM.Module.getOrInsertFunction(fnName, fnTy));
+        if (fn->empty()) {
+          fn->setLinkage(llvm::Function::PrivateLinkage);
+          IRGenFunction subIGF(IGM, fn);
+          if (IGM.DebugInfo)
+            IGM.DebugInfo->emitArtificialFunction(subIGF, fn);
+          
+          auto selectorValue = subIGF.emitObjCSelectorRefLoad(selectorName);
+          subIGF.Builder.CreateRet(selectorValue);
+        }
+        
+        idValue = fn;
+        idResolution = KeyPathComponentHeader::FunctionCall;
       } else {
         if (auto overridden = declRef.getOverriddenVTableEntry())
           declRef = overridden;
@@ -980,7 +1020,9 @@ emitKeyPathComponent(IRGenModule &IGM,
             LinkEntity::forMethodDescriptor(declRef));
 
           idValue = idRef.getValue();
-          idResolved = !idRef.isIndirect();
+          idResolution = idRef.isIndirect()
+            ? KeyPathComponentHeader::IndirectPointer
+            : KeyPathComponentHeader::Resolved;
           break;
         }
       
@@ -991,7 +1033,7 @@ emitKeyPathComponent(IRGenModule &IGM,
         auto index = protoInfo.getFunctionIndex(
                              cast<AbstractFunctionDecl>(declRef.getDecl()));
         idValue = llvm::ConstantInt::get(IGM.SizeTy, -index.getValue());
-        idResolved = true;
+        idResolution = KeyPathComponentHeader::Resolved;
       }
       break;
     }
@@ -1004,7 +1046,7 @@ emitKeyPathComponent(IRGenModule &IGM,
         // Scan the stored properties of the struct to find the index. We should
         // only ever use a struct field as a uniquing key from inside the
         // struct's own module, so this is OK.
-        idResolved = true;
+        idResolution = KeyPathComponentHeader::Resolved;
         Optional<unsigned> structIdx;
         unsigned i = 0;
         for (auto storedProp : struc->getStoredProperties()) {
@@ -1025,7 +1067,7 @@ emitKeyPathComponent(IRGenModule &IGM,
         case FieldAccess::ConstantDirect:
         case FieldAccess::ConstantIndirect:
         case FieldAccess::NonConstantDirect:
-          idResolved = true;
+          idResolution = KeyPathComponentHeader::Resolved;
           idValue = llvm::ConstantInt::get(IGM.SizeTy,
                                        getClassFieldIndex(classDecl, property));
           break;
@@ -1038,7 +1080,7 @@ emitKeyPathComponent(IRGenModule &IGM,
     }
     
     auto header = KeyPathComponentHeader::forComputedProperty(componentKind,
-                                      idKind, !isInstantiableOnce, idResolved);
+                                     idKind, !isInstantiableOnce, idResolution);
     
     fields.addInt32(header.getData());
     switch (idKind) {
@@ -1105,6 +1147,39 @@ emitKeyPathComponent(IRGenModule &IGM,
   case KeyPathPatternComponent::Kind::OptionalWrap:
     fields.addInt32(KeyPathComponentHeader::forOptionalWrap().getData());
     break;
+  case KeyPathPatternComponent::Kind::TupleElement:
+    assert(baseTy->is<TupleType>() && "not a tuple");
+
+    SILType loweredTy = IGM.getLoweredType(baseTy);
+
+    // Tuple with fixed layout
+    //
+    // This code is ALSO executed in the case of a tuple with dynamic layout,
+    // (see below) but only if `component.getTupleIndex()` is 0 - in that case
+    // the compiler knows that the tuple element is always at offset 0.
+    // TODO: If this is behavior is not desired we should find a way to skip to
+    // the next section of code e.g. check if baseTy has archetypes?
+    if (auto offset = getFixedTupleElementOffset(IGM, loweredTy, component.getTupleIndex())) {
+      auto header = KeyPathComponentHeader
+                      ::forStructComponentWithInlineOffset(/*isLet*/ false,
+                                                           offset->getValue());
+
+      fields.addInt32(header.getData());
+      break;
+    }
+
+    // Tuple with dynamic layout
+    auto elementOffset = getStaticTupleElementOffset(IGM,
+                                                     loweredTy,
+                                                     component.getTupleIndex());
+
+    auto header = KeyPathComponentHeader
+      ::forStructComponentWithUnresolvedFieldOffset(/*isLet*/ false);
+    fields.addInt32(header.getData());
+    fields.addInt32(elementOffset.getValue());
+    break;
+
+    llvm_unreachable("could not get tuple element offset");
   }
 }
 
@@ -1198,6 +1273,7 @@ IRGenModule::getAddrOfKeyPathPattern(KeyPathPattern *pattern,
     case KeyPathPatternComponent::Kind::OptionalChain:
     case KeyPathPatternComponent::Kind::OptionalForce:
     case KeyPathPatternComponent::Kind::OptionalWrap:
+    case KeyPathPatternComponent::Kind::TupleElement:
       break;
     }
   }
@@ -1260,14 +1336,18 @@ void IRGenModule::emitSILProperty(SILProperty *prop) {
       var->setConstant(true);
       var->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
       var->setAlignment(4);
-      
+
       TheTrivialPropertyDescriptor = var;
     } else {
       auto entity = LinkEntity::forPropertyDescriptor(prop->getDecl());
       auto linkInfo = LinkInfo::get(*this, entity, ForDefinition);
-      llvm::GlobalAlias::create(linkInfo.getLinkage(),
-                                linkInfo.getName(),
-                                TheTrivialPropertyDescriptor);
+      auto *GA = llvm::GlobalAlias::create(linkInfo.getLinkage(),
+                                           linkInfo.getName(),
+                                           TheTrivialPropertyDescriptor);
+      ApplyIRLinkage({linkInfo.getLinkage(),
+                      linkInfo.getVisibility(),
+                      llvm::GlobalValue::DLLExportStorageClass})
+          .to(GA);
     }
     return;
   }

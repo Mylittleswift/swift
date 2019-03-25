@@ -1016,6 +1016,9 @@ bb0(%0 : $ConcreteClass):
 sil @test_assign : $(Int, @inout Int) -> () {    // CHECK-LABEL: sil @test_assign
 bb0(%0 : $Int, %1 : $*Int):
   assign %0 to %1 : $*Int                   // CHECK:   assign %0 to %1
+  assign %0 to [init] %1 : $*Int            // CHECK:   assign %0 to [init] %1
+  assign %0 to [reinit] %1 : $*Int          // CHECK:   assign %0 to [reinit] %1
+  assign %0 to [reassign] %1 : $*Int          // CHECK:   assign %0 to [reassign] %1
   unreachable
 }
 
@@ -1344,15 +1347,11 @@ entry(%0 : $@convention(thin) (AnyObject) -> Optional<AnyObject>):
 // CHECK-LABEL: sil @convert_function_trivial
 // CHECK:  %1 = convert_escape_to_noescape %0 : $@callee_guaranteed (AnyObject) -> Optional<AnyObject> to $@noescape @callee_guaranteed (Optional<AnyObject>) -> AnyObject
 // CHECK:  %2 = convert_escape_to_noescape [not_guaranteed] %0 : $@callee_guaranteed (AnyObject) -> Optional<AnyObject> to $@noescape @callee_guaranteed (Optional<AnyObject>) -> AnyObject
-// CHECK:  %3 = convert_escape_to_noescape [escaped] %0 : $@callee_guaranteed (AnyObject) -> Optional<AnyObject> to $@noescape @callee_guaranteed (Optional<AnyObject>) -> AnyObject
-// CHECK:  %4 = convert_escape_to_noescape [not_guaranteed] [escaped] %0 : $@callee_guaranteed (AnyObject) -> Optional<AnyObject> to $@noescape @callee_guaranteed (Optional<AnyObject>) -> AnyObject
 // CHECK: return
 sil @convert_function_trivial : $@convention(thin) (@owned @callee_guaranteed (AnyObject) -> Optional<AnyObject>) -> () {
 entry(%0 : $@callee_guaranteed (AnyObject) -> Optional<AnyObject>):
   %1 = convert_escape_to_noescape %0 : $@callee_guaranteed (AnyObject) -> Optional<AnyObject> to $@noescape @callee_guaranteed (Optional<AnyObject>) -> AnyObject
   %2 = convert_escape_to_noescape [not_guaranteed] %0 : $@callee_guaranteed (AnyObject) -> Optional<AnyObject> to $@noescape @callee_guaranteed (Optional<AnyObject>) -> AnyObject
-  %3 = convert_escape_to_noescape [escaped] %0 : $@callee_guaranteed (AnyObject) -> Optional<AnyObject> to $@noescape @callee_guaranteed (Optional<AnyObject>) -> AnyObject
-  %4 = convert_escape_to_noescape [not_guaranteed] [escaped] %0 : $@callee_guaranteed (AnyObject) -> Optional<AnyObject> to $@noescape @callee_guaranteed (Optional<AnyObject>) -> AnyObject
   return undef : $()
 }
 

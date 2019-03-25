@@ -67,6 +67,13 @@
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=SUBSCRIPT_3 | %FileCheck %s -check-prefix=SUBSCRIPT_3
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=SUBSCRIPT_3_DOT | %FileCheck %s -check-prefix=SUBSCRIPT_3_DOT
 
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=ERRORCONTEXT_NESTED_1 | %FileCheck %s -check-prefix=ERRORCONTEXT_NESTED_1
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=ERRORCONTEXT_NESTED_2 | %FileCheck %s -check-prefix=ERRORCONTEXT_NESTED_1
+
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=CURRIED_SELF_1 | %FileCheck %s -check-prefix=CURRIED_SELF_1
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=CURRIED_SELF_2 | %FileCheck %s -check-prefix=CURRIED_SELF_1
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=CURRIED_SELF_3 | %FileCheck %s -check-prefix=CURRIED_SELF_1
+
 var i1 = 1
 var i2 = 2
 var oi1 : Int?
@@ -571,4 +578,34 @@ func testSubscript(obj: HasSubscript, intValue: Int, strValue: String) {
 // SUBSCRIPT_3_DOT-DAG: Decl[Constructor]/CurrNominal/TypeRelation[Identical]: init()[#String#]; name=init()
 // SUBSCRIPT_3_DOT-DAG: Decl[Constructor]/CurrNominal/TypeRelation[Identical]: init({#(c): Character#})[#String#]; name=init(c: Character)
 
+}
+
+func testNestedContext() {
+  func foo(_ x: Int) {}
+  func bar(_ y: TypeInvalid) -> Int {}
+
+  let _ = foo(bar(#^ERRORCONTEXT_NESTED_1^#))
+// ERRORCONTEXT_NESTED_1: Begin completions
+// ERRORCONTEXT_NESTED_1-DAG: Decl[GlobalVar]/CurrModule: i1[#Int#]; name=i1
+// ERRORCONTEXT_NESTED_1-DAG: Decl[GlobalVar]/CurrModule: i2[#Int#]; name=i2
+// ERRORCONTEXT_NESTED_1-NOT: TypeRelation[Identical]
+
+  for _ in [bar(#^ERRORCONTEXT_NESTED_2^#)] {}
+// Same as ERRORCONTEXT_NESTED_1.
+}
+
+class TestImplicitlyCurriedSelf {
+  func foo(x: Int) { }
+  func foo(arg: Int, optArg: Int) { }
+
+  static func test() {
+    foo(#^CURRIED_SELF_1^#
+    self.foo(#^CURRIED_SELF_2^#
+    TestImplicitlyCurriedSelf.foo(#^CURRIED_SELF_3^#
+
+// CURRIED_SELF_1: Begin completions, 2 items
+// CURRIED_SELF_1-DAG: Pattern/CurrModule: ['(']{#(self): TestImplicitlyCurriedSelf#}[')'][#(Int) -> ()#]{{; name=.+$}}
+// CURRIED_SELF_1-DAG: Pattern/CurrModule: ['(']{#(self): TestImplicitlyCurriedSelf#}[')'][#(Int, Int) -> ()#]{{; name=.+$}}
+// CURRIED_SELF_1: End completions
+  }
 }

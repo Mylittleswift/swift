@@ -174,8 +174,6 @@ enum class ConstraintClassification : char {
 /// a superclass conversion from A to B or there might be a user-defined
 /// conversion from A to B. The solver may need to explore both paths.
 enum class ConversionRestrictionKind {
-  /// Tuple-to-tuple conversion.
-  TupleToTuple,
   /// Deep equality comparison.
   DeepEquality,
   /// Subclass-to-superclass conversion.
@@ -194,8 +192,6 @@ enum class ConversionRestrictionKind {
   StringToPointer,
   /// Pointer-to-pointer conversion.
   PointerToPointer,
-  /// Lvalue-to-rvalue conversion.
-  LValueToRValue,
   /// Value to existential value conversion, or existential erasure.
   Existential,
   /// Metatype to existential metatype conversion.
@@ -343,9 +339,10 @@ class Constraint final : public llvm::ilist_node<Constraint>,
              ConstraintLocator *locator,
              ArrayRef<TypeVariableType *> typeVars);
 
-  /// Construct a new overload-binding constraint.
+  /// Construct a new overload-binding constraint, which might have a fix.
   Constraint(Type type, OverloadChoice choice, DeclContext *useDC,
-             ConstraintLocator *locator, ArrayRef<TypeVariableType *> typeVars);
+             ConstraintFix *fix, ConstraintLocator *locator,
+             ArrayRef<TypeVariableType *> typeVars);
 
   /// Construct a restricted constraint.
   Constraint(ConstraintKind kind, ConversionRestrictionKind restriction,
@@ -403,6 +400,13 @@ public:
                                  ConstraintFix *fix, Type first, Type second,
                                  ConstraintLocator *locator);
 
+  /// Create a bind overload choice with a fix.
+  /// Note: This constraint is going to be disabled by default.
+  static Constraint *createFixedChoice(ConstraintSystem &cs, Type type,
+                                       OverloadChoice choice,
+                                       DeclContext *useDC, ConstraintFix *fix,
+                                       ConstraintLocator *locator);
+
   /// Create a new disjunction constraint.
   static Constraint *createDisjunction(ConstraintSystem &cs,
                                        ArrayRef<Constraint *> constraints,
@@ -448,7 +452,7 @@ public:
   }
 
   /// Mark or retrieve whether this constraint should be favored in the system.
-  void setFavored() { IsFavored = true; }
+  void setFavored(bool favored = true) { IsFavored = favored; }
   bool isFavored() const { return IsFavored; }
 
   /// Whether the solver should remember which choice was taken for

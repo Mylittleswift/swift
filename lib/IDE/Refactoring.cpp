@@ -935,6 +935,7 @@ ExtractCheckResult checkExtractConditions(ResolvedRangeInfo &RangeInfo,
   switch (RangeInfo.RangeContext->getContextKind()) {
   case swift::DeclContextKind::Initializer:
   case swift::DeclContextKind::SubscriptDecl:
+  case swift::DeclContextKind::EnumElementDecl:
   case swift::DeclContextKind::AbstractFunctionDecl:
   case swift::DeclContextKind::AbstractClosureExpr:
   case swift::DeclContextKind::TopLevelCodeDecl:
@@ -1908,8 +1909,7 @@ public:
   IfExpr *getIf() {
     if (!Assign)
       return nullptr;
-
-    return dyn_cast<IfExpr>(Assign->getSrc());
+    return dyn_cast_or_null<IfExpr>(Assign->getSrc());
   }
 
   SourceRange getNameRange() {
@@ -2856,8 +2856,8 @@ static CallExpr *findTrailingClosureTarget(SourceManager &SM,
   if (!Args)
     return nullptr;
   Expr *LastArg;
-  if (auto *TSE = dyn_cast<TupleShuffleExpr>(Args))
-    Args = TSE->getSubExpr();
+  if (auto *ASE = dyn_cast<ArgumentShuffleExpr>(Args))
+    Args = ASE->getSubExpr();
   if (auto *PE = dyn_cast<ParenExpr>(Args)) {
     LastArg = PE->getSubExpr();
   } else {
@@ -2886,8 +2886,8 @@ bool RefactoringActionTrailingClosure::performChange() {
   if (!CE)
     return true;
   Expr *Args = CE->getArg();
-  if (auto *TSE = dyn_cast<TupleShuffleExpr>(Args))
-    Args = TSE->getSubExpr();
+  if (auto *ASE = dyn_cast<ArgumentShuffleExpr>(Args))
+    Args = ASE->getSubExpr();
 
   Expr *ClosureArg = nullptr;
   Expr *PrevArg = nullptr;

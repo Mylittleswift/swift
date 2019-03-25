@@ -32,6 +32,8 @@ class Triple;
 }
 
 namespace swift {
+class AvailabilityContext;
+
 namespace irgen {
 class IRGenModule;
 class Alignment;
@@ -158,8 +160,8 @@ class LinkEntity {
     SwiftMetaclassStub,
 
     /// A callback used by newer Objective-C runtimes to initialize class
-    /// metadata for classes where doesClassMetadataRequireUpdate() is true
-    /// but doesClassMetadataRequireInitialization() is false.
+    /// metadata for classes where getClassMetadataStrategy() is equal to
+    /// ClassMetadataStrategy::Update or ::FixedOrUpdate.
     ObjCMetadataUpdateFunction,
 
     /// A class metadata base offset global variable.  This stores the offset
@@ -894,9 +896,11 @@ public:
   }
 
   static LinkEntity
-  forDynamicallyReplaceableFunctionVariable(AbstractFunctionDecl *decl) {
+  forDynamicallyReplaceableFunctionVariable(AbstractFunctionDecl *decl,
+                                            bool isAllocator) {
     LinkEntity entity;
     entity.setForDecl(Kind::DynamicallyReplaceableFunctionVariableAST, decl);
+    entity.SecondaryPointer = isAllocator ? decl : nullptr;
     return entity;
   }
 
@@ -910,16 +914,20 @@ public:
   }
 
   static LinkEntity
-  forDynamicallyReplaceableFunctionKey(AbstractFunctionDecl *decl) {
+  forDynamicallyReplaceableFunctionKey(AbstractFunctionDecl *decl,
+                                       bool isAllocator) {
     LinkEntity entity;
     entity.setForDecl(Kind::DynamicallyReplaceableFunctionKeyAST, decl);
+    entity.SecondaryPointer = isAllocator ? decl : nullptr;
     return entity;
   }
 
   static LinkEntity
-  forDynamicallyReplaceableFunctionImpl(AbstractFunctionDecl *decl) {
+  forDynamicallyReplaceableFunctionImpl(AbstractFunctionDecl *decl,
+                                        bool isAllocator) {
     LinkEntity entity;
     entity.setForDecl(Kind::DynamicallyReplaceableFunctionImpl, decl);
+    entity.SecondaryPointer = isAllocator ? decl : nullptr;
     return entity;
   }
 
@@ -997,6 +1005,12 @@ public:
     assert(getKind() == Kind::SILFunction);
     return LINKENTITY_GET_FIELD(Data, IsDynamicallyReplaceableImpl);
   }
+  bool isAllocator() const {
+    assert(getKind() == Kind::DynamicallyReplaceableFunctionImpl ||
+           getKind() == Kind::DynamicallyReplaceableFunctionKeyAST ||
+           getKind() == Kind::DynamicallyReplaceableFunctionVariableAST);
+    return SecondaryPointer != nullptr;
+  }
   bool isValueWitness() const { return getKind() == Kind::ValueWitness; }
   CanType getType() const {
     assert(isTypeKind(getKind()));
@@ -1021,7 +1035,8 @@ public:
   }
 
   /// Determine whether this entity will be weak-imported.
-  bool isWeakImported(ModuleDecl *module) const;
+  bool isWeakImported(ModuleDecl *module,
+                      AvailabilityContext fromContext) const;
   
   /// Return the source file whose codegen should trigger emission of this
   /// link entity, if one can be identified.
@@ -1043,7 +1058,11 @@ struct IRLinkage {
   llvm::GlobalValue::DLLStorageClassTypes DLLStorage;
 
   static const IRLinkage InternalLinkOnceODR;
+  static const IRLinkage InternalWeakODR;
   static const IRLinkage Internal;
+
+  static const IRLinkage ExternalImport;
+  static const IRLinkage ExternalExport;
 };
 
 class ApplyIRLinkage {
@@ -1051,23 +1070,23 @@ class ApplyIRLinkage {
 public:
   ApplyIRLinkage(IRLinkage IRL) : IRL(IRL) {}
   void to(llvm::GlobalValue *GV) const {
+    llvm::Module *M = GV->getParent();
+    const llvm::Triple Triple(M->getTargetTriple());
+
     GV->setLinkage(IRL.Linkage);
     GV->setVisibility(IRL.Visibility);
-    GV->setDLLStorageClass(IRL.DLLStorage);
+    if (Triple.isOSBinFormatCOFF() && !Triple.isOSCygMing())
+      GV->setDLLStorageClass(IRL.DLLStorage);
+
+    // TODO: BFD and gold do not handle COMDATs properly
+    if (Triple.isOSBinFormatELF())
+      return;
 
     if (IRL.Linkage == llvm::GlobalValue::LinkOnceODRLinkage ||
-        IRL.Linkage == llvm::GlobalValue::WeakODRLinkage) {
-      llvm::Module *M = GV->getParent();
-      const llvm::Triple Triple(M->getTargetTriple());
-
-      // TODO: BFD and gold do not handle COMDATs properly
-      if (Triple.isOSBinFormatELF())
-        return;
-
+        IRL.Linkage == llvm::GlobalValue::WeakODRLinkage)
       if (Triple.supportsCOMDAT())
         if (llvm::GlobalObject *GO = dyn_cast<llvm::GlobalObject>(GV))
           GO->setComdat(M->getOrInsertComdat(GV->getName()));
-    }
   }
 };
 
@@ -1085,7 +1104,9 @@ public:
                       ForDefinition_t forDefinition);
 
   static LinkInfo get(const UniversalLinkageInfo &linkInfo,
-                      ModuleDecl *swiftModule, const LinkEntity &entity,
+                      ModuleDecl *swiftModule,
+                      AvailabilityContext availabilityContext,
+                      const LinkEntity &entity,
                       ForDefinition_t forDefinition);
 
   static LinkInfo get(const UniversalLinkageInfo &linkInfo, StringRef name,

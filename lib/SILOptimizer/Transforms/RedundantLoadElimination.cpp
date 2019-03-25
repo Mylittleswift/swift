@@ -1191,7 +1191,7 @@ void BlockState::dump(RLEContext &Ctx) {
 RLEContext::RLEContext(SILFunction *F, SILPassManager *PM, AliasAnalysis *AA,
                        TypeExpansionAnalysis *TE, PostOrderFunctionInfo *PO,
                        EpilogueARCFunctionInfo *EAFI, bool disableArrayLoads)
-    : Fn(F), PM(PM), AA(AA), TE(TE), Updater(F->getModule()), PO(PO), EAFI(EAFI),
+    : Fn(F), PM(PM), AA(AA), TE(TE), PO(PO), EAFI(EAFI),
       ArrayType(disableArrayLoads ?
                 F->getModule().getASTContext().getArrayDecl() : nullptr)
 #ifndef NDEBUG
@@ -1641,6 +1641,10 @@ public:
   /// The entry point to the transformation.
   void run() override {
     SILFunction *F = getFunction();
+    // FIXME: Handle ownership.
+    if (F->hasOwnership())
+      return;
+
     LLVM_DEBUG(llvm::dbgs() << "*** RLE on function: " << F->getName()
                             << " ***\n");
 

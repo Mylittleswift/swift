@@ -374,7 +374,7 @@ public:
 
     auto boxType = SGF.SGM.Types
       .getContextBoxTypeForCapture(decl,
-                     SGF.getLoweredType(decl->getType()).getASTType(),
+                     SGF.SGM.Types.getLoweredRValueType(decl->getType()),
                      SGF.F.getGenericEnvironment(),
                      /*mutable*/ true);
 
@@ -696,9 +696,12 @@ copyOrInitValueInto(SILGenFunction &SGF, SILLocation loc,
        getUnmanagedValue();
   }
 
+  assert(testBool->getType().getASTType()->isBool());
+  auto i1Value = SGF.emitUnwrapIntegerResult(loc, testBool);
+
   SILBasicBlock *contBB = SGF.B.splitBlockForFallthrough();
   auto falseBB = SGF.Cleanups.emitBlockForCleanups(getFailureDest(), loc);
-  SGF.B.createCondBranch(loc, testBool, contBB, falseBB);
+  SGF.B.createCondBranch(loc, i1Value, contBB, falseBB);
 
   SGF.B.setInsertionPoint(contBB);
 }
@@ -995,13 +998,7 @@ copyOrInitValueInto(SILGenFunction &SGF, SILLocation loc,
   assert(isInit && "Only initialization is supported for refutable patterns");
 
   // Extract the i1 from the Bool struct.
-  StructDecl *BoolStruct = cast<StructDecl>(SGF.getASTContext().getBoolDecl());
-  auto Members = BoolStruct->lookupDirect(SGF.getASTContext().Id_value_);
-  assert(Members.size() == 1 &&
-         "Bool should have only one property with name '_value'");
-  auto Member = dyn_cast<VarDecl>(Members[0]);
-  assert(Member &&"Bool should have a property with name '_value' of type Int1");
-  auto *i1Val = SGF.B.createStructExtract(loc, value.forward(SGF), Member);
+  auto i1Value = SGF.emitUnwrapIntegerResult(loc, value.forward(SGF));
 
   // Branch on the boolean based on whether we're testing for true or false.
   SILBasicBlock *trueBB = SGF.B.splitBlockForFallthrough();
@@ -1010,7 +1007,7 @@ copyOrInitValueInto(SILGenFunction &SGF, SILLocation loc,
 
   if (!pattern->getValue())
     std::swap(trueBB, falseBB);
-  SGF.B.createCondBranch(loc, i1Val, trueBB, falseBB);
+  SGF.B.createCondBranch(loc, i1Value, trueBB, falseBB);
   SGF.B.setInsertionPoint(contBB);
 }
 
@@ -1197,24 +1194,37 @@ void SILGenFunction::visitVarDecl(VarDecl *D) {
   // We handle emitting the variable storage when we see the pattern binding.
 }
 
-/// Emit a check that returns 1 if the running OS version is in
-/// the specified version range and 0 otherwise. The returned SILValue
-/// (which has type Builtin.Int1) represents the result of this check.
-SILValue SILGenFunction::emitOSVersionRangeCheck(SILLocation loc,
-                                                 const VersionRange &range) {
-  // Emit constants for the checked version range.
-  llvm::VersionTuple Vers = range.getLowerEndpoint();
+/// Emit literals for the major, minor, and subminor components of the version
+/// and return a tuple of SILValues for them.
+static std::tuple<SILValue, SILValue, SILValue>
+emitVersionLiterals(SILLocation loc, SILGenBuilder &B, ASTContext &ctx,
+                    llvm::VersionTuple Vers) {
   unsigned major = Vers.getMajor();
   unsigned minor =
       (Vers.getMinor().hasValue() ? Vers.getMinor().getValue() : 0);
   unsigned subminor =
       (Vers.getSubminor().hasValue() ? Vers.getSubminor().getValue() : 0);
 
-  SILType wordType = SILType::getBuiltinWordType(getASTContext());
+  SILType wordType = SILType::getBuiltinWordType(ctx);
 
   SILValue majorValue = B.createIntegerLiteral(loc, wordType, major);
   SILValue minorValue = B.createIntegerLiteral(loc, wordType, minor);
   SILValue subminorValue = B.createIntegerLiteral(loc, wordType, subminor);
+
+  return std::make_tuple(majorValue, minorValue, subminorValue);
+}
+
+/// Emit a check that returns 1 if the running OS version is in
+/// the specified version range and 0 otherwise. The returned SILValue
+/// (which has type Builtin.Int1) represents the result of this check.
+SILValue SILGenFunction::emitOSVersionRangeCheck(SILLocation loc,
+                                                 const VersionRange &range) {
+  // Emit constants for the checked version range.
+  SILValue majorValue;
+  SILValue minorValue;
+  SILValue subminorValue;
+  std::tie(majorValue, minorValue, subminorValue) =
+      emitVersionLiterals(loc, B, getASTContext(), range.getLowerEndpoint());
 
   // Emit call to _stdlib_isOSVersionAtLeast(major, minor, patch)
   FuncDecl *versionQueryDecl =
@@ -1264,6 +1274,7 @@ void SILGenFunction::emitStmtCondition(StmtCondition Cond, JumpDest FalseDest,
       // Evaluate the condition as an i1 value (guaranteed by Sema).
       FullExpr Scope(Cleanups, CleanupLocation(expr));
       booleanTestValue = emitRValue(expr).forwardAsSingleValue(*this, expr);
+      booleanTestValue = emitUnwrapIntegerResult(expr, booleanTestValue);
       booleanTestLoc = expr;
       break;
     }
@@ -1427,7 +1438,7 @@ void SILGenModule::emitExternalDefinition(Decl *d) {
     // Emit witness tables.
     auto nom = cast<NominalTypeDecl>(d);
     for (auto c : nom->getLocalConformances(ConformanceLookupKind::All,
-                                            nullptr, /*sorted=*/true)) {
+                                            nullptr)) {
       auto *proto = c->getProtocol();
       if (Lowering::TypeConverter::protocolRequiresWitnessTable(proto) &&
           isa<NormalProtocolConformance>(c) &&

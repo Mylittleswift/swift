@@ -83,6 +83,7 @@ IRGenMangler::withSymbolicReferences(IRGenModule &IGM,
                                   llvm::function_ref<void ()> body) {
   Mod = IGM.getSwiftModule();
   OptimizeProtocolNames = false;
+  UseObjCProtocolNames = true;
 
   llvm::SaveAndRestore<bool>
     AllowSymbolicReferencesLocally(AllowSymbolicReferences);
@@ -102,7 +103,8 @@ IRGenMangler::withSymbolicReferences(IRGenModule &IGM,
       // when the referent may be in another file, once the on-disk
       // ObjectMemoryReader can handle them.
       // Private entities are known to be accessible.
-      if (type->getEffectiveAccess() >= AccessLevel::Internal &&
+      auto formalAccessScope = type->getFormalAccessScope(nullptr, true);
+      if ((formalAccessScope.isPublic() || formalAccessScope.isInternal()) &&
           (!IGM.CurSourceFile ||
            IGM.CurSourceFile != type->getParentSourceFile()))
         return false;

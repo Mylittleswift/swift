@@ -228,31 +228,7 @@ ModuleDecl *TypeChecker::getStdlibModule(const DeclContext *dc) {
   }
 
   assert(StdlibModule && "no main module found");
-  Context.recordKnownProtocols(StdlibModule);
   return StdlibModule;
-}
-
-Type TypeChecker::lookupBoolType(const DeclContext *dc) {
-  if (!boolType) {
-    boolType = ([&] {
-      SmallVector<ValueDecl *, 2> results;
-      getStdlibModule(dc)->lookupValue({}, Context.getIdentifier("Bool"),
-                                       NLKind::QualifiedLookup, results);
-      if (results.size() != 1) {
-        diagnose(SourceLoc(), diag::broken_bool);
-        return Type();
-      }
-
-      auto tyDecl = dyn_cast<NominalTypeDecl>(results.front());
-      if (!tyDecl) {
-        diagnose(SourceLoc(), diag::broken_bool);
-        return Type();
-      }
-
-      return tyDecl->getDeclaredType();
-    })();
-  }
-  return *boolType;
 }
 
 /// Bind the given extension to the given nominal type.
@@ -493,7 +469,7 @@ void swift::performTypeChecking(SourceFile &SF, TopLevelContext &TLC,
   performNameBinding(SF, StartElem);
 
   {
-    SharedTimer timer("Type checking / Semantic analysis");
+    SharedTimer timer("Type checking and Semantic analysis");
 
     TC.setWarnLongFunctionBodies(WarnLongFunctionBodies);
     TC.setWarnLongExpressionTypeChecking(WarnLongExpressionTypeChecking);
@@ -667,6 +643,17 @@ void swift::typeCheckCompletionDecl(Decl *D) {
     TC.validateExtension(ext);
   else
     TC.validateDecl(cast<ValueDecl>(D));
+}
+
+void swift::typeCheckPatternBinding(PatternBindingDecl *PBD,
+                                    unsigned bindingIndex) {
+  assert(!PBD->isInitializerChecked(bindingIndex) &&
+         PBD->getInit(bindingIndex));
+
+  auto &Ctx = PBD->getASTContext();
+  DiagnosticSuppression suppression(Ctx.Diags);
+  TypeChecker &TC = createTypeChecker(Ctx);
+  TC.typeCheckPatternBinding(PBD, bindingIndex);
 }
 
 static Optional<Type> getTypeOfCompletionContextExpr(

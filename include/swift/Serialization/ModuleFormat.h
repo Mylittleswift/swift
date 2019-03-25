@@ -52,7 +52,7 @@ const uint16_t SWIFTMODULE_VERSION_MAJOR = 0;
 /// describe what change you made. The content of this comment isn't important;
 /// it just ensures a conflict if two people change the module format.
 /// Don't worry about adhering to the 80-column limit for this line.
-const uint16_t SWIFTMODULE_VERSION_MINOR = 470; // Last change: Remove @trivial
+const uint16_t SWIFTMODULE_VERSION_MINOR = 477; // SILUndef serialized with ownership kind
 
 using DeclIDField = BCFixed<31>;
 
@@ -107,7 +107,7 @@ using CharOffset = BitOffset;
 using CharOffsetField = BitOffsetField;
 
 using FileSizeField = BCVBR<16>;
-using FileModTimeField = BCVBR<16>;
+using FileModTimeOrContentHashField = BCVBR<16>;
 using FileHashField = BCVBR<16>;
 
 // These IDs must \em not be renumbered or reordered without incrementing
@@ -671,9 +671,10 @@ namespace input_block {
 
   using FileDependencyLayout = BCRecordLayout<
     FILE_DEPENDENCY,
-    FileSizeField,    // file size (for validation)
-    FileModTimeField, // file mtime (for validation)
-    BCBlob            // path
+    FileSizeField,                 // file size (for validation)
+    FileModTimeOrContentHashField, // mtime or content hash (for validation)
+    BCFixed<1>,                    // are we reading mtime (0) or hash (1)?
+    BCBlob                         // path
   >;
 }
 
@@ -693,7 +694,7 @@ namespace decls_block {
     TypeIDField  // canonical type (a fallback)
   >;
 
-  using NameAliasTypeLayout = BCRecordLayout<
+  using TypeAliasTypeLayout = BCRecordLayout<
     NAME_ALIAS_TYPE,
     DeclIDField,      // typealias decl
     TypeIDField,      // parent type
@@ -766,17 +767,24 @@ namespace decls_block {
     MetatypeRepresentationField        // representation
   >;
 
-  using ArchetypeTypeLayout = BCRecordLayout<
-    ARCHETYPE_TYPE,
+  using PrimaryArchetypeTypeLayout = BCRecordLayout<
+    PRIMARY_ARCHETYPE_TYPE,
     GenericEnvironmentIDField, // generic environment
-    TypeIDField                // interface type
+    BCVBR<4>, // generic type parameter depth
+    BCVBR<4>  // index + 1, or zero if we have a generic type parameter decl
   >;
 
-  using OpenedExistentialTypeLayout = BCRecordLayout<
-    OPENED_EXISTENTIAL_TYPE,
+  using OpenedArchetypeTypeLayout = BCRecordLayout<
+    OPENED_ARCHETYPE_TYPE,
     TypeIDField         // the existential type
   >;
-
+  
+  using NestedArchetypeTypeLayout = BCRecordLayout<
+    NESTED_ARCHETYPE_TYPE,
+    TypeIDField, // root archetype
+    TypeIDField // interface type relative to root
+  >;
+  
   using DynamicSelfTypeLayout = BCRecordLayout<
     DYNAMIC_SELF_TYPE,
     TypeIDField          // self type
@@ -1058,7 +1066,7 @@ namespace decls_block {
     // - the foreign error convention, if any
     // - inlinable body text, if any
   >;
-
+  
   // TODO: remove the unnecessary FuncDecl components here
   using AccessorLayout = BCRecordLayout<
     ACCESSOR_DECL,
@@ -1547,6 +1555,7 @@ namespace decls_block {
     BCFixed<1>, // implicit flag
     BCFixed<1>, // is unconditionally unavailable?
     BCFixed<1>, // is unconditionally deprecated?
+    BCFixed<1>, // is this PackageDescription version-specific kind?
     BC_AVAIL_TUPLE, // Introduced
     BC_AVAIL_TUPLE, // Deprecated
     BC_AVAIL_TUPLE, // Obsoleted

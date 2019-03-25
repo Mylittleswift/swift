@@ -117,7 +117,7 @@ enum class ResilienceStrategy : unsigned {
   /// Public nominal types: resilient
   /// Non-inlinable function bodies: resilient
   ///
-  /// This is the behavior with -enable-resilience.
+  /// This is the behavior with -enable-library-evolution.
   Resilient
 };
 
@@ -810,6 +810,14 @@ public:
     return nullptr;
   }
 
+  /// Returns the name to use when referencing entities in this file.
+  ///
+  /// Usually this is the module name itself, but certain Clang features allow
+  /// substituting another name instead.
+  virtual StringRef getExportedModuleName() const {
+    return getParentModule()->getName().str();
+  }
+
   /// Traverse the decls within this file.
   ///
   /// \returns true if traversal was aborted, false if it completed
@@ -1051,6 +1059,8 @@ public:
 
   virtual void
   getPrecedenceGroups(SmallVectorImpl<PrecedenceGroupDecl*> &results) const override;
+
+  virtual TypeDecl *lookupLocalType(llvm::StringRef MangledName) const override;
 
   virtual void
   getLocalTypeDecls(SmallVectorImpl<TypeDecl*> &results) const override;

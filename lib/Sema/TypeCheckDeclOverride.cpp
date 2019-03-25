@@ -120,6 +120,37 @@ Type swift::getMemberTypeForComparison(ASTContext &ctx, ValueDecl *member,
   return memberType;
 }
 
+static bool areAccessorsOverrideCompatible(AbstractStorageDecl *storage,
+                                           AbstractStorageDecl *parentStorage) {
+  // It's okay for the storage to disagree about whether to use a getter or
+  // a read accessor; we'll patch up any differences when setting overrides
+  // for the accessors.  We don't want to diagnose anything involving
+  // `@_borrowed` because it is not yet part of the language.
+
+  // All the other checks are for non-static storage only.
+  if (storage->isStatic())
+    return true;
+
+  // The storage must agree on whether reads are mutating.  For accessors,
+  // this is sufficient to imply that they use the same SelfAccessKind
+  // because we do not allow accessors to be consuming.
+  if (storage->isGetterMutating() != parentStorage->isGetterMutating())
+    return false;
+
+  // We allow covariance about whether the storage itself is mutable, so we
+  // can only check mutating-ness of setters if both have one.
+  if (storage->supportsMutation() && parentStorage->supportsMutation()) {
+    // The storage must agree on whether writes are mutating.
+    if (storage->isSetterMutating() != parentStorage->isSetterMutating())
+      return false;
+
+    // Those together should imply that read-write accesses have the same
+    // mutability.
+  }
+
+  return true;
+}
+
 bool swift::isOverrideBasedOnType(ValueDecl *decl, Type declTy,
                                   ValueDecl *parentDecl, Type parentDeclTy) {
   auto *genericSig =
@@ -149,6 +180,23 @@ bool swift::isOverrideBasedOnType(ValueDecl *decl, Type declTy,
     auto fnType2 = parentDeclTy->castTo<AnyFunctionType>();
     return AnyFunctionType::equalParams(fnType1->getParams(),
                                         fnType2->getParams());
+
+  // In a non-static protocol requirement, verify that the self access kind
+  // matches.
+  } else if (auto func = dyn_cast<FuncDecl>(decl)) {
+    // We only compare `isMutating()` rather than `getSelfAccessKind()`
+    // because we don't want to complain about `nonmutating` vs. `__consuming`
+    // conflicts at this time, especially since `__consuming` is not yet
+    // officially part of the language.
+    if (!func->isStatic() &&
+        func->isMutating() != cast<FuncDecl>(parentDecl)->isMutating())
+      return false;
+
+  // In abstract storage, verify that the accessor mutating-ness matches.
+  } else if (auto storage = dyn_cast<AbstractStorageDecl>(decl)) {
+    auto parentStorage = cast<AbstractStorageDecl>(parentDecl);
+    if (!areAccessorsOverrideCompatible(storage, parentStorage))
+      return false;
   }
 
   return canDeclTy == canParentDeclTy;
@@ -540,6 +588,22 @@ static bool parameterTypesMatch(const ValueDecl *derivedDecl,
   return true;
 }
 
+/// Returns true if the given declaration is for the `NSObject.hashValue`
+/// property.
+static bool isNSObjectHashValue(ValueDecl *baseDecl) {
+  ASTContext &ctx = baseDecl->getASTContext();
+
+  if (auto baseVar = dyn_cast<VarDecl>(baseDecl)) {
+    if (auto classDecl = baseVar->getDeclContext()->getSelfClassDecl()) {
+      return baseVar->getName() == ctx.Id_hashValue &&
+        classDecl->getName().is("NSObject") &&
+        (classDecl->getModuleContext()->getName() == ctx.Id_Foundation ||
+         classDecl->getModuleContext()->getName() == ctx.Id_ObjectiveC);
+    }
+  }
+  return false;
+}
+
 namespace {
   /// Class that handles the checking of a particular declaration against
   /// superclass entities that it could override.
@@ -759,55 +823,15 @@ SmallVector<OverrideMatch, 2> OverrideMatcher::match(
   return matches;
 }
 
-bool OverrideMatcher::checkOverride(ValueDecl *baseDecl,
-                                    OverrideCheckingAttempt attempt) {
+static void checkOverrideAccessControl(ValueDecl *baseDecl, ValueDecl *decl,
+                                       ASTContext &ctx) {
+  if (ctx.isAccessControlDisabled())
+    return;
+
   auto &diags = ctx.Diags;
-  auto baseTy = getMemberTypeForComparison(ctx, baseDecl, decl);
-  bool emittedMatchError = false;
 
-  // If the name of our match differs from the name we were looking for,
-  // complain.
-  if (decl->getFullName() != baseDecl->getFullName()) {
-    auto diag = diags.diagnose(decl, diag::override_argument_name_mismatch,
-                               isa<ConstructorDecl>(decl),
-                               decl->getFullName(),
-                               baseDecl->getFullName());
-    fixDeclarationName(diag, decl, baseDecl->getFullName());
-    emittedMatchError = true;
-  }
-
-  // If we have an explicit ownership modifier and our parent doesn't,
-  // complain.
-  auto parentAttr =
-      baseDecl->getAttrs().getAttribute<ReferenceOwnershipAttr>();
-  if (auto ownershipAttr =
-          decl->getAttrs().getAttribute<ReferenceOwnershipAttr>()) {
-    ReferenceOwnership parentOwnership;
-    if (parentAttr)
-      parentOwnership = parentAttr->get();
-    else
-      parentOwnership = ReferenceOwnership::Strong;
-    if (parentOwnership != ownershipAttr->get()) {
-      diags.diagnose(decl, diag::override_ownership_mismatch,
-                     parentOwnership, ownershipAttr->get());
-      diags.diagnose(baseDecl, diag::overridden_here);
-    }
-  }
-
-  // If a super method returns Self, and the subclass overrides it to
-  // instead return the subclass type, complain.
-  // This case gets this far because the type matching above specifically
-  // strips out dynamic self via replaceCovariantResultType(), and that
-  // is helpful in several cases - just not this one.
   auto dc = decl->getDeclContext();
   auto classDecl = dc->getSelfClassDecl();
-  if (decl->getASTContext().isSwiftVersionAtLeast(5) &&
-      baseDecl->getInterfaceType()->hasDynamicSelfType() &&
-      !decl->getInterfaceType()->hasDynamicSelfType() &&
-      !classDecl->isFinal()) {
-    diags.diagnose(decl, diag::override_dynamic_self_mismatch);
-    diags.diagnose(baseDecl, diag::overridden_here);
-  }
 
   bool isAccessor = isa<AccessorDecl>(decl);
 
@@ -826,12 +850,18 @@ bool OverrideMatcher::checkOverride(ValueDecl *baseDecl,
       baseDecl->getModuleContext() != decl->getModuleContext() &&
       !isa<ConstructorDecl>(decl) &&
       !isa<ProtocolDecl>(decl->getDeclContext())) {
-    diags.diagnose(decl, diag::override_of_non_open,
-                   decl->getDescriptiveKind());
-
+    // NSObject.hashValue was made non-overridable in Swift 5; one should
+    // override NSObject.hash instead.
+    if (isNSObjectHashValue(baseDecl)) {
+      diags.diagnose(decl, diag::override_nsobject_hashvalue_error)
+        .fixItReplace(SourceRange(decl->getNameLoc()), "hash");
+    } else {
+      diags.diagnose(decl, diag::override_of_non_open,
+                     decl->getDescriptiveKind());
+    }
   } else if (baseHasOpenAccess &&
              classDecl->hasOpenAccess(dc) &&
-             decl->getFormalAccess() != AccessLevel::Open &&
+             decl->getFormalAccess() < AccessLevel::Public &&
              !decl->isFinal()) {
     {
       auto diag = diags.diagnose(decl, diag::override_not_accessible,
@@ -891,6 +921,59 @@ bool OverrideMatcher::checkOverride(ValueDecl *baseDecl,
       diags.diagnose(baseDecl, diag::overridden_here);
     }
   }
+}
+
+bool OverrideMatcher::checkOverride(ValueDecl *baseDecl,
+                                    OverrideCheckingAttempt attempt) {
+  auto &diags = ctx.Diags;
+  auto baseTy = getMemberTypeForComparison(ctx, baseDecl, decl);
+  bool emittedMatchError = false;
+
+  // If the name of our match differs from the name we were looking for,
+  // complain.
+  if (decl->getFullName() != baseDecl->getFullName()) {
+    auto diag = diags.diagnose(decl, diag::override_argument_name_mismatch,
+                               isa<ConstructorDecl>(decl),
+                               decl->getFullName(),
+                               baseDecl->getFullName());
+    fixDeclarationName(diag, decl, baseDecl->getFullName());
+    emittedMatchError = true;
+  }
+
+  // If we have an explicit ownership modifier and our parent doesn't,
+  // complain.
+  auto parentAttr =
+      baseDecl->getAttrs().getAttribute<ReferenceOwnershipAttr>();
+  if (auto ownershipAttr =
+          decl->getAttrs().getAttribute<ReferenceOwnershipAttr>()) {
+    ReferenceOwnership parentOwnership;
+    if (parentAttr)
+      parentOwnership = parentAttr->get();
+    else
+      parentOwnership = ReferenceOwnership::Strong;
+    if (parentOwnership != ownershipAttr->get()) {
+      diags.diagnose(decl, diag::override_ownership_mismatch,
+                     parentOwnership, ownershipAttr->get());
+      diags.diagnose(baseDecl, diag::overridden_here);
+    }
+  }
+
+  // If a super method returns Self, and the subclass overrides it to
+  // instead return the subclass type, complain.
+  // This case gets this far because the type matching above specifically
+  // strips out dynamic self via replaceCovariantResultType(), and that
+  // is helpful in several cases - just not this one.
+  auto dc = decl->getDeclContext();
+  auto classDecl = dc->getSelfClassDecl();
+  if (decl->getASTContext().isSwiftVersionAtLeast(5) &&
+      baseDecl->getInterfaceType()->hasDynamicSelfType() &&
+      !decl->getInterfaceType()->hasDynamicSelfType() &&
+      !classDecl->isFinal()) {
+    diags.diagnose(decl, diag::override_dynamic_self_mismatch);
+    diags.diagnose(baseDecl, diag::overridden_here);
+  }
+
+  checkOverrideAccessControl(baseDecl, decl, ctx);
 
   bool mayHaveMismatchedOptionals =
       (attempt == OverrideCheckingAttempt::MismatchedOptional ||
@@ -1163,6 +1246,7 @@ namespace  {
 
     UNINTERESTING_ATTR(AccessControl)
     UNINTERESTING_ATTR(Alignment)
+    UNINTERESTING_ATTR(AlwaysEmitIntoClient)
     UNINTERESTING_ATTR(Borrowed)
     UNINTERESTING_ATTR(CDecl)
     UNINTERESTING_ATTR(Consuming)
@@ -1190,7 +1274,6 @@ namespace  {
     UNINTERESTING_ATTR(NonMutating)
     UNINTERESTING_ATTR(NonObjC)
     UNINTERESTING_ATTR(NonOverride)
-    UNINTERESTING_ATTR(NoReturn)
     UNINTERESTING_ATTR(NSApplicationMain)
     UNINTERESTING_ATTR(NSCopying)
     UNINTERESTING_ATTR(NSManaged)
@@ -1466,7 +1549,7 @@ static bool checkSingleOverride(ValueDecl *override, ValueDecl *base) {
     // read-only.  Observing properties look at change, read-only properties
     // have nothing to observe!
     bool baseIsSettable = baseASD->isSettable(baseASD->getDeclContext());
-    if (baseIsSettable && ctx.LangOpts.EnableAccessControl) {
+    if (baseIsSettable) {
       baseIsSettable =
          baseASD->isSetterAccessibleFrom(overrideASD->getDeclContext());
     }
@@ -1513,6 +1596,13 @@ static bool checkSingleOverride(ValueDecl *override, ValueDecl *base) {
       (isa<ExtensionDecl>(base->getDeclContext()) ||
        isa<ExtensionDecl>(override->getDeclContext())) &&
       !base->isObjC()) {
+    // Suppress this diagnostic for overrides of a non-open NSObject.hashValue
+    // property; these are diagnosed elsewhere. An error message complaining
+    // about extensions would be misleading in this case; the correct fix is to
+    // override NSObject.hash instead.
+    if (isNSObjectHashValue(base) && 
+        !base->hasOpenAccess(override->getDeclContext()))
+      return true;
     bool baseCanBeObjC = canBeRepresentedInObjC(base);
     diags.diagnose(override, diag::override_decl_extension, baseCanBeObjC,
                    !isa<ExtensionDecl>(base->getDeclContext()));
@@ -1613,15 +1703,12 @@ static bool checkSingleOverride(ValueDecl *override, ValueDecl *base) {
 
   // Overrides of NSObject.hashValue are deprecated; one should override
   // NSObject.hash instead.
-  if (auto baseVar = dyn_cast<VarDecl>(base)) {
-    if (auto classDecl = baseVar->getDeclContext()->getSelfClassDecl()) {
-      if (baseVar->getName() == ctx.Id_hashValue &&
-          classDecl->getName().is("NSObject") &&
-          (classDecl->getModuleContext()->getName() == ctx.Id_Foundation ||
-           classDecl->getModuleContext()->getName() == ctx.Id_ObjectiveC)) {
-        override->diagnose(diag::override_nsobject_hashvalue);
-      }
-    }
+  // FIXME: Remove this when NSObject.hashValue becomes non-open in
+  // swift-corelibs-foundation.
+  if (isNSObjectHashValue(base) &&
+      base->hasOpenAccess(override->getDeclContext())) {
+    override->diagnose(diag::override_nsobject_hashvalue_warning)
+      .fixItReplace(SourceRange(override->getNameLoc()), "hash");
   }
 
   /// Check attributes associated with the base; some may need to merged with

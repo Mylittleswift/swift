@@ -81,9 +81,6 @@ class SILValueOwnershipChecker {
   /// The result of performing the check.
   llvm::Optional<bool> result;
 
-  /// The module that we are in.
-  SILModule &mod;
-
   /// A cache of dead-end basic blocks that we use to determine if we can
   /// ignore "leaks".
   DeadEndBlocks &deadEndBlocks;
@@ -115,10 +112,10 @@ class SILValueOwnershipChecker {
 
 public:
   SILValueOwnershipChecker(
-      SILModule &mod, DeadEndBlocks &deadEndBlocks, SILValue value,
+      DeadEndBlocks &deadEndBlocks, SILValue value,
       ErrorBehaviorKind errorBehavior,
       llvm::SmallPtrSetImpl<SILBasicBlock *> &visitedBlocks)
-      : result(), mod(mod), deadEndBlocks(deadEndBlocks), value(value),
+      : result(), deadEndBlocks(deadEndBlocks), value(value),
         errorBehavior(errorBehavior), visitedBlocks(visitedBlocks) {
     assert(value && "Can not initialize a checker with an empty SILValue");
   }
@@ -139,9 +136,10 @@ public:
     SmallVector<BranchPropagatedUser, 32> allRegularUsers;
     copy(regularUsers, std::back_inserter(allRegularUsers));
     copy(implicitRegularUsers, std::back_inserter(allRegularUsers));
-    result =
+    auto linearLifetimeResult =
         valueHasLinearLifetime(value, lifetimeEndingUsers, allRegularUsers,
                                visitedBlocks, deadEndBlocks, errorBehavior);
+    result = !linearLifetimeResult.getFoundError();
 
     return result.getValue();
   }
@@ -506,7 +504,7 @@ bool SILValueOwnershipChecker::checkValueWithoutLifetimeEndingUses() {
     }
   }
 
-  if (!isValueAddressOrTrivial(value, mod)) {
+  if (!isValueAddressOrTrivial(value)) {
     return !handleError([&] {
       llvm::errs() << "Function: '" << value->getFunction()->getName() << "'\n";
       if (value.getOwnershipKind() == ValueOwnershipKind::Owned) {
@@ -632,7 +630,7 @@ void SILInstruction::verifyOperandOwnership() const {
     return;
 
   // If SILOwnership is not enabled, do not perform verification.
-  if (!getModule().getOptions().EnableSILOwnership)
+  if (!getModule().getOptions().VerifySILOwnership)
     return;
 
   // If the given function has unqualified ownership or we have been asked by
@@ -688,8 +686,7 @@ void SILInstruction::verifyOperandOwnership() const {
 #endif
 }
 
-void SILValue::verifyOwnership(SILModule &mod,
-                               DeadEndBlocks *deadEndBlocks) const {
+void SILValue::verifyOwnership(DeadEndBlocks *deadEndBlocks) const {
 #ifndef NDEBUG
   if (DisableOwnershipVerification)
     return;
@@ -713,43 +710,14 @@ void SILValue::verifyOwnership(SILModule &mod,
 
   llvm::SmallPtrSet<SILBasicBlock *, 32> liveBlocks;
   if (deadEndBlocks) {
-    SILValueOwnershipChecker(mod, *deadEndBlocks, *this, errorBehavior,
+    SILValueOwnershipChecker(*deadEndBlocks, *this, errorBehavior,
                              liveBlocks)
         .check();
   } else {
     DeadEndBlocks deadEndBlocks(f);
-    SILValueOwnershipChecker(mod, deadEndBlocks, *this, errorBehavior,
+    SILValueOwnershipChecker(deadEndBlocks, *this, errorBehavior,
                              liveBlocks)
         .check();
   }
 #endif
-}
-
-bool OwnershipChecker::checkValue(SILValue value) {
-  regularUsers.clear();
-  lifetimeEndingUsers.clear();
-  liveBlocks.clear();
-
-  // Since we do not have SILUndef, we now know that getFunction() should return
-  // a real function. Assert in case this assumption is no longer true.
-  SILFunction *f = value->getFunction();
-  assert(f && "Instructions and arguments should have a function");
-
-  // If the given function has unqualified ownership, there is nothing further
-  // to verify.
-  if (!f->hasOwnership())
-    return false;
-
-  ErrorBehaviorKind errorBehavior(ErrorBehaviorKind::ReturnFalse);
-  SILValueOwnershipChecker checker(mod, deadEndBlocks, value, errorBehavior,
-                                   liveBlocks);
-  if (!checker.check()) {
-    return false;
-  }
-
-  // TODO: Make this more efficient.
-  copy(checker.getRegularUsers(), std::back_inserter(regularUsers));
-  copy(checker.getLifetimeEndingUsers(),
-       std::back_inserter(lifetimeEndingUsers));
-  return true;
 }

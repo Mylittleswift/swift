@@ -26,12 +26,14 @@ internal func _abstract(
 
 // MARK: Type-erased abstract base classes
 
-/// A type-erased key path, from any root type to any resulting value
-/// type. NOTE: older runtimes had Swift.AnyKeyPath as the ObjC name.
-/// The two must coexist, so it was renamed. The old name must not be
-/// used in the new runtime. _TtCs11_AnyKeyPath is the mangled name for
-/// Swift._AnyKeyPath.
+// NOTE: older runtimes had Swift.AnyKeyPath as the ObjC name.
+// The two must coexist, so it was renamed. The old name must not be
+// used in the new runtime. _TtCs11_AnyKeyPath is the mangled name for
+// Swift._AnyKeyPath.
 @_objcRuntimeName(_TtCs11_AnyKeyPath)
+
+/// A type-erased key path, from any root type to any resulting value
+/// type.
 public class AnyKeyPath: Hashable, _AppendKeyPath {
   /// The root type for this key path.
   @inlinable
@@ -739,6 +741,12 @@ internal enum KeyPathComputedIDKind {
   case vtableOffset
 }
 
+internal enum KeyPathComputedIDResolution {
+  case resolved
+  case indirectPointer
+  case functionCall
+}
+
 internal struct RawKeyPathComponent {
   internal init(header: Header, body: UnsafeRawBufferPointer) {
     self.header = header
@@ -890,9 +898,20 @@ internal struct RawKeyPathComponent {
     internal static var computedIDUnresolvedIndirectPointer: UInt32 {
       return _SwiftKeyPathComponentHeader_ComputedIDUnresolvedIndirectPointer
     }
-    internal var isComputedIDResolved: Bool {
-      return
-        payload & Header.computedIDResolutionMask == Header.computedIDResolved
+    internal static var computedIDUnresolvedFunctionCall: UInt32 {
+      return _SwiftKeyPathComponentHeader_ComputedIDUnresolvedFunctionCall
+    }
+    internal var computedIDResolution: KeyPathComputedIDResolution {
+      switch payload & Header.computedIDResolutionMask {
+      case Header.computedIDResolved:
+        return .resolved
+      case Header.computedIDUnresolvedIndirectPointer:
+        return .indirectPointer
+      case Header.computedIDUnresolvedFunctionCall:
+        return .functionCall
+      default:
+        _internalInvariantFailure("invalid key path resolution")
+      }
     }
     
     internal var _value: UInt32
@@ -1754,6 +1773,9 @@ func _getAtKeyPath<Root, Value>(
   return keyPath._projectReadOnly(from: root)
 }
 
+// The release that ends the access scope is guaranteed to happen
+// immediately at the end_apply call because the continuation is a
+// runtime call with a manual release (access scopes cannot be extended).
 @_silgen_name("_swift_modifyAtWritableKeyPath_impl")
 public // runtime entrypoint
 func _modifyAtWritableKeyPath_impl<Root, Value>(
@@ -1763,6 +1785,9 @@ func _modifyAtWritableKeyPath_impl<Root, Value>(
   return keyPath._projectMutableAddress(from: &root)
 }
 
+// The release that ends the access scope is guaranteed to happen
+// immediately at the end_apply call because the continuation is a
+// runtime call with a manual release (access scopes cannot be extended).
 @_silgen_name("_swift_modifyAtReferenceWritableKeyPath_impl")
 public // runtime entrypoint
 func _modifyAtReferenceWritableKeyPath_impl<Root, Value>(
@@ -1783,6 +1808,8 @@ func _setAtWritableKeyPath<Root, Value>(
   let (addr, owner) = keyPath._projectMutableAddress(from: &root)
   addr.pointee = value
   _fixLifetime(owner)
+  // FIXME: this needs a deallocation barrier to ensure that the
+  // release isn't extended, along with the access scope.
 }
 
 @_silgen_name("swift_setAtReferenceWritableKeyPath")
@@ -1796,6 +1823,8 @@ func _setAtReferenceWritableKeyPath<Root, Value>(
   let (addr, owner) = keyPath._projectMutableAddress(from: root)
   addr.pointee = value
   _fixLifetime(owner)
+  // FIXME: this needs a deallocation barrier to ensure that the
+  // release isn't extended, along with the access scope.
 }
 
 // MARK: Appending type system
@@ -2512,7 +2541,7 @@ internal protocol KeyPathPatternVisitor {
                                      offset: KeyPathPatternStoredOffset)
   mutating func visitComputedComponent(mutating: Bool,
                                        idKind: KeyPathComputedIDKind,
-                                       idResolved: Bool,
+                                       idResolution: KeyPathComputedIDResolution,
                                        idValueBase: UnsafeRawPointer,
                                        idValue: Int32,
                                        getter: UnsafeRawPointer,
@@ -2694,7 +2723,7 @@ internal func _walkKeyPathPattern<W: KeyPathPatternVisitor>(
 
       walker.visitComputedComponent(mutating: header.isComputedMutating,
                                     idKind: header.computedIDKind,
-                                    idResolved: header.isComputedIDResolved,
+                                    idResolution: header.computedIDResolution,
                                     idValueBase: idValueBase,
                                     idValue: idValue,
                                     getter: getter,
@@ -2785,7 +2814,7 @@ internal func _walkKeyPathPattern<W: KeyPathPatternVisitor>(
         walker.visitComputedComponent(
           mutating: descriptorHeader.isComputedMutating,
           idKind: descriptorHeader.computedIDKind,
-          idResolved: descriptorHeader.isComputedIDResolved,
+          idResolution: descriptorHeader.computedIDResolution,
           idValueBase: idValueBase,
           idValue: idValue,
           getter: getter,
@@ -2893,7 +2922,7 @@ internal struct GetKeyPathClassAndInstanceSizeFromPattern
 
   mutating func visitComputedComponent(mutating: Bool,
                                    idKind: KeyPathComputedIDKind,
-                                   idResolved: Bool,
+                                   idResolution: KeyPathComputedIDResolution,
                                    idValueBase: UnsafeRawPointer,
                                    idValue: Int32,
                                    getter: UnsafeRawPointer,
@@ -3149,7 +3178,7 @@ internal struct InstantiateKeyPathBuffer : KeyPathPatternVisitor {
 
   mutating func visitComputedComponent(mutating: Bool,
                                    idKind: KeyPathComputedIDKind,
-                                   idResolved: Bool,
+                                   idResolution: KeyPathComputedIDResolution,
                                    idValueBase: UnsafeRawPointer,
                                    idValue: Int32,
                                    getter: UnsafeRawPointer,
@@ -3168,7 +3197,7 @@ internal struct InstantiateKeyPathBuffer : KeyPathPatternVisitor {
 
     switch idKind {
     case .storedPropertyIndex, .vtableOffset:
-      _internalInvariant(idResolved)
+      _internalInvariant(idResolution == .resolved)
       // Zero-extend the integer value to get the instantiated id.
       let value = UInt(UInt32(bitPattern: idValue))
       resolvedID = UnsafeRawPointer(bitPattern: value)
@@ -3177,11 +3206,26 @@ internal struct InstantiateKeyPathBuffer : KeyPathPatternVisitor {
       // Resolve the sign-extended relative reference.
       var absoluteID: UnsafeRawPointer? = idValueBase + Int(idValue)
 
-      // If the pointer ID is "unresolved", then it needs another indirection
-      // to get the final value.
-      if !idResolved {
+      // If the pointer ID is unresolved, then it needs work to get to
+      // the final value.
+      switch idResolution {
+      case .resolved:
+        break
+
+      case .indirectPointer:
+        // The pointer in the pattern is an indirect pointer to the real
+        // identifier pointer.
         absoluteID = absoluteID.unsafelyUnwrapped
           .load(as: UnsafeRawPointer?.self)
+
+      case .functionCall:
+        // The pointer in the pattern is to a function that generates the
+        // identifier pointer.
+        typealias Resolver = @convention(c) (UnsafeRawPointer?) -> UnsafeRawPointer?
+        let resolverFn = unsafeBitCast(absoluteID.unsafelyUnwrapped,
+                                       to: Resolver.self)
+
+        absoluteID = resolverFn(patternArgs)
       }
       resolvedID = absoluteID
     }
@@ -3341,7 +3385,7 @@ internal struct ValidatingInstantiateKeyPathBuffer: KeyPathPatternVisitor {
   }
   mutating func visitComputedComponent(mutating: Bool,
                                    idKind: KeyPathComputedIDKind,
-                                   idResolved: Bool,
+                                   idResolution: KeyPathComputedIDResolution,
                                    idValueBase: UnsafeRawPointer,
                                    idValue: Int32,
                                    getter: UnsafeRawPointer,
@@ -3350,7 +3394,7 @@ internal struct ValidatingInstantiateKeyPathBuffer: KeyPathPatternVisitor {
                                    externalArgs: UnsafeBufferPointer<Int32>?) {
     sizeVisitor.visitComputedComponent(mutating: mutating,
                                        idKind: idKind,
-                                       idResolved: idResolved,
+                                       idResolution: idResolution,
                                        idValueBase: idValueBase,
                                        idValue: idValue,
                                        getter: getter,
@@ -3359,7 +3403,7 @@ internal struct ValidatingInstantiateKeyPathBuffer: KeyPathPatternVisitor {
                                        externalArgs: externalArgs)
     instantiateVisitor.visitComputedComponent(mutating: mutating,
                                        idKind: idKind,
-                                       idResolved: idResolved,
+                                       idResolution: idResolution,
                                        idValueBase: idValueBase,
                                        idValue: idValue,
                                        getter: getter,

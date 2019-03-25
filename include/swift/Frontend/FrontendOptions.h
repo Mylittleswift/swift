@@ -72,6 +72,10 @@ public:
   /// The path to which we should store indexing data, if any.
   std::string IndexStorePath;
 
+  /// The path to look in when loading a parseable interface file, to see if a
+  /// binary module has already been built for use by the compiler.
+  std::string PrebuiltModuleCachePath;
+
   /// Emit index data for imported serialized swift system modules.
   bool IndexSystemModules = false;
 
@@ -210,14 +214,11 @@ public:
   /// Enables the "fully resilient" resilience strategy.
   ///
   /// \see ResilienceStrategy::Resilient
-  bool EnableResilience = false;
+  bool EnableLibraryEvolution = false;
 
   /// Indicates that the frontend should emit "verbose" SIL
   /// (if asked to emit SIL).
   bool EmitVerboseSIL = false;
-
-  /// If set, find and import parseable modules from .swiftinterface files.
-  bool EnableParseableModuleInterface = false;
 
   /// If set, this module is part of a mixed Objective-C/Swift framework, and
   /// the Objective-C half should implicitly be visible to the Swift sources.
@@ -262,6 +263,10 @@ public:
   /// Indicates whether the dependency tracker should track system
   /// dependencies as well.
   bool TrackSystemDeps = false;
+
+  /// Should we serialize the hashes of dependencies (vs. the modification
+  /// times) when compiling a parseable module interface?
+  bool SerializeParseableModuleInterfaceDependencyHashes = false;
 
   /// The different modes for validating TBD against the LLVM IR.
   enum class TBDValidationMode {

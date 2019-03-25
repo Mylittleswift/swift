@@ -1,24 +1,32 @@
-set(swift_platform_name)
-set(swift_platform_flags)
 set(swift_platform_sources
     Platform.swift
-    TiocConstants.swift
+    TiocConstants.swift)
+set(swift_platform_gyb_sources
     tgmath.swift.gyb)
 
 add_swift_target_library(swiftDarwin ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_SDK_OVERLAY
-    Darwin.swift.gyb
     ${swift_platform_sources}
     POSIXError.swift
     MachError.swift
 
+    GYB_SOURCES
+      ${swift_platform_gyb_sources}
+      Darwin.swift.gyb
+
     SWIFT_COMPILE_FLAGS -Xfrontend -disable-objc-attr-requires-foundation-module "${SWIFT_RUNTIME_SWIFT_COMPILE_FLAGS}"
     LINK_FLAGS "${SWIFT_RUNTIME_SWIFT_LINK_FLAGS}"
     TARGET_SDKS ALL_APPLE_PLATFORMS
-    API_NOTES_NON_OVERLAY)
+
+    # This is overly conservative, but we have so few API notes files that
+    # haven't migrated to the Swift repo that it's probably fine in practice.
+    DEPENDS copy_apinotes)
 
 add_swift_target_library(swiftGlibc ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_SDK_OVERLAY
-    Glibc.swift.gyb
     ${swift_platform_sources}
+
+    GYB_SOURCES
+      ${swift_platform_gyb_sources}
+      Glibc.swift.gyb
 
     SWIFT_COMPILE_FLAGS "${SWIFT_RUNTIME_SWIFT_COMPILE_FLAGS}"
     LINK_FLAGS "${SWIFT_RUNTIME_SWIFT_LINK_FLAGS}"
@@ -28,6 +36,9 @@ add_swift_target_library(swiftGlibc ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_SDK_O
 add_swift_target_library(swiftMSVCRT ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_SDK_OVERLAY
     msvcrt.swift
     ${swift_platform_sources}
+
+    GYB_SOURCES
+      ${swift_platform_gyb_sources}
 
     SWIFT_COMPILE_FLAGS "${SWIFT_RUNTIME_SWIFT_COMPILE_FLAGS}"
     LINK_FLAGS "${SWIFT_RUNTIME_SWIFT_LINK_FLAGS}"

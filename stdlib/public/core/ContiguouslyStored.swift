@@ -42,7 +42,7 @@ extension UnsafeBufferPointer: _HasContiguousBytes {
   func withUnsafeBytes<R>(
     _ body: (UnsafeRawBufferPointer) throws -> R
   ) rethrows -> R {
-    let ptr = UnsafeRawPointer(self.baseAddress._unsafelyUnwrappedUnchecked)
+    let ptr = UnsafeRawPointer(self.baseAddress)
     let len = self.count &* MemoryLayout<Element>.stride
     return try body(UnsafeRawBufferPointer(start: ptr, count: len))
   }
@@ -52,9 +52,25 @@ extension UnsafeMutableBufferPointer: _HasContiguousBytes {
   func withUnsafeBytes<R>(
     _ body: (UnsafeRawBufferPointer) throws -> R
   ) rethrows -> R {
-    let ptr = UnsafeRawPointer(self.baseAddress._unsafelyUnwrappedUnchecked)
+    let ptr = UnsafeRawPointer(self.baseAddress)
     let len = self.count &* MemoryLayout<Element>.stride
     return try body(UnsafeRawBufferPointer(start: ptr, count: len))
+  }
+}
+extension UnsafeRawBufferPointer: _HasContiguousBytes {
+  @inlinable @inline(__always)
+  func withUnsafeBytes<R>(
+    _ body: (UnsafeRawBufferPointer) throws -> R
+  ) rethrows -> R {
+    return try body(self)
+  }
+}
+extension UnsafeMutableRawBufferPointer: _HasContiguousBytes {
+  @inlinable @inline(__always)
+  func withUnsafeBytes<R>(
+    _ body: (UnsafeRawBufferPointer) throws -> R
+  ) rethrows -> R {
+    return try body(UnsafeRawBufferPointer(self))
   }
 }
 extension String: _HasContiguousBytes {
@@ -72,10 +88,7 @@ extension String: _HasContiguousBytes {
         try body($0)
       }
     }
-
-    return try ContiguousArray(self.utf8).withUnsafeBufferPointer {
-      try body($0)
-    }
+    return try String._copying(self)._guts.withFastUTF8 { try body($0) }
   }
 
   @inlinable @inline(__always)
@@ -100,10 +113,7 @@ extension Substring: _HasContiguousBytes {
         return try body($0)
       }
     }
-
-    return try ContiguousArray(self.utf8).withUnsafeBufferPointer {
-      try body($0)
-    }
+    return try String._copying(self)._guts.withFastUTF8 { try body($0) }
   }
 
   @inlinable @inline(__always)

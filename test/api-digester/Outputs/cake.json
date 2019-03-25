@@ -1092,8 +1092,8 @@
       "conformances": [
         {
           "kind": "Conformance",
-          "name": "Comparable",
-          "printedName": "Comparable"
+          "name": "FixedWidthInteger",
+          "printedName": "FixedWidthInteger"
         },
         {
           "kind": "Conformance",
@@ -1216,13 +1216,23 @@
         },
         {
           "kind": "Conformance",
-          "name": "FixedWidthInteger",
-          "printedName": "FixedWidthInteger"
+          "name": "Comparable",
+          "printedName": "Comparable"
         },
         {
           "kind": "Conformance",
           "name": "P1",
           "printedName": "P1"
+        },
+        {
+          "kind": "Conformance",
+          "name": "MirrorPath",
+          "printedName": "MirrorPath"
+        },
+        {
+          "kind": "Conformance",
+          "name": "CVarArg",
+          "printedName": "CVarArg"
         },
         {
           "kind": "Conformance",
@@ -1248,11 +1258,6 @@
           "kind": "Conformance",
           "name": "CustomReflectable",
           "printedName": "CustomReflectable"
-        },
-        {
-          "kind": "Conformance",
-          "name": "MirrorPath",
-          "printedName": "MirrorPath"
         },
         {
           "kind": "Conformance",
@@ -1358,11 +1363,6 @@
               ]
             }
           ]
-        },
-        {
-          "kind": "Conformance",
-          "name": "CVarArg",
-          "printedName": "CVarArg"
         }
       ]
     }

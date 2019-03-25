@@ -331,7 +331,7 @@ static void formatSelectionArgument(StringRef ModifierArguments,
 static bool isInterestingTypealias(Type type) {
   // Dig out the typealias declaration, if there is one.
   TypeAliasDecl *aliasDecl = nullptr;
-  if (auto aliasTy = dyn_cast<NameAliasType>(type.getPointer()))
+  if (auto aliasTy = dyn_cast<TypeAliasType>(type.getPointer()))
     aliasDecl = aliasTy->getDecl();
   else
     return false;
@@ -767,6 +767,7 @@ void DiagnosticEngine::emitDiagnostic(const Diagnostic &diagnostic) {
             case DeclContextKind::AbstractClosureExpr:
             case DeclContextKind::AbstractFunctionDecl:
             case DeclContextKind::SubscriptDecl:
+            case DeclContextKind::EnumElementDecl:
               break;
             }
 

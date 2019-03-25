@@ -7,11 +7,13 @@ add_swift_target_library(swiftSwiftPrivate ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} I
   # filename.
   SwiftPrivate.swift
 
-  AtomicInt.swift.gyb
   IO.swift
   ShardedAtomicCounter.swift
 
-  SWIFT_MODULE_DEPENDS_WINDOWS MSVCRT
+  GYB_SOURCES
+    AtomicInt.swift.gyb
+
+  SWIFT_MODULE_DEPENDS_WINDOWS MSVCRT WinSDK
   SWIFT_COMPILE_FLAGS ${swift_swiftprivate_compile_flags}
   INSTALL_IN_COMPONENT stdlib-experimental)
 

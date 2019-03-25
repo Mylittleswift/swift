@@ -79,11 +79,19 @@ bool CursorInfoResolver::tryResolve(ValueDecl *D, TypeDecl *CtorTyRef,
   if (!D->hasName())
     return false;
 
-  if (Loc == LocToResolve) {
-    CursorInfo.setValueRef(D, CtorTyRef, ExtTyRef, IsRef, Ty, ContainerType);
-    return true;
+  if (Loc != LocToResolve)
+    return false;
+
+  if (auto *VD = dyn_cast<VarDecl>(D)) {
+    // Handle references to the implicitly generated vars in case statements
+    // matching multiple patterns
+    if (VD->isImplicit()) {
+      if (auto * Parent = VD->getParentVarDecl())
+        D = Parent;
+    }
   }
-  return false;
+  CursorInfo.setValueRef(D, CtorTyRef, ExtTyRef, IsRef, Ty, ContainerType);
+  return true;
 }
 
 bool CursorInfoResolver::tryResolve(ModuleEntity Mod, SourceLoc Loc) {
@@ -1640,15 +1648,18 @@ getCallArgInfo(SourceManager &SM, Expr *Arg, LabelRangeEndAt EndKind) {
         if (EndKind == LabelRangeEndAt::LabelNameOnly)
           LabelEnd = LabelStart.getAdvancedLoc(NameIdentifier.getLength());
       }
-
+      bool IsTrailingClosure = TE->hasTrailingClosure() &&
+        ElemIndex == TE->getNumElements() - 1;
       InfoVec.push_back({getSingleNonImplicitChild(Elem),
-        CharSourceRange(SM, LabelStart, LabelEnd)});
+        CharSourceRange(SM, LabelStart, LabelEnd), IsTrailingClosure});
       ++ElemIndex;
     }
   } else if (auto *PE = dyn_cast<ParenExpr>(Arg)) {
     if (auto Sub = PE->getSubExpr())
       InfoVec.push_back({getSingleNonImplicitChild(Sub),
-        CharSourceRange(Sub->getStartLoc(), 0)});
+        CharSourceRange(Sub->getStartLoc(), 0),
+        PE->hasTrailingClosure()
+      });
   }
   return InfoVec;
 }
@@ -1657,7 +1668,13 @@ std::vector<CharSourceRange> swift::ide::
 getCallArgLabelRanges(SourceManager &SM, Expr *Arg, LabelRangeEndAt EndKind) {
   std::vector<CharSourceRange> Ranges;
   auto InfoVec = getCallArgInfo(SM, Arg, EndKind);
-  std::transform(InfoVec.begin(), InfoVec.end(), std::back_inserter(Ranges),
+
+  auto EndWithoutTrailing = std::remove_if(InfoVec.begin(), InfoVec.end(),
+                                           [](CallArgInfo &Info) {
+                                             return Info.IsTrailingClosure;
+                                           });
+  std::transform(InfoVec.begin(), EndWithoutTrailing,
+                 std::back_inserter(Ranges),
                  [](CallArgInfo &Info) { return Info.LabelRange; });
   return Ranges;
 }

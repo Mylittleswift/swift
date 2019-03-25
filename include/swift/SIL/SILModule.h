@@ -221,7 +221,7 @@ private:
   llvm::DenseMap<Identifier, BuiltinInfo> BuiltinIDCache;
 
   /// This is the set of undef values we've created, for uniquing purposes.
-  llvm::DenseMap<SILType, SILUndef *> UndefValues;
+  llvm::DenseMap<std::pair<SILType, unsigned>, SILUndef *> UndefValues;
 
   /// The stage of processing this module is at.
   SILStage Stage;
@@ -314,11 +314,6 @@ public:
 
   /// This converts Swift types to SILTypes.
   mutable Lowering::TypeConverter Types;
-
-  /// Look up the TypeLowering for a SILType.
-  const Lowering::TypeLowering &getTypeLowering(SILType t) {
-    return Types.getTypeLowering(t);
-  }
 
   /// Invalidate cached entries in SIL Loader.
   void invalidateSILLoaderCaches();
@@ -570,11 +565,6 @@ public:
   /// hierarchy of \p Class.
   SILFunction *lookUpFunctionInVTable(ClassDecl *Class, SILDeclRef Member);
 
-  // Given a protocol conformance, attempt to create a witness table declaration
-  // for it.
-  SILWitnessTable *
-  createWitnessTableDeclaration(ProtocolConformance *C, SILLinkage linkage);
-
   // Given a protocol, attempt to create a default witness table declaration
   // for it.
   SILDefaultWitnessTable *
@@ -601,7 +591,8 @@ public:
 
   /// Can value operations (copies and destroys) on the given lowered type
   /// be performed in this module?
-  bool isTypeABIAccessible(SILType type);
+  bool isTypeABIAccessible(SILType type,
+                           ResilienceExpansion forExpansion);
 
   /// Can type metadata for the given formal type be fetched in
   /// the given module?

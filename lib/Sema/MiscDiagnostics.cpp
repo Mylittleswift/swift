@@ -100,92 +100,6 @@ static void diagSyntacticUseRestrictions(TypeChecker &TC, const Expr *E,
       unsigned level : 29;
     };
 
-    // Partial applications of functions that are not permitted.  This is
-    // tracked in post-order and unraveled as subsequent applications complete
-    // the call (or not).
-    llvm::SmallDenseMap<Expr*, PartialApplication,2> InvalidPartialApplications;
-
-    ~DiagnoseWalker() override {
-      for (auto &unapplied : InvalidPartialApplications) {
-        unsigned kind = unapplied.second.kind;
-        if (unapplied.second.compatibilityWarning) {
-          TC.diagnose(unapplied.first->getLoc(),
-                      diag::partial_application_of_function_invalid_swift4,
-                      kind);
-        } else {
-          TC.diagnose(unapplied.first->getLoc(),
-                      diag::partial_application_of_function_invalid,
-                      kind);
-        }
-      }
-    }
-
-    /// methods are fully applied when they can't support partial application.
-    void checkInvalidPartialApplication(Expr *E) {
-      if (auto AE = dyn_cast<ApplyExpr>(E)) {
-        Expr *fnExpr = AE->getSemanticFn();
-        if (auto forceExpr = dyn_cast<ForceValueExpr>(fnExpr))
-          fnExpr = forceExpr->getSubExpr()->getSemanticsProvidingExpr();
-        if (auto dotSyntaxExpr = dyn_cast<DotSyntaxBaseIgnoredExpr>(fnExpr))
-          fnExpr = dotSyntaxExpr->getRHS();
-
-        // Check to see if this is a potentially unsupported partial
-        // application of a constructor delegation.
-        if (isa<OtherConstructorDeclRefExpr>(fnExpr)) {
-          auto kind = AE->getArg()->isSuperExpr()
-                    ? PartialApplication::SuperInit
-                    : PartialApplication::SelfInit;
-
-          // Partial applications of delegated initializers aren't allowed, and
-          // don't really make sense to begin with.
-          InvalidPartialApplications.insert(
-            {E, {PartialApplication::Error, kind, 1}});
-          return;
-        }
-
-        // If this is adding a level to an active partial application, advance
-        // it to the next level.
-        auto foundApplication = InvalidPartialApplications.find(fnExpr);
-        if (foundApplication == InvalidPartialApplications.end())
-          return;
-
-        unsigned level = foundApplication->second.level;
-        auto kind = foundApplication->second.kind;
-        assert(level > 0);
-        InvalidPartialApplications.erase(foundApplication);
-        if (level > 1) {
-          // We have remaining argument clauses.
-          // Partial applications were always diagnosed in Swift 4 and before,
-          // so there's no need to preserve the compatibility warning bit.
-          InvalidPartialApplications.insert(
-            {AE, {PartialApplication::Error, kind, level - 1}});
-        }
-        return;
-      }
-      
-      /// If this is a reference to a mutating method, it cannot be partially
-      /// applied or even referenced without full application, so arrange for
-      /// us to check that it gets fully applied.
-      auto fnDeclRef = dyn_cast<DeclRefExpr>(E);
-      if (!fnDeclRef)
-        return;
-
-      auto fn = dyn_cast<FuncDecl>(fnDeclRef->getDecl());
-      if (!fn || !fn->isInstanceMember() || !fn->isMutating())
-        return;
-
-      // Swift 4 and earlier failed to diagnose a reference to a mutating method
-      // without any applications at all, which would get miscompiled into a
-      // function with undefined behavior. Warn for source compatibility.
-      auto errorBehavior = TC.Context.LangOpts.isSwiftVersionAtLeast(5)
-        ? PartialApplication::Error
-        : PartialApplication::CompatibilityWarning;
-
-      InvalidPartialApplications.insert(
-        {fnDeclRef, {errorBehavior,
-                     PartialApplication::MutatingMethod, 2}});
-    }
-
     // Not interested in going outside a basic expression.
     std::pair<bool, Stmt *> walkToStmtPre(Stmt *S) override {
       return { false, S };
@@ -231,9 +145,9 @@ static void diagSyntacticUseRestrictions(TypeChecker &TC, const Expr *E,
       if (isa<TypeExpr>(Base))
         checkUseOfMetaTypeName(Base);
 
-      if (auto *TSE = dyn_cast<TupleShuffleExpr>(E)) {
-        if (CallArgs.count(TSE))
-          CallArgs.insert(TSE->getSubExpr());
+      if (auto *ASE = dyn_cast<ArgumentShuffleExpr>(E)) {
+        if (CallArgs.count(ASE))
+          CallArgs.insert(ASE->getSubExpr());
       }
 
       if (auto *SE = dyn_cast<SubscriptExpr>(E)) {
@@ -417,8 +331,8 @@ static void diagSyntacticUseRestrictions(TypeChecker &TC, const Expr *E,
                                         <void(unsigned, Expr*)> fn) {
       // The argument could be shuffled if it includes default arguments,
       // label differences, or other exciting things like that.
-      if (auto *TSE = dyn_cast<TupleShuffleExpr>(arg))
-        arg = TSE->getSubExpr();
+      if (auto *ASE = dyn_cast<ArgumentShuffleExpr>(arg))
+        arg = ASE->getSubExpr();
 
       // The argument is either a ParenExpr or TupleExpr.
       if (auto *TE = dyn_cast<TupleExpr>(arg)) {
@@ -461,11 +375,6 @@ static void diagSyntacticUseRestrictions(TypeChecker &TC, const Expr *E,
           break;
       }
       return arg;
-    }
-
-    Expr *walkToExprPost(Expr *E) override {
-      checkInvalidPartialApplication(E);
-      return E;
     }
 
     void checkConvertedPointerArgument(ConcreteDeclRef callee,
@@ -1385,11 +1294,11 @@ static void diagSyntacticUseRestrictions(TypeChecker &TC, const Expr *E,
     ///
     /// Or like this if it is any other ExpressibleByNilLiteral type:
     ///
-    ///   (dot_syntax_call_expr implicit type='Int?'
-    ///     (declref_expr implicit decl=Optional.none)
-    ///     (type_expr type=Int?))
+    ///   (nil_literal_expr)
     ///
     bool isTypeCheckedOptionalNil(Expr *E) {
+      if (dyn_cast<NilLiteralExpr>(E)) return true;
+
       auto CE = dyn_cast<ApplyExpr>(E->getSemanticsProvidingExpr());
       if (!CE || !CE->isImplicit())
         return false;
@@ -1397,16 +1306,6 @@ static void diagSyntacticUseRestrictions(TypeChecker &TC, const Expr *E,
       // First case -- Optional.none
       if (auto DRE = dyn_cast<DeclRefExpr>(CE->getSemanticFn()))
         return DRE->getDecl() == TC.Context.getOptionalNoneDecl();
-
-      // Second case -- init(nilLiteral:)
-      auto CRCE = dyn_cast<ConstructorRefCallExpr>(CE->getSemanticFn());
-      if (!CRCE || !CRCE->isImplicit()) return false;
-
-      if (auto DRE = dyn_cast<DeclRefExpr>(CRCE->getSemanticFn())) {
-        SmallString<32> NameBuffer;
-        auto name = DRE->getDecl()->getFullName().getString(NameBuffer);
-        return name == "init(nilLiteral:)";
-      }
 
       return false;
     }
@@ -1625,10 +1524,20 @@ static void diagnoseImplicitSelfUseInClosure(TypeChecker &TC, const Expr *E,
     /// Return true if this is an implicit reference to self.
     static bool isImplicitSelfUse(Expr *E) {
       auto *DRE = dyn_cast<DeclRefExpr>(E);
-      return DRE && DRE->isImplicit() && isa<VarDecl>(DRE->getDecl()) &&
-             cast<VarDecl>(DRE->getDecl())->isSelfParameter() &&
-             // Metatype self captures don't extend the lifetime of an object.
-             !DRE->getType()->is<MetatypeType>();
+
+      if (!DRE || !DRE->isImplicit() || !isa<VarDecl>(DRE->getDecl()) ||
+          !cast<VarDecl>(DRE->getDecl())->isSelfParameter())
+        return false;
+
+      // Defensive check for type. If the expression doesn't have type here, it
+      // should have been diagnosed somewhere else.
+      Type ty = DRE->getType();
+      assert(ty && "Implicit self parameter ref without type");
+      if (!ty)
+        return false;
+
+      // Metatype self captures don't extend the lifetime of an object.
+      return !ty->is<MetatypeType>();
     }
 
     /// Return true if this is a closure expression that will require "self."
@@ -2302,7 +2211,7 @@ class VarDeclUsageChecker : public ASTWalker {
   const VarDecl *AssociatedGetter = nullptr;
 
   /// The first reference to the associated getter.
-  const DeclRefExpr *AssociatedGetterDeclRef = nullptr;
+  const Expr *AssociatedGetterRefExpr = nullptr;
 
   /// This is a mapping from VarDecls to the if/while/guard statement that they
   /// occur in, when they are in a pattern in a StmtCondition.
@@ -2541,6 +2450,20 @@ VarDeclUsageChecker::~VarDeclUsageChecker() {
     auto *var = elt.first;
     unsigned access = elt.second;
 
+    if (auto *CS = dyn_cast_or_null<CaseStmt>(var->getRecursiveParentPatternStmt())) {
+      // Only diagnose VarDecls from the first CaseLabelItem in CaseStmts, as
+      // the remaining items must match it anyway.
+      auto CaseItems = CS->getCaseLabelItems();
+      if (!CaseItems.empty()) {
+        bool InFirstCaseLabelItem = false;
+        CaseItems.front().getPattern()->forEachVariable([&](VarDecl *D) {
+          InFirstCaseLabelItem |= var == D;
+        });
+        if (!InFirstCaseLabelItem)
+          continue;
+      }
+    }
+
     // If this is a 'let' value, any stores to it are actually initializations,
     // not mutations.
     auto isWrittenLet = false;
@@ -2569,7 +2492,7 @@ VarDeclUsageChecker::~VarDeclUsageChecker() {
       if (FD && FD->getAccessorKind() == AccessorKind::Set) {
         auto getter = dyn_cast<VarDecl>(FD->getStorage());
         if ((access & RK_Read) == 0 && AssociatedGetter == getter) {
-          if (auto DRE = AssociatedGetterDeclRef) {
+          if (auto DRE = AssociatedGetterRefExpr) {
             Diags.diagnose(DRE->getLoc(), diag::unused_setter_parameter,
                            var->getName());
             Diags.diagnose(DRE->getLoc(), diag::fixit_for_unused_setter_parameter,
@@ -2708,12 +2631,13 @@ VarDeclUsageChecker::~VarDeclUsageChecker() {
 
       // If this is a parameter explicitly marked 'var', remove it.
       unsigned varKind = isa<ParamDecl>(var);
-      if (FixItLoc.isInvalid())
+      if (FixItLoc.isInvalid()) {
         Diags.diagnose(var->getLoc(), diag::variable_never_mutated,
-                       var->getName(), varKind);
+                       var->getName(), varKind, true);
+      }
       else {
         bool suggestLet = true;
-        if (auto *stmt = var->getParentPatternStmt()) {
+        if (auto *stmt = var->getRecursiveParentPatternStmt()) {
           // Don't try to suggest 'var' -> 'let' conversion
           // in case of 'for' loop because it's an implicitly
           // immutable context.
@@ -2721,7 +2645,7 @@ VarDeclUsageChecker::~VarDeclUsageChecker() {
         }
 
         auto diag = Diags.diagnose(var->getLoc(), diag::variable_never_mutated,
-                                   var->getName(), varKind);
+                                   var->getName(), varKind, suggestLet);
 
         if (suggestLet)
           diag.fixItReplace(FixItLoc, "let");
@@ -2864,10 +2788,18 @@ std::pair<bool, Expr *> VarDeclUsageChecker::walkToExprPre(Expr *E) {
   if (auto *DRE = dyn_cast<DeclRefExpr>(E)) {
     addMark(DRE->getDecl(), RK_Read);
 
-    // If the Decl is a read of a getter, track the first DRE for diagnostics
+    // If the Expression is a read of a getter, track for diagnostics
     if (auto VD = dyn_cast<VarDecl>(DRE->getDecl())) {
-      if (AssociatedGetter == VD && AssociatedGetterDeclRef == nullptr)
-        AssociatedGetterDeclRef = DRE;
+      if (AssociatedGetter == VD && AssociatedGetterRefExpr == nullptr)
+        AssociatedGetterRefExpr = DRE;
+    }
+  }
+  // If the Expression is a member reference, see if it is a read of the getter
+  // to track for diagnostics.
+  if (auto *MRE = dyn_cast<MemberRefExpr>(E)) {
+    if (auto VD = dyn_cast<VarDecl>(MRE->getMember().getDecl())) {
+      if (AssociatedGetter == VD && AssociatedGetterRefExpr == nullptr)
+        AssociatedGetterRefExpr = MRE;
     }
   }
   // If this is an AssignExpr, see if we're mutating something that we know
@@ -3009,8 +2941,8 @@ void swift::fixItEncloseTrailingClosure(TypeChecker &TC,
                                         const CallExpr *call,
                                         Identifier closureLabel) {
   auto argsExpr = call->getArg();
-  if (auto TSE = dyn_cast<TupleShuffleExpr>(argsExpr))
-    argsExpr = TSE->getSubExpr();
+  if (auto ASE = dyn_cast<ArgumentShuffleExpr>(argsExpr))
+    argsExpr = ASE->getSubExpr();
 
   SmallString<32> replacement;
   SourceLoc lastLoc;
@@ -3065,8 +2997,8 @@ static void checkStmtConditionTrailingClosure(TypeChecker &TC, const Expr *E) {
       // Ignore invalid argument type. Some diagnostics are already emitted.
       if (!argsTy || argsTy->hasError()) return;
 
-      if (auto TSE = dyn_cast<TupleShuffleExpr>(argsExpr))
-        argsExpr = TSE->getSubExpr();
+      if (auto ASE = dyn_cast<ArgumentShuffleExpr>(argsExpr))
+        argsExpr = ASE->getSubExpr();
 
       SourceLoc closureLoc;
       if (auto PE = dyn_cast<ParenExpr>(argsExpr))
@@ -4130,7 +4062,7 @@ static OmissionTypeName getTypeNameForOmission(Type type) {
 
   do {
     // Look through typealiases.
-    if (auto aliasTy = dyn_cast<NameAliasType>(type.getPointer())) {
+    if (auto aliasTy = dyn_cast<TypeAliasType>(type.getPointer())) {
       type = aliasTy->getSinglyDesugaredType();
       continue;
     }
@@ -4316,8 +4248,7 @@ Optional<Identifier> TypeChecker::omitNeedlessWords(VarDecl *var) {
     return None;
 
   // Dig out the type of the variable.
-  Type type = var->getInterfaceType()->getReferenceStorageReferent()
-                ->getWithoutSpecifierType();
+  Type type = var->getValueInterfaceType();
   while (auto optObjectTy = type->getOptionalObjectType())
     type = optObjectTy;
 

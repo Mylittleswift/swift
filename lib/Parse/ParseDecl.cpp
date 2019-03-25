@@ -17,10 +17,10 @@
 #include "swift/Parse/Parser.h"
 #include "swift/Parse/CodeCompletionCallbacks.h"
 #include "swift/Parse/DelayedParsingCallbacks.h"
+#include "swift/Parse/ParsedSyntaxRecorder.h"
 #include "swift/Parse/ParseSILSupport.h"
 #include "swift/Parse/SyntaxParsingContext.h"
-#include "swift/Syntax/SyntaxFactory.h"
-#include "swift/Syntax/TokenSyntax.h"
+#include "swift/Syntax/SyntaxKind.h"
 #include "swift/Subsystems.h"
 #include "swift/AST/Attr.h"
 #include "swift/AST/LazyResolver.h"
@@ -535,28 +535,32 @@ ParserResult<AvailableAttr> Parser::parseExtendedAvailabilitySpecList(
   bool SomeVersion = (!Introduced.empty() ||
                       !Deprecated.empty() ||
                       !Obsoleted.empty());
-  if (!PlatformKind.hasValue() && Platform == "swift") {
+  if (!PlatformKind.hasValue() &&
+      (Platform == "swift" || Platform == "_PackageDescription")) {
+
     if (PlatformAgnostic == PlatformAgnosticAvailabilityKind::Deprecated) {
       diagnose(AttrLoc,
-               diag::attr_availability_swift_expected_deprecated_version,
-               AttrName);
+               diag::attr_availability_platform_agnostic_expected_deprecated_version,
+               AttrName, Platform);
       return nullptr;
     }
     if (PlatformAgnostic == PlatformAgnosticAvailabilityKind::Unavailable) {
-      diagnose(AttrLoc, diag::attr_availability_swift_infeasible_option,
-               "unavailable", AttrName);
+      diagnose(AttrLoc, diag::attr_availability_platform_agnostic_infeasible_option,
+               "unavailable", AttrName, Platform);
       return nullptr;
     }
     assert(PlatformAgnostic == PlatformAgnosticAvailabilityKind::None);
 
     if (!SomeVersion) {
-      diagnose(AttrLoc, diag::attr_availability_swift_expected_option,
-               AttrName);
+      diagnose(AttrLoc, diag::attr_availability_platform_agnostic_expected_option,
+               AttrName, Platform);
       return nullptr;
     }
 
     PlatformKind = PlatformKind::none;
-    PlatformAgnostic = PlatformAgnosticAvailabilityKind::SwiftVersionSpecific;
+    PlatformAgnostic = (Platform == "swift") ?
+                         PlatformAgnosticAvailabilityKind::SwiftVersionSpecific :
+                         PlatformAgnosticAvailabilityKind::PackageDescriptionVersionSpecific;
   }
 
 
@@ -902,7 +906,15 @@ bool Parser::parseNewDeclAttribute(DeclAttributes &Attributes, SourceLoc AtLoc,
       !isInSILMode()) {
     diagnose(Loc, diag::only_allowed_in_sil, AttrName);
     DiscardAttribute = true;
-  }  
+  }
+
+  if (Context.LangOpts.Target.isOSBinFormatCOFF()) {
+    if (DK == DAK_WeakLinked) {
+      diagnose(Loc, diag::attr_unsupported_on_target, AttrName,
+               Context.LangOpts.Target.str());
+      DiscardAttribute = true;
+    }
+  }
 
   // Filled in during parsing.  If there is a duplicate
   // diagnostic this can be used for better error presentation.
@@ -1334,12 +1346,17 @@ bool Parser::parseNewDeclAttribute(DeclAttributes &Attributes, SourceLoc AtLoc,
       //  @available(iOS, introduced: 8.0)
       //  @available(OSX, introduced: 10.10)
       //
-      // Similarly if we have a language version spec in the spec
-      // list, create an implicit AvailableAttr with the specified
-      // version as the introduced argument. For example, if we have
+      // Similarly if we have a language version spec or PackageDescription
+      // version in the spec list, create an implicit AvailableAttr
+      // with the specified version as the introduced argument. 
+      // For example, if we have
       //   @available(swift 3.1)
       // we will synthesize
       //   @available(swift, introduced: 3.1)
+      // or, if we have
+      //   @available(_PackageDescription 4.2)
+      // we will synthesize
+      //   @available(_PackageDescription, introduced: 4.2)
 
       for (auto *Spec : Specs) {
         PlatformKind Platform;
@@ -1354,13 +1371,14 @@ bool Parser::parseNewDeclAttribute(DeclAttributes &Attributes, SourceLoc AtLoc,
           VersionRange = PlatformVersionSpec->getVersionSrcRange();
           PlatformAgnostic = PlatformAgnosticAvailabilityKind::None;
 
-        } else if (auto *LanguageVersionSpec =
-                   dyn_cast<LanguageVersionConstraintAvailabilitySpec>(Spec)) {
+        } else if (auto *PlatformAgnosticVersionSpec =
+                   dyn_cast<PlatformAgnosticVersionConstraintAvailabilitySpec>(Spec)) {
           Platform = PlatformKind::none;
-          Version = LanguageVersionSpec->getVersion();
-          VersionRange = LanguageVersionSpec->getVersionSrcRange();
-          PlatformAgnostic =
-            PlatformAgnosticAvailabilityKind::SwiftVersionSpecific;
+          Version = PlatformAgnosticVersionSpec->getVersion();
+          VersionRange = PlatformAgnosticVersionSpec->getVersionSrcRange();
+          PlatformAgnostic = PlatformAgnosticVersionSpec->isLanguageVersionSpecific() ?
+                               PlatformAgnosticAvailabilityKind::SwiftVersionSpecific :
+                               PlatformAgnosticAvailabilityKind::PackageDescriptionVersionSpecific;
 
         } else {
           continue;
@@ -2263,9 +2281,18 @@ bool Parser::parseDeclModifierList(DeclAttributes &Attributes,
       {
         BacktrackingScope Scope(*this);
         consumeToken(tok::kw_class);
-        if (!isStartOfDecl())
+        // When followed by an 'override' or CC token inside a class,
+        // treat 'class' as a modifier; in the case of a following CC
+        // token, we cannot be sure there is no intention to override
+        // or witness something static.
+        if (isStartOfDecl() || (isa<ClassDecl>(CurDeclContext) &&
+                                (Tok.is(tok::code_complete) ||
+                                 Tok.getRawText().equals("override")))) {
+          /* We're OK */
+        } else {
           // This 'class' is a real ClassDecl introducer.
           break;
+        }
       }
       if (StaticLoc.isValid()) {
         diagnose(Tok, diag::decl_already_static,
@@ -2775,6 +2802,8 @@ Parser::parseDecl(ParseDeclOptions Flags,
                               StaticSpelling, tryLoc);
     StaticLoc = SourceLoc(); // we handled static if present.
     MayNeedOverrideCompletion = true;
+    if (DeclResult.hasCodeCompletion() && isCodeCompletionFirstPass())
+      break;
     std::for_each(Entries.begin(), Entries.end(), Handler);
     if (auto *D = DeclResult.getPtrOrNull())
       markWasHandled(D);
@@ -2797,6 +2826,8 @@ Parser::parseDecl(ParseDeclOptions Flags,
     llvm::SmallVector<Decl *, 4> Entries;
     DeclParsingContext.setCreateSyntax(SyntaxKind::EnumCaseDecl);
     DeclResult = parseDeclEnumCase(Flags, Attributes, Entries);
+    if (DeclResult.hasCodeCompletion() && isCodeCompletionFirstPass())
+      break;
     std::for_each(Entries.begin(), Entries.end(), Handler);
     if (auto *D = DeclResult.getPtrOrNull())
       markWasHandled(D);
@@ -2846,6 +2877,8 @@ Parser::parseDecl(ParseDeclOptions Flags,
     }
     llvm::SmallVector<Decl *, 4> Entries;
     DeclResult = parseDeclSubscript(Flags, Attributes, Entries);
+    if (DeclResult.hasCodeCompletion() && isCodeCompletionFirstPass())
+      break;
     std::for_each(Entries.begin(), Entries.end(), Handler);
     MayNeedOverrideCompletion = true;
     if (auto *D = DeclResult.getPtrOrNull())
@@ -2914,6 +2947,7 @@ Parser::parseDecl(ParseDeclOptions Flags,
       // specified so that we do not duplicate them in code completion
       // strings.
       SmallVector<StringRef, 3> Keywords;
+      SourceLoc introducerLoc;
       switch (OrigTok.getKind()) {
       case tok::kw_func:
       case tok::kw_subscript:
@@ -2921,15 +2955,22 @@ Parser::parseDecl(ParseDeclOptions Flags,
       case tok::kw_let:
       case tok::kw_typealias:
         Keywords.push_back(OrigTok.getText());
+        introducerLoc = OrigTok.getLoc();
         break;
       default:
         // Other tokens are already accounted for.
         break;
       }
+      if (StaticSpelling == StaticSpellingKind::KeywordStatic) {
+        Keywords.push_back(getTokenText(tok::kw_static));
+      } else if (StaticSpelling == StaticSpellingKind::KeywordClass) {
+        Keywords.push_back(getTokenText(tok::kw_class));
+      }
       for (auto attr : Attributes) {
         Keywords.push_back(attr->getAttrName());
       }
-      CodeCompletion->completeNominalMemberBeginning(Keywords);
+      CodeCompletion->completeNominalMemberBeginning(Keywords,
+                                                     introducerLoc);
     }
 
     DeclResult = makeParserCodeCompletionStatus();
@@ -2960,7 +3001,8 @@ Parser::parseDecl(ParseDeclOptions Flags,
   }
 
   if (DeclResult.hasCodeCompletion() && isCodeCompletionFirstPass() &&
-      !CurDeclContext->isModuleScopeContext()) {
+      !CurDeclContext->isModuleScopeContext() &&
+      !isa<TopLevelCodeDecl>(CurDeclContext)) {
     // Only consume non-toplevel decls.
     consumeDecl(BeginParserPosition, Flags, /*IsTopLevel=*/false);
 
@@ -3027,22 +3069,13 @@ void Parser::parseDeclListDelayed(IterableDeclContext *IDC) {
   if (auto *ext = dyn_cast<ExtensionDecl>(D)) {
     parseDeclList(ext->getBraces().Start, RBLoc, Id,
                   ParseDeclOptions(DelayedState->Flags),
-                  [&] (Decl *D) { ext->addMember(D); });
+                  ext);
     ext->setBraces({LBLoc, RBLoc});
-  } else if (auto *cd = dyn_cast<ClassDecl>(D)) {
-    auto handler = [&] (Decl *D) {
-      cd->addMember(D);
-      if (isa<DestructorDecl>(D))
-        cd->setHasDestructor();
-    };
-    parseDeclList(cd->getBraces().Start, RBLoc, Id,
-                  ParseDeclOptions(DelayedState->Flags), handler);
-    cd->setBraces({LBLoc, RBLoc});
   } else {
     auto *ntd = cast<NominalTypeDecl>(D);
     parseDeclList(ntd->getBraces().Start, RBLoc, Id,
                   ParseDeclOptions(DelayedState->Flags),
-                  [&] (Decl *D) { ntd->addMember(D); });
+                  ntd);
     ntd->setBraces({LBLoc, RBLoc});
   }
 }
@@ -3459,13 +3492,14 @@ ParserStatus Parser::parseDeclItem(bool &PreviousHadSemi,
 /// \endverbatim
 bool Parser::parseDeclList(SourceLoc LBLoc, SourceLoc &RBLoc,
                            Diag<> ErrorDiag, ParseDeclOptions Options,
-                           llvm::function_ref<void(Decl*)> handler) {
+                           IterableDeclContext *IDC) {
   ParserStatus Status;
   bool PreviousHadSemi = true;
   {
     SyntaxParsingContext ListContext(SyntaxContext, SyntaxKind::MemberDeclList);
     while (Tok.isNot(tok::r_brace)) {
-      Status |= parseDeclItem(PreviousHadSemi, Options, handler);
+      Status |= parseDeclItem(PreviousHadSemi, Options,
+                              [&](Decl *D) { IDC->addMember(D); });
       if (Tok.isAny(tok::eof, tok::pound_endif, tok::pound_else,
                     tok::pound_elseif)) {
         IsInputIncomplete = true;
@@ -3485,34 +3519,39 @@ bool Parser::parseDeclList(SourceLoc LBLoc, SourceLoc &RBLoc,
 }
 
 bool Parser::canDelayMemberDeclParsing() {
-  // There's no fundamental reasons that SIL cannnot be lasily parsed. We need
-  // to keep SILParserTUStateBase persistent to make it happen.
-  if (isInSILMode())
+  // If explicitly disabled, respect the flag.
+  if (!DelayBodyParsing)
     return false;
-  // Calculating interface hash requires tokens consumed in the original order.
-  if (SF.hasInterfaceHash())
-    return false;
-  if (SF.Kind == SourceFileKind::REPL)
-    return false;
-  // We always collect the entire syntax tree for IDE uses.
-  if (SF.shouldCollectToken())
-    return false;
-  if (SF.shouldBuildSyntaxTree())
-    return false;
-  // Recovering parser status later for #sourceLocaion is not-trivial and
+  // Recovering parser status later for #sourceLocation is not-trivial and
   // it may not worth it.
   if (InPoundLineEnvironment)
     return false;
-  // The first code completion pass looks for code completion tokens extensively,
-  // so we cannot lazily parse members.
-  if (isCodeCompletionFirstPass())
-    return false;
+
+  // Skip until the matching right curly bracket; if we find a pound directive,
+  // we can't lazily parse.
   BacktrackingScope BackTrack(*this);
   bool HasPoundDirective;
   skipUntilMatchingRBrace(*this, HasPoundDirective, SyntaxContext);
   if (!HasPoundDirective)
     BackTrack.cancelBacktrack();
   return !BackTrack.willBacktrack();
+}
+
+bool Parser::delayParsingDeclList(SourceLoc LBLoc, SourceLoc &RBLoc,
+                                  SourceLoc PosBeforeLB,
+                                  ParseDeclOptions Options,
+                                  IterableDeclContext *IDC) {
+  bool error = false;
+
+  if (Tok.is(tok::r_brace)) {
+    RBLoc = consumeToken();
+  } else {
+    RBLoc = Tok.getLoc();
+    error = true;
+  }
+  State->delayDeclList(IDC, Options.toRaw(), CurDeclContext, { LBLoc, RBLoc },
+                        PosBeforeLB);
+  return error;
 }
 
 /// Parse an 'extension' declaration.
@@ -3579,17 +3618,11 @@ Parser::parseDeclExtension(ParseDeclOptions Flags, DeclAttributes &Attributes) {
     Scope S(this, ScopeKind::Extension);
     ParseDeclOptions Options(PD_HasContainerType | PD_InExtension);
     if (canDelayMemberDeclParsing()) {
-      if (Tok.is(tok::r_brace)) {
-        RBLoc = consumeToken();
-      } else {
-        RBLoc = Tok.getLoc();
+      if (delayParsingDeclList(LBLoc, RBLoc, PosBeforeLB, Options, ext))
         status.setIsParseError();
-      }
-      State->delayDeclList(ext, Options.toRaw(), CurDeclContext, { LBLoc, RBLoc },
-                           PosBeforeLB);
     } else {
       if (parseDeclList(LBLoc, RBLoc, diag::expected_rbrace_extension,
-                        Options, [&] (Decl *D) { ext->addMember(D); }))
+                        Options, ext))
         status.setIsParseError();
     }
 
@@ -4406,9 +4439,11 @@ ParserStatus Parser::parseGetSet(ParseDeclOptions Flags,
   if (peekToken().is(tok::r_brace)) {
     accessors.LBLoc = consumeToken(tok::l_brace);
     // Give syntax node an empty accessor list.
-    if (SyntaxContext->isEnabled())
+    if (SyntaxContext->isEnabled()) {
+      SourceLoc listLoc = accessors.LBLoc.getAdvancedLoc(1);
       SyntaxContext->addSyntax(
-          SyntaxFactory::makeBlankAccessorList(SyntaxContext->getArena()));
+        ParsedSyntaxRecorder::makeBlankAccessorList(listLoc, *SyntaxContext));
+    }
     accessors.RBLoc = consumeToken(tok::r_brace);
 
     // In the limited syntax, fall out and let the caller handle it.
@@ -5372,7 +5407,8 @@ void Parser::consumeAbstractFunctionBody(AbstractFunctionDecl *AFD,
 
   BodyRange.End = PreviousLoc;
 
-  if (DelayedParseCB->shouldDelayFunctionBodyParsing(*this, AFD, Attrs,
+  if (DelayedParseCB &&
+      DelayedParseCB->shouldDelayFunctionBodyParsing(*this, AFD, Attrs,
                                                      BodyRange)) {
     State->delayFunctionBodyParsing(AFD, BodyRange,
                                     BeginParserPosition.PreviousLoc);
@@ -5714,20 +5750,14 @@ ParserResult<EnumDecl> Parser::parseDeclEnum(ParseDeclOptions Flags,
     RBLoc = LBLoc;
     Status.setIsParseError();
   } else {
-    Scope S(this, ScopeKind::ClassBody);
+    Scope S(this, ScopeKind::EnumBody);
     ParseDeclOptions Options(PD_HasContainerType | PD_AllowEnumElement | PD_InEnum);
     if (canDelayMemberDeclParsing()) {
-      if (Tok.is(tok::r_brace)) {
-        RBLoc = consumeToken();
-      } else {
-        RBLoc = Tok.getLoc();
+      if (delayParsingDeclList(LBLoc, RBLoc, PosBeforeLB, Options, ED))
         Status.setIsParseError();
-      }
-      State->delayDeclList(ED, Options.toRaw(), CurDeclContext, { LBLoc, RBLoc },
-                           PosBeforeLB);
     } else {
       if (parseDeclList(LBLoc, RBLoc, diag::expected_rbrace_enum,
-                        Options, [&] (Decl *D) { ED->addMember(D); }))
+                        Options, ED))
         Status.setIsParseError();
     }
   }
@@ -5817,13 +5847,14 @@ Parser::parseDeclEnumCase(ParseDeclOptions Flags,
     // See if there's a following argument type.
     ParserResult<ParameterList> ArgParams;
     SmallVector<Identifier, 4> argumentNames;
+    DefaultArgumentInfo DefaultArgs;
     if (Tok.isFollowingLParen()) {
       ArgParams = parseSingleParameterClause(ParameterContextKind::EnumElement,
-                                             &argumentNames);
+                                             &argumentNames, &DefaultArgs);
       if (ArgParams.isNull() || ArgParams.hasCodeCompletion())
         return ParserStatus(ArgParams);
     }
-    
+
     // See if there's a raw value expression.
     SourceLoc EqualsLoc;
     ParserResult<Expr> RawValueExpr;
@@ -5889,6 +5920,8 @@ Parser::parseDeclEnumCase(ParseDeclOptions Flags,
                                                  EqualsLoc,
                                                  LiteralRawValueExpr,
                                                  CurDeclContext);
+
+    DefaultArgs.setFunctionContext(result, result->getParameterList());
 
     if (NameLoc == CaseLoc) {
       result->setImplicit(); // Parse error
@@ -6002,17 +6035,11 @@ ParserResult<StructDecl> Parser::parseDeclStruct(ParseDeclOptions Flags,
     Scope S(this, ScopeKind::StructBody);
     ParseDeclOptions Options(PD_HasContainerType | PD_InStruct);
     if (canDelayMemberDeclParsing()) {
-      if (Tok.is(tok::r_brace)) {
-        RBLoc = consumeToken();
-      } else {
-        RBLoc = Tok.getLoc();
+      if (delayParsingDeclList(LBLoc, RBLoc, PosBeforeLB, Options, SD))
         Status.setIsParseError();
-      }
-      State->delayDeclList(SD, Options.toRaw(), CurDeclContext, { LBLoc, RBLoc },
-                           PosBeforeLB);
     } else {
       if (parseDeclList(LBLoc, RBLoc, diag::expected_rbrace_struct,
-                        Options, [&](Decl *D) {SD->addMember(D);}))
+                        Options,SD))
         Status.setIsParseError();
     }
   }
@@ -6126,22 +6153,11 @@ ParserResult<ClassDecl> Parser::parseDeclClass(ParseDeclOptions Flags,
     ParseDeclOptions Options(PD_HasContainerType | PD_AllowDestructor |
                              PD_InClass);
     if (canDelayMemberDeclParsing()) {
-      if (Tok.is(tok::r_brace)) {
-        RBLoc = consumeToken();
-      } else {
-        RBLoc = Tok.getLoc();
+      if (delayParsingDeclList(LBLoc, RBLoc, PosBeforeLB, Options, CD))
         Status.setIsParseError();
-      }
-      State->delayDeclList(CD, Options.toRaw(), CurDeclContext, { LBLoc, RBLoc },
-                           PosBeforeLB);
     } else {
-      auto Handler = [&] (Decl *D) {
-        CD->addMember(D);
-        if (isa<DestructorDecl>(D))
-          CD->setHasDestructor();
-      };
       if (parseDeclList(LBLoc, RBLoc, diag::expected_rbrace_class,
-                        Options, Handler))
+                        Options, CD))
         Status.setIsParseError();
     }
   }
@@ -6236,18 +6252,11 @@ parseDeclProtocol(ParseDeclOptions Flags, DeclAttributes &Attributes) {
                                PD_DisallowInit |
                                PD_InProtocol);
       if (canDelayMemberDeclParsing()) {
-        if (Tok.is(tok::r_brace)) {
-          RBraceLoc = consumeToken();
-        } else {
-          RBraceLoc = Tok.getLoc();
+        if (delayParsingDeclList(LBraceLoc, RBraceLoc, PosBeforeLB, Options, Proto))
           Status.setIsParseError();
-        }
-        State->delayDeclList(Proto, Options.toRaw(), CurDeclContext,
-                             { LBraceLoc, RBraceLoc },
-                             PosBeforeLB);
       } else {
         if (parseDeclList(LBraceLoc, RBraceLoc, diag::expected_rbrace_protocol,
-                          Options, [&](Decl *D) {Proto->addMember(D);}))
+                          Options, Proto))
           Status.setIsParseError();
       }
     }

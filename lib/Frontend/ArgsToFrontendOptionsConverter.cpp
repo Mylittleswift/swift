@@ -60,6 +60,9 @@ bool ArgsToFrontendOptionsConverter::convert(
   if (const Arg *A = Args.getLastArg(OPT_index_store_path)) {
     Opts.IndexStorePath = A->getValue();
   }
+  if (const Arg *A = Args.getLastArg(OPT_prebuilt_module_cache_path)) {
+    Opts.PrebuiltModuleCachePath = A->getValue();
+  }
 
   Opts.IndexSystemModules |= Args.hasArg(OPT_index_system_modules);
 
@@ -68,10 +71,17 @@ bool ArgsToFrontendOptionsConverter::convert(
 
   Opts.EnableTesting |= Args.hasArg(OPT_enable_testing);
   Opts.EnablePrivateImports |= Args.hasArg(OPT_enable_private_imports);
-  Opts.EnableResilience |= Args.hasArg(OPT_enable_resilience);
+  Opts.EnableLibraryEvolution |= Args.hasArg(OPT_enable_library_evolution);
+
+  // FIXME: Remove this flag
+  Opts.EnableLibraryEvolution |= Args.hasArg(OPT_enable_resilience);
+
   Opts.EnableImplicitDynamic |= Args.hasArg(OPT_enable_implicit_dynamic);
 
   Opts.TrackSystemDeps |= Args.hasArg(OPT_track_system_dependencies);
+
+  Opts.SerializeParseableModuleInterfaceDependencyHashes |=
+    Args.hasArg(OPT_serialize_parseable_module_interface_dependency_hashes);
 
   computePrintStatsOptions();
   computeDebugTimeOptions();
@@ -157,8 +167,6 @@ bool ArgsToFrontendOptionsConverter::convert(
 
   Opts.EnableSourceImport |= Args.hasArg(OPT_enable_source_import);
   Opts.ImportUnderlyingModule |= Args.hasArg(OPT_import_underlying_module);
-  Opts.EnableParseableModuleInterface |=
-      Args.hasArg(OPT_enable_parseable_module_interface);
   Opts.EnableSerializationNestedTypeLookupTable &=
       !Args.hasArg(OPT_disable_serialization_nested_type_lookup_table);
 

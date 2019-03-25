@@ -323,7 +323,6 @@ class ConcreteContext3 {
   func dynamicSelf1() -> Self { return self }
 
   @objc func dynamicSelf1_() -> Self { return self }
-  // expected-error@-1{{method cannot be marked @objc because its result type cannot be represented in Objective-C}}
 
   @objc func genericParams<T: NSObject>() -> [T] { return [] }
   // expected-error@-1{{method cannot be marked @objc because it has generic parameters}}
@@ -839,7 +838,7 @@ class infer_instanceVar1 {
   }
 
   var observingAccessorsVar1: Int {
-  // CHECK: @_hasStorage @objc var observingAccessorsVar1: Int {
+  // CHECK: @objc @_hasStorage var observingAccessorsVar1: Int {
     willSet {}
     // CHECK-NEXT: {{^}} @objc get
     didSet {}
@@ -1709,7 +1708,7 @@ class HasNSManaged {
 
   @NSManaged
   var goodManaged: Class_ObjC1
-  // CHECK-LABEL: {{^}}  @objc @NSManaged @_hasStorage dynamic var goodManaged: Class_ObjC1 {
+  // CHECK-LABEL: {{^}}  @objc @NSManaged dynamic var goodManaged: Class_ObjC1 {
   // CHECK-NEXT: {{^}} @objc get
   // CHECK-NEXT: {{^}} @objc set
   // CHECK-NEXT: {{^}} }
@@ -1719,7 +1718,7 @@ class HasNSManaged {
   // expected-error@-1 {{property cannot be marked @NSManaged because its type cannot be represented in Objective-C}}
   // expected-note@-2 {{Swift structs cannot be represented in Objective-C}}
   // expected-error@-3{{'dynamic' property 'badManaged' must also be '@objc'}}
-  // CHECK-LABEL: {{^}}  @NSManaged @_hasStorage var badManaged: PlainStruct {
+  // CHECK-LABEL: {{^}}  @NSManaged var badManaged: PlainStruct {
   // CHECK-NEXT: {{^}} get
   // CHECK-NEXT: {{^}} set
   // CHECK-NEXT: {{^}} }
@@ -2312,3 +2311,32 @@ protocol ObjCProtocolWithWeakProperty {
 protocol ObjCProtocolWithUnownedProperty {
    unowned var unownedProp: AnyObject { get set } // okay
 }
+
+// rdar://problem/46699152: errors about read/modify accessors being implicitly
+// marked @objc.
+@objc class MyObjCClass: NSObject {}
+
+@objc
+extension MyObjCClass {
+    @objc
+    static var objCVarInObjCExtension: Bool {
+        get {
+            return true
+        }
+        set {}
+    }
+
+    // CHECK: {{^}} @objc private dynamic func stillExposedToObjCDespiteBeingPrivate()
+    private func stillExposedToObjCDespiteBeingPrivate() {}
+}
+
+@objc private extension MyObjCClass {
+  // CHECK: {{^}} @objc dynamic func alsoExposedToObjCDespiteBeingPrivate()
+  func alsoExposedToObjCDespiteBeingPrivate() {}
+}
+
+@objcMembers class VeryObjCClass: NSObject {
+  // CHECK: {{^}} private func notExposedToObjC()
+  private func notExposedToObjC() {}
+}
+

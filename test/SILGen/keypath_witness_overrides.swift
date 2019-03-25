@@ -1,5 +1,5 @@
 // RUN: %empty-directory(%t)
-// RUN: %target-swift-frontend -module-name protocol_overrides -emit-module -enable-sil-ownership -enable-resilience -emit-module-path=%t/protocol_overrides.swiftmodule %S/Inputs/protocol_overrides.swift
+// RUN: %target-swift-frontend -module-name protocol_overrides -emit-module -enable-library-evolution -emit-module-path=%t/protocol_overrides.swiftmodule %S/Inputs/protocol_overrides.swift
 // RUN: %target-swift-emit-silgen %s -I %t | %FileCheck %s
 
 // Check that keypath formation properly records the point at which the witness
@@ -13,8 +13,8 @@ where OS.Index: Hashable {
   // CHECK-SAME: id #OverridesSetter.subscript!getter.1
   // CHECK-SAME: getter @$s18protocol_overrides14OriginalGetterPy7ElementQz5IndexQzcipAA15OverridesSetterRzSHAGRQlxxTK
   // CHECK-SAME: setter @$s18protocol_overrides10AddsSetterPy7ElementQz5IndexQzcipAA09OverridesD0RzSHAGRQlxxTk
-  // CHECK-SAME: indices_equals @$s5Index18protocol_overrides14OriginalGetterPQzAB15OverridesSetterRzSHAERQlTH
-  // CHECK-SAME: indices_hash @$s5Index18protocol_overrides14OriginalGetterPQzAB15OverridesSetterRzSHAERQlTh
+  // CHECK-SAME: indices_equals @$s5Index18protocol_overrides14OriginalGetterPQzAB15OverridesSetterRzSHAARpzlTH
+  // CHECK-SAME: indices_hash @$s5Index18protocol_overrides14OriginalGetterPQzAB15OverridesSetterRzSHAARpzlTh
   let keypath = \OS.[index]
   return keypath
 }

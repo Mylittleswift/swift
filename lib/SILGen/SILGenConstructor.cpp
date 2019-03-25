@@ -35,7 +35,9 @@ static SILValue emitConstructorMetatypeArg(SILGenFunction &SGF,
   auto ctorFnType = ctor->getInterfaceType()->castTo<AnyFunctionType>();
   assert(ctorFnType->getParams().size() == 1 &&
          "more than one self parameter?");
-  Type metatype = ctorFnType->getParams()[0].getOldType();
+  auto param = ctorFnType->getParams()[0];
+  assert(!param.isVariadic() && !param.isInOut());
+  Type metatype = param.getPlainType();
   auto *DC = ctor->getInnermostDeclContext();
   auto &AC = SGF.getASTContext();
   auto VD =
@@ -50,6 +52,7 @@ static SILValue emitConstructorMetatypeArg(SILGenFunction &SGF,
   return SGF.AllocatorMetatype;
 }
 
+// FIXME: Consolidate this with SILGenProlog
 static RValue emitImplicitValueConstructorArg(SILGenFunction &SGF,
                                               SILLocation loc,
                                               CanType interfaceType,
@@ -71,14 +74,26 @@ static RValue emitImplicitValueConstructorArg(SILGenFunction &SGF,
                                AC.getIdentifier("$implicit_value"),
                                DC);
   VD->setInterfaceType(interfaceType);
-  SILFunctionArgument *arg =
-      SGF.F.begin()->createFunctionArgument(SGF.getLoweredType(type), VD);
+
+  auto argType = SGF.SGM.Types.getLoweredType(type,
+                                              ResilienceExpansion::Minimal);
+  auto *arg = SGF.F.begin()->createFunctionArgument(argType, VD);
   ManagedValue mvArg;
   if (arg->getArgumentConvention().isOwnedConvention()) {
     mvArg = SGF.emitManagedRValueWithCleanup(arg);
   } else {
     mvArg = ManagedValue::forUnmanaged(arg);
   }
+
+  // This can happen if the value is resilient in the calling convention
+  // but not resilient locally.
+  if (argType.isLoadable(SGF.SGM.M) && argType.isAddress()) {
+    if (mvArg.isPlusOne(SGF))
+      mvArg = SGF.B.createLoadTake(loc, mvArg);
+    else
+      mvArg = SGF.B.createLoadBorrow(loc, mvArg);
+  }
+
   return RValue(SGF, loc, type, mvArg);
 }
 
@@ -89,9 +104,8 @@ static void emitImplicitValueConstructor(SILGenFunction &SGF,
   // FIXME: Handle 'self' along with the other arguments.
   auto *paramList = ctor->getParameters();
   auto *selfDecl = ctor->getImplicitSelfDecl();
-  auto selfTyCan = selfDecl->getType();
-  auto selfIfaceTyCan = selfDecl->getInterfaceType();
-  SILType selfTy = SGF.getLoweredType(selfTyCan);
+  auto selfIfaceTy = selfDecl->getInterfaceType();
+  SILType selfTy = SGF.getLoweredType(selfDecl->getType());
 
   // Emit the indirect return argument, if any.
   SILValue resultSlot;
@@ -103,8 +117,8 @@ static void emitImplicitValueConstructor(SILGenFunction &SGF,
                                  SourceLoc(),
                                  AC.getIdentifier("$return_value"),
                                  ctor);
-    VD->setInterfaceType(selfIfaceTyCan);
-    resultSlot = SGF.F.begin()->createFunctionArgument(selfTy, VD);
+    VD->setInterfaceType(selfIfaceTy);
+    resultSlot = SGF.F.begin()->createFunctionArgument(selfTy.getAddressType(), VD);
   }
 
   // Emit the elementwise arguments.
@@ -128,9 +142,9 @@ static void emitImplicitValueConstructor(SILGenFunction &SGF,
     auto elti = elements.begin(), eltEnd = elements.end();
     for (VarDecl *field : decl->getStoredProperties()) {
       auto fieldTy = selfTy.getFieldType(field, SGF.SGM.M);
-      auto &fieldTL = SGF.getTypeLowering(fieldTy);
-      SILValue slot = SGF.B.createStructElementAddr(Loc, resultSlot, field,
-                                                    fieldTL.getLoweredType().getAddressType());
+      SILValue slot =
+        SGF.B.createStructElementAddr(Loc, resultSlot, field,
+                                      fieldTy.getAddressType());
       InitializationPtr init(new KnownAddressInitialization(slot));
 
       // An initialized 'let' property has a single value specified by the
@@ -376,12 +390,10 @@ void SILGenFunction::emitValueConstructor(ConstructorDecl *ctor) {
 }
 
 void SILGenFunction::emitEnumConstructor(EnumElementDecl *element) {
-  CanType enumIfaceTy = element->getParentEnum()
-                      ->getDeclaredInterfaceType()
-                      ->getCanonicalType();
-  CanType enumTy = F.mapTypeIntoContext(enumIfaceTy)
-                      ->getCanonicalType();
-  auto &enumTI = getTypeLowering(enumTy);
+  Type enumIfaceTy = element->getParentEnum()->getDeclaredInterfaceType();
+  Type enumTy = F.mapTypeIntoContext(enumIfaceTy);
+  auto &enumTI = SGM.Types.getTypeLowering(enumTy,
+                                           ResilienceExpansion::Minimal);
 
   RegularLocation Loc(element);
   CleanupLocation CleanupLoc(element);
@@ -409,10 +421,9 @@ void SILGenFunction::emitEnumConstructor(EnumElementDecl *element) {
   // Emit the exploded constructor argument.
   ArgumentSource payload;
   if (element->hasAssociatedValues()) {
-    RValue arg = emitImplicitValueConstructorArg
-      (*this, Loc, element->getArgumentInterfaceType()->getCanonicalType(),
-       element->getDeclContext());
-   payload = ArgumentSource(Loc, std::move(arg));
+    auto eltArgTy = element->getArgumentInterfaceType()->getCanonicalType();
+    RValue arg = emitImplicitValueConstructorArg(*this, Loc, eltArgTy, element);
+    payload = ArgumentSource(Loc, std::move(arg));
   }
 
   // Emit the metatype argument.
@@ -481,9 +492,10 @@ void SILGenFunction::emitClassConstructorAllocator(ConstructorDecl *ctor) {
   // Allocate the 'self' value.
   bool useObjCAllocation = usesObjCAllocator(selfClassDecl);
 
-  if (ctor->hasClangNode()) {
-    // For an allocator thunk synthesized for an Objective-C init method,
-    // allocate using the metatype.
+  if (ctor->hasClangNode() || ctor->isConvenienceInit()) {
+    assert(ctor->hasClangNode() || ctor->isObjC());
+    // For an allocator thunk synthesized for an @objc convenience initializer
+    // or imported Objective-C init method, allocate using the metatype.
     SILValue allocArg = selfMetaValue;
 
     // When using Objective-C allocation, convert the metatype
@@ -572,10 +584,13 @@ void SILGenFunction::emitClassConstructorInitializer(ConstructorDecl *ctor) {
   // enforce its DI properties on stored properties.
   MarkUninitializedInst::Kind MUKind;
 
-  if (isDelegating)
-    MUKind = MarkUninitializedInst::DelegatingSelf;
-  else if (selfClassDecl->requiresStoredPropertyInits() &&
-           usesObjCAllocator) {
+  if (isDelegating) {
+    if (ctor->isObjC())
+      MUKind = MarkUninitializedInst::DelegatingSelfAllocated;
+    else
+      MUKind = MarkUninitializedInst::DelegatingSelf;
+  } else if (selfClassDecl->requiresStoredPropertyInits() &&
+             usesObjCAllocator) {
     // Stored properties will be initialized in a separate
     // .cxx_construct method called by the Objective-C runtime.
     assert(selfClassDecl->hasSuperclass() &&
@@ -904,7 +919,7 @@ void SILGenFunction::emitMemberInitializers(DeclContext *dc,
 
               return Type(type);
             },
-            MakeAbstractConformanceForGenericType());
+            LookUpConformanceInModule(dc->getParentModule()));
         }
 
         // Get the type of the initialization result, in terms

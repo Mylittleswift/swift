@@ -19,6 +19,9 @@ import SwiftPrivateLibcExtras
 import Darwin
 #elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
 import Glibc
+#elseif os(Windows)
+import MSVCRT
+import WinSDK
 #endif
 
 #if _runtime(_ObjC)
@@ -718,7 +721,11 @@ extension ProcessTerminationStatus {
   var isSwiftTrap: Bool {
     switch self {
     case .signal(let signal):
+#if os(Windows)
+      return CInt(signal) == SIGILL
+#else
       return CInt(signal) == SIGILL || CInt(signal) == SIGTRAP
+#endif
     default:
       // This default case is needed for standard library builds where
       // resilience is enabled.
@@ -749,12 +756,21 @@ func _stdlib_getline() -> String? {
 func _printDebuggingAdvice(_ fullTestName: String) {
   print("To debug, run:")
   var invocation = [CommandLine.arguments[0]]
+#if os(Windows)
+  var buffer: UnsafeMutablePointer<CChar>?
+  var length: Int = 0
+  if _dupenv_s(&buffer, &length, "SWIFT_INTERPRETER") != 0, let buffer = buffer {
+    invocation.insert(String(cString: buffer), at: 0)
+    free(buffer)
+  }
+#else
   let interpreter = getenv("SWIFT_INTERPRETER")
   if interpreter != nil {
     if let interpreterCmd = String(validatingUTF8: interpreter!) {
         invocation.insert(interpreterCmd, at: 0)
     }
   }
+#endif
   print("$ \(invocation.joined(separator: " ")) " +
     "--stdlib-unittest-in-process --stdlib-unittest-filter \"\(fullTestName)\"")
 }
@@ -823,17 +839,27 @@ func _childProcess() {
     var stderr = _Stderr()
     print("\(_stdlibUnittestStreamPrefix);end", to: &stderr)
 
-    if !testSuite._testByName(testName).canReuseChildProcessAfterTest {
+    if testSuite._shouldShutDownChildProcess(forTestNamed: testName) {
       return
     }
   }
 }
 
-struct _ParentProcess {
+class _ParentProcess {
+#if os(Windows)
+  internal var _process: HANDLE = INVALID_HANDLE_VALUE
+  internal var _childStdin: _FDOutputStream =
+      _FDOutputStream(handle: INVALID_HANDLE_VALUE)
+  internal var _childStdout: _FDInputStream =
+      _FDInputStream(handle: INVALID_HANDLE_VALUE)
+  internal var _childStderr: _FDInputStream =
+      _FDInputStream(handle: INVALID_HANDLE_VALUE)
+#else
   internal var _pid: pid_t?
   internal var _childStdin: _FDOutputStream = _FDOutputStream(fd: -1)
   internal var _childStdout: _FDInputStream = _FDInputStream(fd: -1)
   internal var _childStderr: _FDInputStream = _FDInputStream(fd: -1)
+#endif
 
   internal var _runTestsInProcess: Bool
   internal var _filter: String?
@@ -845,16 +871,32 @@ struct _ParentProcess {
     self._args = args
   }
 
-  mutating func _spawnChild() {
+  func _spawnChild() {
     let params = ["--stdlib-unittest-run-child"] + _args
+#if os(Windows)
+    let (hProcess, hStdIn, hStdOut, hStdErr) = spawnChild(params)
+    self._process = hProcess
+    self._childStdin = _FDOutputStream(handle: hStdIn)
+    self._childStdout = _FDInputStream(handle: hStdOut)
+    self._childStderr = _FDInputStream(handle: hStdErr)
+#else
     let (pid, childStdinFD, childStdoutFD, childStderrFD) = spawnChild(params)
     _pid = pid
     _childStdin = _FDOutputStream(fd: childStdinFD)
     _childStdout = _FDInputStream(fd: childStdoutFD)
     _childStderr = _FDInputStream(fd: childStderrFD)
+#endif
   }
 
-  mutating func _waitForChild() -> ProcessTerminationStatus {
+  func _waitForChild() -> ProcessTerminationStatus {
+#if os(Windows)
+    let status = waitProcess(_process)
+    _process = INVALID_HANDLE_VALUE
+
+    _childStdin.close()
+    _childStdout.close()
+    _childStderr.close()
+#else
     let status = posixWaitpid(_pid!)
     _pid = nil
     _childStdin.close()
@@ -863,13 +905,43 @@ struct _ParentProcess {
     _childStdin = _FDOutputStream(fd: -1)
     _childStdout = _FDInputStream(fd: -1)
     _childStderr = _FDInputStream(fd: -1)
+#endif
     return status
   }
 
-  internal mutating func _readFromChild(
-    onStdoutLine: (String) -> (done: Bool, Void),
-    onStderrLine: (String) -> (done: Bool, Void)
+  internal func _readFromChild(
+    onStdoutLine: @escaping (String) -> (done: Bool, Void),
+    onStderrLine: @escaping (String) -> (done: Bool, Void)
   ) {
+#if os(Windows)
+    let (_, stdoutThread) = _stdlib_thread_create_block({
+      while !self._childStdout.isEOF {
+        self._childStdout.read()
+        while let line = self._childStdout.getline() {
+          var done: Bool
+          (done: done, ()) = onStdoutLine(line)
+          if done { return }
+        }
+      }
+    }, ())
+
+    let (_, stderrThread) = _stdlib_thread_create_block({
+      while !self._childStderr.isEOF {
+        self._childStderr.read()
+        while var line = self._childStderr.getline() {
+          if let cr = line.firstIndex(of: "\r") {
+            line.remove(at: cr)
+          }
+          var done: Bool
+          (done: done, ()) = onStderrLine(line)
+          if done { return }
+        }
+      }
+    }, ())
+
+    let (_, _) = _stdlib_thread_join(stdoutThread!, Void.self)
+    let (_, _) = _stdlib_thread_join(stderrThread!, Void.self)
+#else
     var readfds = _stdlib_fd_set()
     var writefds = _stdlib_fd_set()
     var errorfds = _stdlib_fd_set()
@@ -907,19 +979,26 @@ struct _ParentProcess {
         continue
       }
     }
+#endif
   }
 
   /// Returns the values of the corresponding variables in the child process.
-  internal mutating func _runTestInChild(
+  internal func _runTestInChild(
     _ testSuite: TestSuite,
     _ testName: String,
     parameter: Int?
   ) -> (anyExpectFailed: Bool, seenExpectCrash: Bool,
         status: ProcessTerminationStatus?,
         crashStdout: [Substring], crashStderr: [Substring]) {
+#if os(Windows)
+    if _process == INVALID_HANDLE_VALUE {
+      _spawnChild()
+    }
+#else
     if _pid == nil {
       _spawnChild()
     }
+#endif
 
     print("\(testSuite.name);\(testName)", terminator: "", to: &_childStdin)
     if let parameter = parameter {
@@ -953,6 +1032,8 @@ struct _ParentProcess {
                               omittingEmptySubsequences: false)
         switch controlMessage[1] {
         case "expectCrash":
+          fallthrough
+        case "expectCrash\r":
           if isStdout {
             stdoutSeenCrashDelimiter = true
             anyExpectFailedInChild = controlMessage[2] == "true"
@@ -961,6 +1042,8 @@ struct _ParentProcess {
             expectingPreCrashMessage = String(controlMessage[2])
           }
         case "end":
+          fallthrough
+        case "end\r":
           if isStdout {
             stdoutEnd = true
             anyExpectFailedInChild = controlMessage[2] == "true"
@@ -972,7 +1055,11 @@ struct _ParentProcess {
         }
         line = line[line.startIndex..<index]
         if line.isEmpty {
+#if os(Windows)
+          return (done: isStdout ? stdoutEnd : stderrEnd, ())
+#else
           return (done: stdoutEnd && stderrEnd, ())
+#endif
         }
       }
       if !expectingPreCrashMessage.isEmpty
@@ -1006,7 +1093,11 @@ struct _ParentProcess {
       } else {
         print("stderr>>> \(line)")
       }
+#if os(Windows)
+      return (done: isStdout ? stdoutEnd : stderrEnd, ())
+#else
       return (done: stdoutEnd && stderrEnd, ())
+#endif
     }
 
     _readFromChild(
@@ -1016,7 +1107,7 @@ struct _ParentProcess {
     // Check if the child has sent us "end" markers for the current test.
     if stdoutEnd && stderrEnd {
       var status: ProcessTerminationStatus?
-      if !testSuite._testByName(testName).canReuseChildProcessAfterTest {
+      if testSuite._shouldShutDownChildProcess(forTestNamed: testName) {
         status = _waitForChild()
         switch status! {
         case .exit(0):
@@ -1042,13 +1133,25 @@ struct _ParentProcess {
       status, capturedCrashStdout, capturedCrashStderr)
   }
 
-  internal mutating func _shutdownChild() -> (failed: Bool, Void) {
+  internal func _shutdownChild() -> (failed: Bool, Void) {
+#if os(Windows)
+    if _process == INVALID_HANDLE_VALUE {
+      // The child process is not running.  Report that it didn't fail during
+      // shutdown.
+      return (failed: false, ())
+    }
+#else
     if _pid == nil {
       // The child process is not running.  Report that it didn't fail during
       // shutdown.
       return (failed: false, ())
     }
-    print("\(_stdlibUnittestStreamPrefix);shutdown", to: &_childStdin)
+#endif
+    // If the child process expects an EOF, its stdin fd has already been closed and
+    // it will shut itself down automatically.
+    if !_childStdin.isClosed {
+      print("\(_stdlibUnittestStreamPrefix);shutdown", to: &_childStdin)
+    }
 
     var childCrashed = false
 
@@ -1086,7 +1189,7 @@ struct _ParentProcess {
     case xFail
   }
 
-  internal mutating func runOneTest(
+  internal func runOneTest(
     fullTestName: String,
     testSuite: TestSuite,
     test t: TestSuite._Test,
@@ -1109,6 +1212,9 @@ struct _ParentProcess {
     if _runTestsInProcess {
       if t.stdinText != nil {
         print("The test \(fullTestName) requires stdin input and can't be run in-process, marking as failed")
+        _anyExpectFailed = true
+      } else if t.requiresOwnProcess {
+        print("The test \(fullTestName) requires running in a child process and can't be run in-process, marking as failed.")
         _anyExpectFailed = true
       } else {
         _anyExpectFailed = false
@@ -1172,7 +1278,7 @@ struct _ParentProcess {
     }
   }
 
-  mutating func run() {
+  func run() {
     if let filter = _filter {
       print("StdlibUnittest: using filter: \(filter)")
     }
@@ -1347,7 +1453,7 @@ public func runAllTests() {
       i += 1
     }
 
-    var parent = _ParentProcess(
+    let parent = _ParentProcess(
       runTestsInProcess: runTestsInProcess, args: args, filter: filter)
     parent.run()
   }
@@ -1451,6 +1557,17 @@ public final class TestSuite {
     return _tests[_testNameToIndex[testName]!]
   }
 
+  /// Determines if we should shut down the current test process, i.e. if this
+  /// test or the next test requires executing in its own process.
+  func _shouldShutDownChildProcess(forTestNamed testName: String) -> Bool {
+    let index = _testNameToIndex[testName]!
+    if index == _tests.count - 1 { return false }
+    let currentTest = _tests[index]
+    let nextTest = _tests[index + 1]
+    if !currentTest.canReuseChildProcessAfterTest { return true }
+    return currentTest.requiresOwnProcess || nextTest.requiresOwnProcess
+  }
+
   internal enum _TestCode {
     case single(code: () -> Void)
     case parameterized(code: (Int) -> Void, count: Int)
@@ -1465,6 +1582,7 @@ public final class TestSuite {
     let stdinEndsWithEOF: Bool
     let crashOutputMatches: [String]
     let code: _TestCode
+    let requiresOwnProcess: Bool
 
     /// Whether the test harness should stop reusing the child process after
     /// running this test.
@@ -1502,6 +1620,7 @@ public final class TestSuite {
       var _stdinEndsWithEOF: Bool = false
       var _crashOutputMatches: [String] = []
       var _testLoc: SourceLoc?
+      var _requiresOwnProcess: Bool = false
     }
 
     init(testSuite: TestSuite, name: String, loc: SourceLoc) {
@@ -1531,6 +1650,11 @@ public final class TestSuite {
       return self
     }
 
+    public func requireOwnProcess() -> _TestBuilder {
+      _data._requiresOwnProcess = true
+      return self
+    }
+
     internal func _build(_ testCode: _TestCode) {
       _testSuite._tests.append(
         _Test(
@@ -1539,7 +1663,8 @@ public final class TestSuite {
           stdinText: _data._stdinText,
           stdinEndsWithEOF: _data._stdinEndsWithEOF,
           crashOutputMatches: _data._crashOutputMatches,
-          code: testCode))
+          code: testCode,
+          requiresOwnProcess: _data._requiresOwnProcess))
       _testSuite._testNameToIndex[_name] = _testSuite._tests.count - 1
     }
 

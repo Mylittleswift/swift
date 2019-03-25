@@ -35,21 +35,7 @@ bool ArgumentSource::isShuffle() const {
   case Kind::LValue:
     return false;
   case Kind::Expr:
-    // FIXME: TupleShuffleExprs come in two flavors:
-    //
-    // 1) as apply arguments, where they're used to insert default
-    // argument value and collect varargs
-    //
-    // 2) as tuple conversions, where they can introduce, eliminate
-    // and re-order fields
-    //
-    // Case 1) must be emitted by ArgEmitter, and Case 2) must be
-    // emitted by RValueEmitter.
-    //
-    // It would be good to split up TupleShuffleExpr into these two
-    // cases, and simplify ArgEmitter since it no longer has to deal
-    // with re-ordering.
-    return isa<TupleShuffleExpr>(asKnownExpr());
+    return isa<ArgumentShuffleExpr>(asKnownExpr());
   }
   llvm_unreachable("bad kind");
 }
@@ -189,8 +175,8 @@ ManagedValue ArgumentSource::materialize(SILGenFunction &SGF,
                                          SILType destType) && {
   auto substFormalType = getSubstRValueType();
   assert(!destType || destType.getObjectType() ==
-               SGF.SGM.Types.getLoweredType(origFormalType,
-                                            substFormalType).getObjectType());
+               SGF.getLoweredType(origFormalType,
+                                  substFormalType).getObjectType());
 
   // Fast path: if the types match exactly, no abstraction difference
   // is possible and we can just materialize as normal.

@@ -1,5 +1,6 @@
 open class Cities {
   var x: Int
+  public var name: String = ""
   public init(x: Int) { self.x = x }
   public init!(y: Int) { self.x = y }
   open func mooloolaba(x: Cities, y: Cities?) {}
@@ -62,6 +63,7 @@ open class ToplevelType {
   public init() {}
   public init(recordName: String) {}
   open func member(_ x: @escaping ([Any]?) -> Void) {}
+  open func trailing(_ x: @escaping ([Any]?) -> Void) {}
 }
 
 public var GlobalAttribute: String = ""

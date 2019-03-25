@@ -212,6 +212,12 @@ void releasePartialApplyCapturedArg(
     SILBuilder &Builder, SILLocation Loc, SILValue Arg, SILParameterInfo PInfo,
     InstModCallbacks Callbacks = InstModCallbacks());
 
+/// Insert destroys of captured arguments of partial_apply [stack].
+void insertDestroyOfCapturedArguments(
+    PartialApplyInst *PAI, SILBuilder &B,
+    llvm::function_ref<bool(SILValue)> shouldInsertDestroy =
+        [](SILValue arg) -> bool { return true; });
+
 /// This computes the lifetime of a single SILValue.
 ///
 /// This does not compute a set of jointly postdominating use points. Instead it
@@ -281,6 +287,9 @@ public:
   bool isAliveAtBeginOfBlock(SILBasicBlock *BB) {
     return LiveBlocks.count(BB) && BB != DefValue->getParent();
   }
+
+  /// Checks if there is a dealloc_ref inside the value's live range.
+  bool containsDeallocRef(const Frontier &Frontier);
 
   /// For debug dumping.
   void dump() const;
@@ -513,11 +522,6 @@ bool simplifyUsers(SingleValueInstruction *I);
 /// without a significant increase to code size.
 bool shouldExpand(SILModule &Module, SILType Ty);
 
-/// Check if a given type is a simple type, i.e. a builtin
-/// integer or floating point type or a struct/tuple whose members
-/// are of simple types.
-bool isSimpleType(SILType SILTy, SILModule& Module);
-
 /// Check if the value of V is computed by means of a simple initialization.
 /// Store the actual SILValue into \p Val and the reversed list of instructions
 /// initializing it in \p Insns.
@@ -526,13 +530,15 @@ bool isSimpleType(SILType SILTy, SILModule& Module);
 bool analyzeStaticInitializer(SILValue V,
                               SmallVectorImpl<SILInstruction *> &Insns);
 
+/// Returns true if the below operation will succeed.
+bool canReplaceLoadSequence(SILInstruction *I);
+
 /// Replace load sequence which may contain
 /// a chain of struct_element_addr followed by a load.
 /// The sequence is traversed inside out, i.e.
 /// starting with the innermost struct_element_addr
 void replaceLoadSequence(SILInstruction *I,
-                         SILValue Value,
-                         SILBuilder &B);
+                         SILValue Value);
 
 
 /// Do we have enough information to determine all callees that could
@@ -545,20 +551,20 @@ bool calleesAreStaticallyKnowable(SILModule &M, SILDeclRef Decl);
 // can be derived e.g.:
 // - from a constructor or
 // - from a successful outcome of a checked_cast_br [exact] instruction.
-SILValue getInstanceWithExactDynamicType(SILValue S, SILModule &M,
+SILValue getInstanceWithExactDynamicType(SILValue S,
                                          ClassHierarchyAnalysis *CHA);
 
 /// Try to determine the exact dynamic type of an object.
 /// returns the exact dynamic type of the object, or an empty type if the exact
 /// type could not be determined.
-SILType getExactDynamicType(SILValue S, SILModule &M,
+SILType getExactDynamicType(SILValue S,
                             ClassHierarchyAnalysis *CHA,
                             bool ForUnderlyingObject = false);
 
 /// Try to statically determine the exact dynamic type of the underlying object.
 /// returns the exact dynamic type of the underlying object, or an empty SILType
 /// if the exact type could not be determined.
-SILType getExactDynamicTypeOfUnderlyingObject(SILValue S, SILModule &M,
+SILType getExactDynamicTypeOfUnderlyingObject(SILValue S,
                                               ClassHierarchyAnalysis *CHA);
 
 /// Utility class for cloning init values into the static initializer of a

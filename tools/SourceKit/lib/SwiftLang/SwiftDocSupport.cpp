@@ -413,6 +413,7 @@ static bool initDocEntityInfo(const Decl *D,
     case DeclContextKind::TopLevelCodeDecl:
     case DeclContextKind::AbstractFunctionDecl:
     case DeclContextKind::SubscriptDecl:
+    case DeclContextKind::EnumElementDecl:
     case DeclContextKind::Initializer:
     case DeclContextKind::SerializedLocal:
     case DeclContextKind::ExtensionDecl:
@@ -450,7 +451,7 @@ static bool initDocEntityInfo(const TextEntity &Entity,
 }
 
 static const TypeDecl *getTypeDeclFromType(Type Ty) {
-  if (auto alias = dyn_cast<NameAliasType>(Ty.getPointer()))
+  if (auto alias = dyn_cast<TypeAliasType>(Ty.getPointer()))
     return alias->getDecl();
   return Ty->getAnyNominal();
 }

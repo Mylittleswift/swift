@@ -11,6 +11,12 @@
 //===----------------------------------------------------------------------===//
 
 module WinSDK [system] [extern_c] {
+  module WinSock2 {
+    header "WinSock2.h"
+    header "WS2tcpip.h"
+    export *
+  }
+
   module core {
     // api-ms-win-core-errhandling-l1-1-0.dll
     module errhandling {
@@ -30,9 +36,20 @@ module WinSDK [system] [extern_c] {
       export *
     }
 
+    // api-ms-win-heapapi-l1-1-0.dll
+    module heap {
+      header "heapapi.h"
+      export *
+    }
+
     // api-ms-win-core-interlocked-l1-1-0.dll
     module interlocked {
       header "interlockedapi.h"
+      export *
+    }
+
+    module iphlp {
+      header "iphlpapi.h"
       export *
     }
 
@@ -45,6 +62,12 @@ module WinSDK [system] [extern_c] {
     // api-ms-win-core-namedpipe-l1-1-2-0.dll
     module namedpipe {
       header "namedpipeapi.h"
+      export *
+    }
+
+    // api-ms-win-core-Path-l1-0.dll
+    module path {
+      header "PathCch.h"
       export *
     }
 
@@ -73,5 +96,40 @@ module WinSDK [system] [extern_c] {
     }
   }
 
+  module CommCtrl {
+    header "CommCtrl.h"
+    export *
+  }
+
+  // FIXME(compnerd) this is a hack for the HWND typedef for DbgHelp
+  module __DirectX {
+    header "directmanipulation.h"
+    export *
+  }
+
+  module DbgHelp {
+    header "DbgHelp.h"
+    export *
+  }
+
+  module Shell {
+    header "ShlObj.h"
+    export *
+  }
+
+  module ShellAPI {
+    header "Shlwapi.h"
+    export *
+  }
+
+  module User {
+    header "WinUser.h"
+    export *
+  }
+
+  module WinCrypt {
+    header "wincrypt.h"
+    export *
+  }
 }
 

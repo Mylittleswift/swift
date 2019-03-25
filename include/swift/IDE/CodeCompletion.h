@@ -133,7 +133,7 @@ public:
     /// Required parameter type.
     CallParameterType,
     /// Desugared closure parameter type. This can be used to get the
-    /// closure type if CallParameterType is a NameAliasType.
+    /// closure type if CallParameterType is a TypeAliasType.
     CallParameterClosureType,
 
     /// A placeholder for \c ! or \c ? in a call to a method found by dynamic
@@ -492,6 +492,7 @@ enum class CompletionKind {
   TypeSimpleBeginning,
   TypeIdentifierWithDot,
   TypeIdentifierWithoutDot,
+  CaseStmtKeyword,
   CaseStmtBeginning,
   CaseStmtDotPrefix,
   NominalMemberBeginning,

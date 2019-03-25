@@ -18,6 +18,7 @@
 
 #include "swift/AST/Module.h"
 #include "swift/ClangImporter/ClangImporter.h"
+#include "clang/AST/ExternalASTSource.h"
 
 namespace clang {
   class ASTContext;
@@ -35,6 +36,8 @@ class ClangModuleUnit final : public LoadedFile {
   const clang::Module *clangModule;
   llvm::PointerIntPair<ModuleDecl *, 1, bool> adapterModule;
   mutable ArrayRef<ModuleDecl::ImportedModule> importedModulesForLookup;
+  /// The metadata of the underlying Clang module.
+  clang::ExternalASTSource::ASTSourceDescriptor ASTSourceDescriptor;
 
   ~ClangModuleUnit() = default;
 
@@ -59,7 +62,7 @@ public:
   /// Retrieve the "exported" name of the module, which is usually the module
   /// name, but might be the name of the public module through which this
   /// (private) module is re-exported.
-  std::string getExportedModuleName() const;
+  StringRef getExportedModuleName() const override;
 
   virtual bool isSystemModule() const override;
 
@@ -112,6 +115,11 @@ public:
   }
 
   clang::ASTContext &getClangASTContext() const;
+
+  /// Returns the ASTSourceDescriptor of the associated Clang module if one
+  /// exists.
+  Optional<clang::ExternalASTSource::ASTSourceDescriptor>
+  getASTSourceDescriptor() const;
 
   static bool classof(const FileUnit *file) {
     return file->getKind() == FileUnitKind::ClangModule;

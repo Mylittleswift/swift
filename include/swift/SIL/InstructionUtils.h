@@ -44,6 +44,10 @@ SILValue stripCasts(SILValue V);
 /// mark_dependence) from the current SILValue.
 SILValue stripCastsWithoutMarkDependence(SILValue V);
 
+/// Return the underlying SILValue after stripping off all copy_value and
+/// begin_borrow instructions.
+SILValue stripOwnershipInsts(SILValue v);
+
 /// Return the underlying SILValue after stripping off all upcasts from the
 /// current SILValue.
 SILValue stripUpCasts(SILValue V);
@@ -125,10 +129,6 @@ bool mayCheckRefCount(SILInstruction *User);
 /// Return true when the instruction represents added instrumentation for
 /// run-time sanitizers.
 bool isSanitizerInstrumentation(SILInstruction *Instruction);
-
-/// If V is a convert_function or convert_escape_to_noescape return its operand
-/// recursively.
-SILValue stripConvertFunctions(SILValue V);
 
 /// Check that this is a partial apply of a reabstraction thunk and return the
 /// argument of the partial apply if it is.
