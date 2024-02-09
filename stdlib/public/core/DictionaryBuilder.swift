@@ -14,7 +14,7 @@
 ///
 /// Using a builder can be faster than inserting members into an empty
 /// `Dictionary`.
-@_fixed_layout
+@frozen
 public // SPI(Foundation)
 struct _DictionaryBuilder<Key: Hashable, Value> {
   @usableFromInline
@@ -49,15 +49,15 @@ extension Dictionary {
   ///
   /// Foundation uses this initializer to bridge the contents of an NSDictionary
   /// instance without allocating a pair of intermediary buffers.  Pass the
-  /// required capacity and a closure that can intialize the dictionary's
+  /// required capacity and a closure that can initialize the dictionary's
   /// elements. The closure must return `c`, the number of initialized elements
   /// in both buffers, such that the elements in the range `0..<c` are
   /// initialized and the elements in the range `c..<capacity` are
   /// uninitialized.
   ///
-  /// The resulting dictionary has a `count` less than or equal to `c`. The
-  /// actual count is less iff some of the initialized keys were duplicates.
-  /// (This cannot happen if `allowingDuplicates` is false.)
+  /// The resulting dictionary has a `count` less than or equal to `c`.
+  /// If some of the initialized keys were duplicates, the actual count is less.
+  /// This cannot happen for any other reasons or if `allowingDuplicates` is false.
   ///
   /// The buffers passed to the closure are only valid for the duration of the
   /// call.  After the closure returns, this initializer moves all initialized
@@ -71,16 +71,15 @@ extension Dictionary {
   ///   - body: A closure that can initialize the dictionary's elements. This
   ///     closure must return the count of the initialized elements, starting at
   ///     the beginning of the buffer.
-  @inlinable
+  @_alwaysEmitIntoClient // Introduced in 5.1
   public // SPI(Foundation)
   init(
     _unsafeUninitializedCapacity capacity: Int,
     allowingDuplicates: Bool,
     initializingWith initializer: (
       _ keys: UnsafeMutableBufferPointer<Key>,
-      _ values: UnsafeMutableBufferPointer<Value>,
-      _ initializedCount: inout Int
-    ) -> Void
+      _ values: UnsafeMutableBufferPointer<Value>
+    ) -> Int
   ) {
     self.init(_native: _NativeDictionary(
         _unsafeUninitializedCapacity: capacity,
@@ -90,23 +89,20 @@ extension Dictionary {
 }
 
 extension _NativeDictionary {
-  @inlinable
+  @_alwaysEmitIntoClient // Introduced in 5.1
   internal init(
     _unsafeUninitializedCapacity capacity: Int,
     allowingDuplicates: Bool,
     initializingWith initializer: (
       _ keys: UnsafeMutableBufferPointer<Key>,
-      _ values: UnsafeMutableBufferPointer<Value>,
-      _ initializedCount: inout Int
-    ) -> Void
+      _ values: UnsafeMutableBufferPointer<Value>
+    ) -> Int
   ) {
     self.init(capacity: capacity)
-    var initializedCount = 0
-    initializer(
+    let initializedCount = initializer(
       UnsafeMutableBufferPointer(start: _keys, count: capacity),
-      UnsafeMutableBufferPointer(start: _values, count: capacity),
-      &initializedCount)
-    _precondition(count >= 0 && count <= capacity)
+      UnsafeMutableBufferPointer(start: _values, count: capacity))
+    _precondition(initializedCount >= 0 && initializedCount <= capacity)
     _storage._count = initializedCount
 
     // Hash initialized elements and move each of them into their correct

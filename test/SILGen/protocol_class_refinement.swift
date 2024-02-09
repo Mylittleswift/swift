@@ -29,18 +29,19 @@ class Base {}
 func getObjectUID<T: ObjectUID>(x: T) -> (Int, Int, Int, Int) {
   var x = x
   // CHECK: [[XBOX:%.*]] = alloc_box $<τ_0_0 where τ_0_0 : ObjectUID> { var τ_0_0 } <T>
-  // CHECK: [[PB:%.*]] = project_box [[XBOX]]
+  // CHECK: [[XLIFETIME:%[^,]+]] = begin_borrow [lexical] [var_decl] [[XBOX]]
+  // CHECK: [[PB:%.*]] = project_box [[XLIFETIME]]
   // -- call x.uid()
   // CHECK: [[READ:%.*]] = begin_access [read] [unknown] [[PB]] : $*T
   // CHECK: [[X:%.*]] = load [copy] [[READ]]
   // CHECK: [[X_TMP:%.*]] = alloc_stack
   // CHECK: store [[X]] to [init] [[X_TMP]]
-  // CHECK: [[GET_UID:%.*]] = witness_method $T, #UID.uid!1
+  // CHECK: [[GET_UID:%.*]] = witness_method $T, #UID.uid :
   // CHECK: [[UID:%.*]] = apply [[GET_UID]]<T>([[X_TMP]])
   // CHECK: destroy_addr [[X_TMP]]
   // -- call set x.clsid
   // CHECK: [[WRITE:%.*]] = begin_access [modify] [unknown] [[PB]] : $*T
-  // CHECK: [[SET_CLSID:%.*]] = witness_method $T, #UID.clsid!setter.1
+  // CHECK: [[SET_CLSID:%.*]] = witness_method $T, #UID.clsid!setter
   // CHECK: apply [[SET_CLSID]]<T>([[UID]], [[WRITE]])
   x.clsid = x.uid()
 
@@ -49,7 +50,7 @@ func getObjectUID<T: ObjectUID>(x: T) -> (Int, Int, Int, Int) {
   // CHECK: [[X:%.*]] = load [copy] [[READ]]
   // CHECK: [[X_TMP:%.*]] = alloc_stack
   // CHECK: store [[X]] to [init] [[X_TMP]]
-  // CHECK: [[GET_UID:%.*]] = witness_method $T, #UID.uid!1
+  // CHECK: [[GET_UID:%.*]] = witness_method $T, #UID.uid :
   // CHECK: [[UID:%.*]] = apply [[GET_UID]]<T>([[X_TMP]])
   // CHECK: destroy_addr [[X_TMP]]
   // -- call nextCLSID from protocol ext
@@ -66,7 +67,7 @@ func getObjectUID<T: ObjectUID>(x: T) -> (Int, Int, Int, Int) {
   // CHECK: [[X_TMP:%.*]] = alloc_stack
   // CHECK: store [[X]] to [init] [[X_TMP]]
 
-  // CHECK: [[GET_UID:%.*]] = witness_method $T, #UID.uid!1
+  // CHECK: [[GET_UID:%.*]] = witness_method $T, #UID.uid :
   // CHECK: [[UID:%.*]] = apply [[GET_UID]]<T>([[X_TMP]])
   // CHECK: destroy_addr [[X_TMP]]
   // -- call secondNextCLSID from class-constrained protocol ext
@@ -83,18 +84,19 @@ func getObjectUID<T: ObjectUID>(x: T) -> (Int, Int, Int, Int) {
 func getBaseObjectUID<T: UID>(x: T) -> (Int, Int, Int) where T: Base {
   var x = x
   // CHECK: [[XBOX:%.*]] = alloc_box $<τ_0_0 where τ_0_0 : Base, τ_0_0 : UID> { var τ_0_0 } <T>
-  // CHECK: [[PB:%.*]] = project_box [[XBOX]]
+  // CHECK: [[XLIFETIME:%[^,]+]] = begin_borrow [lexical] [var_decl] [[XBOX]]
+  // CHECK: [[PB:%.*]] = project_box [[XLIFETIME]]
   // -- call x.uid()
   // CHECK: [[READ:%.*]] = begin_access [read] [unknown] [[PB]] : $*T
   // CHECK: [[X:%.*]] = load [copy] [[READ]]
   // CHECK: [[X_TMP:%.*]] = alloc_stack
   // CHECK: store [[X]] to [init] [[X_TMP]]
-  // CHECK: [[GET_UID:%.*]] = witness_method $T, #UID.uid!1
+  // CHECK: [[GET_UID:%.*]] = witness_method $T, #UID.uid :
   // CHECK: [[UID:%.*]] = apply [[GET_UID]]<T>([[X_TMP]])
   // CHECK: destroy_addr [[X_TMP]]
   // -- call set x.clsid
   // CHECK: [[WRITE:%.*]] = begin_access [modify] [unknown] [[PB]] : $*T
-  // CHECK: [[SET_CLSID:%.*]] = witness_method $T, #UID.clsid!setter.1
+  // CHECK: [[SET_CLSID:%.*]] = witness_method $T, #UID.clsid!setter
   // CHECK: apply [[SET_CLSID]]<T>([[UID]], [[WRITE]])
   x.clsid = x.uid()
 
@@ -103,7 +105,7 @@ func getBaseObjectUID<T: UID>(x: T) -> (Int, Int, Int) where T: Base {
   // CHECK: [[X:%.*]] = load [copy] [[READ]]
   // CHECK: [[X_TMP:%.*]] = alloc_stack
   // CHECK: store [[X]] to [init] [[X_TMP]]
-  // CHECK: [[GET_UID:%.*]] = witness_method $T, #UID.uid!1
+  // CHECK: [[GET_UID:%.*]] = witness_method $T, #UID.uid :
   // CHECK: [[UID:%.*]] = apply [[GET_UID]]<T>([[X_TMP]])
   // CHECK: destroy_addr [[X_TMP]]
   // -- call nextCLSID from protocol ext

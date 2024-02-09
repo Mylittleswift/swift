@@ -11,21 +11,21 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "sil-codemotion"
-#include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/AST/Module.h"
 #include "swift/Basic/BlotMapVector.h"
+#include "swift/SIL/DebugUtils.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/SILType.h"
 #include "swift/SIL/SILValue.h"
 #include "swift/SIL/SILVisitor.h"
-#include "swift/SIL/DebugUtils.h"
 #include "swift/SILOptimizer/Analysis/ARCAnalysis.h"
 #include "swift/SILOptimizer/Analysis/AliasAnalysis.h"
 #include "swift/SILOptimizer/Analysis/PostOrderAnalysis.h"
 #include "swift/SILOptimizer/Analysis/RCIdentityAnalysis.h"
+#include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
-#include "swift/SILOptimizer/Utils/Local.h"
+#include "swift/SILOptimizer/Utils/InstOptUtils.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
@@ -60,7 +60,8 @@ static void createRefCountOpForPayload(SILBuilder &Builder, SILInstruction *I,
   // argument to the refcount instruction.
   SILValue EnumVal = DefOfEnum ? DefOfEnum : I->getOperand(0);
 
-  SILType ArgType = EnumVal->getType().getEnumElementType(EnumDecl, Mod);
+  SILType ArgType = EnumVal->getType().getEnumElementType(
+      EnumDecl, Mod, TypeExpansionContext(Builder.getFunction()));
 
   auto *UEDI =
     Builder.createUncheckedEnumData(I->getLoc(), EnumVal, EnumDecl, ArgType);
@@ -130,8 +131,7 @@ public:
   BBEnumTagDataflowState(const BBEnumTagDataflowState &Other) = default;
   ~BBEnumTagDataflowState() = default;
 
-  LLVM_ATTRIBUTE_DEPRECATED(void dump() const LLVM_ATTRIBUTE_USED,
-                            "only for use within the debugger");
+  SWIFT_DEBUG_DUMP;
 
   bool init(EnumCaseDataflowContext &Context, SILBasicBlock *NewBB);
 
@@ -139,7 +139,7 @@ public:
 
   using iterator = decltype(ValueToCaseMap)::iterator;
   iterator begin() { return ValueToCaseMap.getItems().begin(); }
-  iterator end() { return ValueToCaseMap.getItems().begin(); }
+  iterator end() { return ValueToCaseMap.getItems().end(); }
 
   void clear() { ValueToCaseMap.clear(); }
 
@@ -366,7 +366,7 @@ bool BBEnumTagDataflowState::initWithFirstPred(SILBasicBlock *FirstPredBB) {
   // TODO: I am writing this too fast. Clean this up later.
   if (FirstPredBB->getSingleSuccessorBlock()) {
     for (auto P : ValueToCaseMap.getItems()) {
-      if (!P.hasValue())
+      if (!P.has_value())
         continue;
       EnumToEnumBBCaseListMap[P->first].push_back({FirstPredBB, P->second});
     }
@@ -462,7 +462,7 @@ void BBEnumTagDataflowState::mergePredecessorStates() {
     for (auto P : ValueToCaseMap.getItems()) {
       // If this SILValue was blotted, there is nothing left to do, we found
       // some sort of conflicting definition and are being conservative.
-      if (!P.hasValue())
+      if (!P.has_value())
         continue;
 
       // Then attempt to look up the enum state associated in our SILValue in
@@ -474,7 +474,7 @@ void BBEnumTagDataflowState::mergePredecessorStates() {
       // cannot find a covering switch for this BB or forward any enum tag
       // information for this enum value.
       if (PredIter == PredBBState->ValueToCaseMap.end() ||
-          !(*PredIter).hasValue()) {
+          !(*PredIter).has_value()) {
         // Otherwise, we are conservative and do not forward the EnumTag that we
         // are tracking. Blot it!
         LLVM_DEBUG(llvm::dbgs() << "                Blotting: " << P->first);
@@ -564,6 +564,10 @@ bool BBEnumTagDataflowState::visitReleaseValueInst(ReleaseValueInst *RVI) {
   if (FindResult == ValueToCaseMap.end())
     return false;
 
+  // If the enum has a deinit, preserve the original release.
+  if (hasValueDeinit(RVI->getOperand()))
+    return false;
+
   // If we do not have any argument, just delete the release value.
   if (!(*FindResult)->second->hasAssociatedValues()) {
     RVI->eraseFromParent();
@@ -620,6 +624,10 @@ bool BBEnumTagDataflowState::hoistDecrementsIntoSwitchRegions(
                                 "list for release_value's operand. Bailing!\n");
       continue;
     }
+
+    // If the enum has a deinit, preserve the original release.
+    if (hasValueDeinit(Op))
+      return false;
 
     auto &EnumBBCaseList = (*R)->second;
     // If we don't have an enum tag for each predecessor of this BB, bail since
@@ -757,7 +765,7 @@ bool BBEnumTagDataflowState::sinkIncrementsOutOfSwitchRegions(
 
     // If EnumValue is null, we deleted this entry. There is nothing to do for
     // this value... Skip it.
-    if (!P.hasValue())
+    if (!P.has_value())
       continue;
 
     // Look up the actual enum value using our index to make sure that other
@@ -811,7 +819,7 @@ void BBEnumTagDataflowState::dump() const {
   llvm::dbgs() << "Dumping state for BB" << BB.get()->getDebugID() << "\n";
   llvm::dbgs() << "Block States:\n";
   for (auto &P : ValueToCaseMap) {
-    if (!P.hasValue()) {
+    if (!P) {
       llvm::dbgs() << "  Skipping blotted value.\n";
       continue;
     }
@@ -827,7 +835,7 @@ void BBEnumTagDataflowState::dump() const {
   llvm::dbgs() << "Predecessor States:\n";
   // For each (EnumValue, [(BB, EnumTag)]) that we are tracking...
   for (auto &P : EnumToEnumBBCaseListMap) {
-    if (!P.hasValue()) {
+    if (!P) {
       llvm::dbgs() << "  Skipping blotted value.\n";
       continue;
     }
@@ -947,8 +955,8 @@ enum OperandRelation {
 /// the only possible incoming value.
 ///
 /// bb1:
-///  %3 = unchecked_enum_data %0 : $Optional<X>, #Optional.Some!enumelt.1
-///  checked_cast_br [exact] %3 : $X to $X, bb4, bb5 // id: %4
+///  %3 = unchecked_enum_data %0 : $Optional<X>, #Optional.Some!enumelt
+///  checked_cast_br [exact] X in %3 : $X to $X, bb4, bb5 // id: %4
 ///
 /// bb4(%10 : $X):                                    // Preds: bb1
 ///  strong_release %10 : $X
@@ -1044,7 +1052,7 @@ SILInstruction *findIdenticalInBlock(SILBasicBlock *BB, SILInstruction *Iden,
     if (InstToSink == BB->begin())
       return nullptr;
 
-    SkipBudget--;
+    --SkipBudget;
     InstToSink = std::prev(InstToSink);
     LLVM_DEBUG(llvm::dbgs() << "Continuing scan. Next inst: " << *InstToSink);
   }
@@ -1074,7 +1082,7 @@ cheaperToPassOperandsAsArguments(SILInstruction *First,
   auto *SecondStruct = dyn_cast<StructInst>(Second);
 
   if (!FirstStruct || !SecondStruct)
-    return None;
+    return llvm::None;
 
   assert(FirstStruct->getNumOperands() == SecondStruct->getNumOperands() &&
          FirstStruct->getType() == SecondStruct->getType() &&
@@ -1087,20 +1095,20 @@ cheaperToPassOperandsAsArguments(SILInstruction *First,
     if (FirstStruct->getOperand(i) != SecondStruct->getOperand(i)) {
       // Only track one different operand for now
       if (DifferentOperandIndex)
-        return None;
+        return llvm::None;
       DifferentOperandIndex = i;
     }
   }
 
   if (!DifferentOperandIndex)
-    return None;
+    return llvm::None;
 
   // Found a different operand, now check to see if its type is something
   // cheap enough to sink.
   // TODO: Sink more than just integers.
   SILType ArgTy = FirstStruct->getOperand(*DifferentOperandIndex)->getType();
   if (!ArgTy.is<BuiltinIntegerType>())
-    return None;
+    return llvm::None;
 
   return *DifferentOperandIndex;
 }
@@ -1245,7 +1253,7 @@ static bool sinkArgument(EnumCaseDataflowContext &Context, SILBasicBlock *BB, un
     BB->getArgument(ArgNum)->replaceAllUsesWith(FSI);
 
     const auto &ArgType = FSI->getOperand(*DifferentOperandIndex)->getType();
-    BB->replacePhiArgument(ArgNum, ArgType, ValueOwnershipKind::Owned);
+    BB->replacePhiArgument(ArgNum, ArgType, OwnershipKind::Owned);
 
     // Update all branch instructions in the predecessors to pass the new
     // argument to this BB.
@@ -1261,7 +1269,7 @@ static bool sinkArgument(EnumCaseDataflowContext &Context, SILBasicBlock *BB, un
       TI->setOperand(ArgNum, CloneInst->getOperand(*DifferentOperandIndex));
       // Now delete the clone as we only needed it operand.
       if (CloneInst != FSI)
-        recursivelyDeleteTriviallyDeadInstructions(CloneInst);
+        eliminateDeadInstruction(CloneInst);
       ++CloneIt;
     }
     assert(CloneIt == Clones.end() && "Clone/pred mismatch");
@@ -1384,7 +1392,7 @@ static bool sinkCodeFromPredecessors(EnumCaseDataflowContext &Context,
   for (auto P : BB->getPredecessorBlocks()) {
     if (auto *BI = dyn_cast<BranchInst>(P->getTerminator())) {
       auto Args = BI->getArgs();
-      for (size_t idx = 0, size = Args.size(); idx < size; idx++) {
+      for (size_t idx = 0, size = Args.size(); idx < size; ++idx) {
         valueToArgIdxMap[{Args[idx], P}] = idx;
       }
     }
@@ -1431,7 +1439,7 @@ static bool sinkCodeFromPredecessors(EnumCaseDataflowContext &Context,
           // Replace operand values (which are passed to the successor block)
           // with corresponding block arguments.
           for (size_t idx = 0, numOps = InstToSink->getNumOperands();
-               idx < numOps; idx++) {
+               idx < numOps; ++idx) {
             ValueInBlock OpInFirstPred(InstToSink->getOperand(idx), FirstPred);
             assert(valueToArgIdxMap.count(OpInFirstPred) != 0);
             int argIdx = valueToArgIdxMap[OpInFirstPred];
@@ -1445,7 +1453,7 @@ static bool sinkCodeFromPredecessors(EnumCaseDataflowContext &Context,
             Context.blotValue(Result);
           }
           I->eraseFromParent();
-          NumSunk++;
+          ++NumSunk;
         }
 
         // Restart the scan.
@@ -1468,7 +1476,7 @@ static bool sinkCodeFromPredecessors(EnumCaseDataflowContext &Context,
       return Changed;
     }
 
-    SkipBudget--;
+    --SkipBudget;
     InstToSink = std::prev(InstToSink);
     LLVM_DEBUG(llvm::dbgs() << "Continuing scan. Next inst: " << *InstToSink);
   }
@@ -1508,6 +1516,10 @@ static bool tryToSinkRefCountAcrossSwitch(SwitchEnumInst *Switch,
       RCIA->getRCIdentityRoot(Switch->getOperand()))
     return false;
 
+  // If the enum has a deinit, preserve the original release.
+  assert(!hasValueDeinit(Ptr) &&
+         "enum with deinit is not RC-identical to its payload");
+
   // If S has a default case bail since the default case could represent
   // multiple cases.
   //
@@ -1530,7 +1542,7 @@ static bool tryToSinkRefCountAcrossSwitch(SwitchEnumInst *Switch,
   }
 
   RV->eraseFromParent();
-  NumSunk++;
+  ++NumSunk;
   return true;
 }
 
@@ -1578,6 +1590,10 @@ static bool tryToSinkRefCountAcrossSelectEnum(CondBranchInst *CondBr,
       RCIA->getRCIdentityRoot(SEI->getEnumOperand()))
     return false;
 
+  // If the enum has a deinit, preserve the original release.
+  assert(!hasValueDeinit(Ptr) &&
+         "enum with deinit is not RC-identical to its payload");
+
   // Work out which enum element is the true branch, and which is false.
   // If the enum only has 2 values and its tag isn't the true branch, then we
   // know the true branch must be the other tag.
@@ -1616,7 +1632,7 @@ static bool tryToSinkRefCountAcrossSelectEnum(CondBranchInst *CondBr,
   }
 
   I->eraseFromParent();
-  NumSunk++;
+  ++NumSunk;
   return true;
 }
 
@@ -1778,7 +1794,7 @@ public:
     if (F->hasOwnership())
       return;
 
-    auto *AA = getAnalysis<AliasAnalysis>();
+    auto *AA = getAnalysis<AliasAnalysis>(F);
     auto *PO = getAnalysis<PostOrderAnalysis>()->get(F);
     auto *RCIA = getAnalysis<RCIdentityAnalysis>()->get(getFunction());
 

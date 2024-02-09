@@ -11,12 +11,12 @@
           (add-to-list 'load-path
                        (concat this-directory "utils")
                        :append)
+          (defvar swift-project-directory)
           (let ((swift-project-directory this-directory))
             (require 'swift-project-settings)))
         (set (make-local-variable 'swift-project-directory)
          this-directory)
         )
-  (tab-width . 2)
   (fill-column . 80)
   (c-file-style . "swift"))
  (c++-mode

@@ -17,15 +17,17 @@ struct Y2<T: C> {
   let okay2: X<T>
 }
 
-let bad0: X<C & P> // expected-error{{'X' requires that 'C & P' be a class type}}
-let bad1: X<P> // expected-error{{'X' requires that 'P' be a class type}}
+let bad0: X<C & P> // expected-error{{'X' requires that 'any C & P' be a class type}}
+let bad1: X<P> // expected-error{{'X' requires that 'any P' be a class type}}
 let bad2: X<S> // expected-error{{'X' requires that 'S' be a class type}}
 
 struct Z<U> {
   let bad3: X<U> // expected-error{{'X' requires that 'U' be a class type}}
 }
 
-// SR-7168: layout constraints weren't getting merged.
+// https://github.com/apple/swift/issues/49716
+// Layout constraints weren't getting merged.
+
 protocol P1 {
   associatedtype A
   var a: A { get }
@@ -44,4 +46,15 @@ where T.B.A: AnyObject, U.B: AnyObject, T.B == T.B.A, U.B.A == U.B {
   requiresAnyObject(u.b)
   requiresAnyObject(t.b.a)
   requiresAnyObject(u.b.a)
+}
+
+func test_class_constraint_diagnostics_with_contextual_type() {
+  func foo<T : AnyObject>(_: AnyObject) -> T {} // expected-note 2 {{where 'T' = 'any P'}}
+
+  class A : P {}
+
+  // TODO(diagnostics): We could also add a note here that protocols do not conform to themselves
+
+  let _: P = foo(A() as AnyObject) // expected-error {{local function 'foo' requires that 'any P' be a class type}}
+  let _: P = foo(A()) // expected-error {{local function 'foo' requires that 'any P' be a class type}}
 }

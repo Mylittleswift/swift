@@ -1,7 +1,5 @@
-// RUN: %empty-directory(%t)
-// RUN: %target-build-swift -parse-stdlib %s -o %t/a.out
-// RUN: %target-codesign %t/a.out
-// RUN: %target-run %t/a.out | %FileCheck %s
+// RUN: %target-run-simple-swift(-Onone -parse-stdlib -Xfrontend -enable-copy-propagation) | %FileCheck %s --check-prefixes=CHECK,CHECK-DBG
+// RUN: %target-run-simple-swift(-O -parse-stdlib -Xfrontend -enable-copy-propagation) | %FileCheck --check-prefixes=CHECK,CHECK-OPT %s
 
 // REQUIRES: executable_test
 // REQUIRES: objc_interop
@@ -15,7 +13,7 @@ class C {
   deinit { print("deallocated") }
 }
 
-#if arch(i386) || arch(arm)
+#if _pointerBitWidth(_32)
 
 // We have no ObjC tagged pointers, and two low spare bits due to alignment.
 let NATIVE_SPARE_BITS: UInt = 0x0000_0003
@@ -40,6 +38,12 @@ let NATIVE_SPARE_BITS: UInt = 0x0000_0000_0000_0007
 let OBJC_TAGGED_POINTER_BITS: UInt = 0
 
 #elseif arch(s390x)
+
+// We have no ObjC tagged pointers, and three low spare bits due to alignment.
+let NATIVE_SPARE_BITS: UInt = 0x0000_0000_0000_0007
+let OBJC_TAGGED_POINTER_BITS: UInt = 0
+
+#elseif arch(riscv64)
 
 // We have no ObjC tagged pointers, and three low spare bits due to alignment.
 let NATIVE_SPARE_BITS: UInt = 0x0000_0000_0000_0007

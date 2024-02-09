@@ -24,8 +24,9 @@
 
 #include "llvm/Support/ErrorHandling.h"
 #include "swift/Basic/type_traits.h"
+#include <cassert>
+#include <cstdint>
 #include <utility>
-#include <assert.h>
 
 namespace swift {
 
@@ -69,6 +70,17 @@ struct ExternalUnionMembers {
   // (private to the implementation)
   using Info = ExternalUnionImpl::MembersHelper<Members...>;
 
+  enum : bool {
+    is_copy_constructible = Info::is_copy_constructible,
+    is_nothrow_copy_constructible = Info::is_nothrow_copy_constructible,
+    is_move_constructible = Info::is_move_constructible,
+    is_nothrow_move_constructible = Info::is_nothrow_move_constructible,
+    is_copy_assignable = Info::is_copy_assignable,
+    is_nothrow_copy_assignable = Info::is_nothrow_copy_assignable,
+    is_move_assignable = Info::is_move_assignable,
+    is_nothrow_move_assignable = Info::is_nothrow_move_assignable,
+  };
+
   /// The type of indices into the union member type list.
   enum Index : unsigned {};
 
@@ -87,6 +99,11 @@ struct ExternalUnionMembers {
   static constexpr int maybeIndexOf() {
     return ExternalUnionImpl::indexOf<T, Members...>::value;
   }
+
+  template <class T>
+  static constexpr bool contains() {
+    return ExternalUnionImpl::indexOf<T, Members...>::value != -1;
+  }
 };
 
 /// An external union that uses the member-list index as the user-facing
@@ -104,8 +121,7 @@ template <class Members>
 class BasicExternalUnion {
 
   /// The value storage.
-  LLVM_ALIGNAS(Members::Info::alignment)
-  char Storage[Members::Info::size];
+  alignas(Members::Info::alignment) char Storage[Members::Info::size];
 
   template <class T>
   static constexpr int maybeIndexOfMember() {
@@ -238,7 +254,7 @@ public:
       Members::Info::copyAssignSame(unsigned(thisIndex),
                                     Storage, other.Storage);
     } else {
-      destruct(thisIndex, Storage);
+      destruct(thisIndex);
       copyConstruct(otherIndex, other);
     }
   }
@@ -424,7 +440,15 @@ namespace ExternalUnionImpl {
 template <>
 struct MembersHelper<> {
   enum : bool {
-    is_trivially_copyable = true
+    is_trivially_copyable = true,
+    is_copy_constructible = true,
+    is_nothrow_copy_constructible = true,
+    is_move_constructible = true,
+    is_nothrow_move_constructible = true,
+    is_copy_assignable = true,
+    is_nothrow_copy_assignable = true,
+    is_move_assignable = true,
+    is_nothrow_move_assignable = true,
   };
 
   enum : size_t {
@@ -434,27 +458,27 @@ struct MembersHelper<> {
 
   LLVM_ATTRIBUTE_ALWAYS_INLINE
   static void copyConstruct(void *self, int index, const void *other) {
-    llvm_unreachable("bad index");
+    assert(false && "bad index");
   }
 
   LLVM_ATTRIBUTE_ALWAYS_INLINE
   static void moveConstruct(void *self, int index, void *other) {
-    llvm_unreachable("bad index");
+    assert(false && "bad index");
   }
 
   LLVM_ATTRIBUTE_ALWAYS_INLINE
   static void copyAssignSame(int index, void *self, const void *other) {
-    llvm_unreachable("bad index");
+    assert(false && "bad index");
   }
 
   LLVM_ATTRIBUTE_ALWAYS_INLINE
   static void moveAssignSame(int index, void *self, void *other) {
-    llvm_unreachable("bad index");
+    assert(false && "bad index");
   }
 
   LLVM_ATTRIBUTE_ALWAYS_INLINE
   static void destruct(int index, void *self) {
-    llvm_unreachable("bad index");
+    assert(false && "bad index");
   }
 };
 
@@ -471,7 +495,32 @@ private:
 public:
   enum : bool {
     is_trivially_copyable =
-      Member::is_trivially_copyable && Others::is_trivially_copyable
+      Member::is_trivially_copyable &&
+      Others::is_trivially_copyable,
+    is_copy_constructible =
+      Member::is_copy_constructible &&
+      Others::is_copy_constructible,
+    is_nothrow_copy_constructible =
+      Member::is_nothrow_copy_constructible &&
+      Others::is_nothrow_copy_constructible,
+    is_move_constructible =
+      Member::is_move_constructible &&
+      Others::is_move_constructible,
+    is_nothrow_move_constructible =
+      Member::is_nothrow_move_constructible &&
+      Others::is_nothrow_move_constructible,
+    is_copy_assignable =
+      Member::is_copy_assignable &&
+      Others::is_copy_assignable,
+    is_nothrow_copy_assignable =
+      Member::is_nothrow_copy_assignable &&
+      Others::is_nothrow_copy_assignable,
+    is_move_assignable = 
+      Member::is_move_assignable &&
+      Others::is_move_assignable,
+    is_nothrow_move_assignable =
+      Member::is_nothrow_move_assignable &&
+      Others::is_nothrow_move_assignable,
   };
 
   enum : size_t {
@@ -531,7 +580,19 @@ public:
 template <class T>
 struct UnionMemberInfo {
   enum : bool {
-    is_trivially_copyable = IsTriviallyCopyable<T>::value
+    is_trivially_copyable = IsTriviallyCopyable<T>::value,
+    is_copy_constructible = std::is_copy_constructible<T>::value,
+    is_nothrow_copy_constructible =
+      std::is_nothrow_copy_constructible<T>::value,
+    is_move_constructible = std::is_move_constructible<T>::value,
+    is_nothrow_move_constructible =
+      std::is_nothrow_move_constructible<T>::value,
+    is_copy_assignable = std::is_copy_assignable<T>::value,
+    is_nothrow_copy_assignable =
+      std::is_nothrow_copy_assignable<T>::value,
+    is_move_assignable = std::is_move_assignable<T>::value,
+    is_nothrow_move_assignable =
+      std::is_nothrow_move_assignable<T>::value,
   };
 
   enum : size_t {
@@ -570,7 +631,15 @@ struct UnionMemberInfo {
 template <>
 struct UnionMemberInfo<void> {
   enum : bool {
-    is_trivially_copyable = true
+    is_trivially_copyable = true,
+    is_copy_constructible = true,
+    is_nothrow_copy_constructible = true,
+    is_move_constructible = true,
+    is_nothrow_move_constructible = true,
+    is_copy_assignable = true,
+    is_nothrow_copy_assignable = true,
+    is_move_assignable = true,
+    is_nothrow_move_assignable = true,
   };
 
   enum : size_t {

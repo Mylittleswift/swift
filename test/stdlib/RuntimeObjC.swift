@@ -1,14 +1,11 @@
 // RUN: %empty-directory(%t)
 //
 // RUN: %target-clang %S/Inputs/Mirror/Mirror.mm -c -o %t/Mirror.mm.o -g
-// RUN: %target-build-swift -parse-stdlib -Xfrontend -disable-access-control -module-name a -I %S/Inputs/Mirror/ -Xlinker %t/Mirror.mm.o %s -o %t.out
+// RUN: %target-build-swift -parse-stdlib -Xfrontend -disable-access-control -module-name a -I %S/Inputs/Mirror/ -Xlinker %t/Mirror.mm.o %s -o %t.out -Xfrontend -disable-deserialization-safety
 // RUN: %target-codesign %t.out
 // RUN: %target-run %t.out
 // REQUIRES: executable_test
 // REQUIRES: objc_interop
-
-// Requires swift-version 4
-// UNSUPPORTED: swift_test_mode_optimize_none_with_implicit_dynamic
 
 import Swift
 import StdlibUnittest
@@ -174,6 +171,11 @@ func withSwiftObjectCanary<T>(
   expectEqual(0, swiftObjectCanaryCount, stackTrace: stackTrace)
 }
 
+// Hack to ensure the CustomReflectable conformance is used directly by the test
+// in case it comes from a library that would otherwise not be autolinked.
+@inline(never)
+func assertCustomReflectable<T: CustomReflectable>(_ t: T) {}
+
 var Runtime = TestSuite("Runtime")
 
 func _isClassOrObjCExistential_Opaque<T>(_ x: T.Type) -> Bool {
@@ -307,9 +309,18 @@ Runtime.test("isBridgedVerbatimToObjectiveC") {
 
 //===----------------------------------------------------------------------===//
 
+protocol SomeNativeProto {}
+
 class SomeClass {}
 @objc class SomeObjCClass {}
-class SomeNSObjectSubclass : NSObject {}
+
+class SomeNSObjectSubclass : NSObject, SomeNativeProto {}
+extension SomeNativeProto {
+  // https://github.com/apple/swift/issues/43154
+  func expectSelfTypeNameEqual(to typeName: String) {
+    expectEqual(typeName, _typeName(type(of: self)))
+  }
+}
 
 Runtime.test("typeName") {
   expectEqual("a.SomeObjCClass", _typeName(SomeObjCClass.self))
@@ -324,6 +335,8 @@ Runtime.test("typeName") {
 
   a = NSObject()
   expectEqual("NSObject", _typeName(type(of: a)))
+
+  SomeNSObjectSubclass().expectSelfTypeNameEqual(to: "a.SomeNSObjectSubclass")
 }
 
 class GenericClass<T> {}
@@ -574,7 +587,7 @@ Reflection.test("Class/ObjectiveCBase/Default") {
     expectEqual(expected, output)
   }
 }
-protocol SomeNativeProto {}
+
 @objc protocol SomeObjCProto {}
 extension SomeClass: SomeObjCProto {}
 
@@ -606,7 +619,9 @@ Reflection.test("MetatypeMirror") {
 
 Reflection.test("CGPoint") {
   var output = ""
-  dump(CGPoint(x: 1.25, y: 2.75), to: &output)
+  let point = CGPoint(x: 1.25, y: 2.75)
+  assertCustomReflectable(point)
+  dump(point, to: &output)
 
   let expected =
     "▿ (1.25, 2.75)\n" +
@@ -618,7 +633,9 @@ Reflection.test("CGPoint") {
 
 Reflection.test("CGSize") {
   var output = ""
-  dump(CGSize(width: 1.25, height: 2.75), to: &output)
+  let size = CGSize(width: 1.25, height: 2.75)
+  assertCustomReflectable(size)
+  dump(size, to: &output)
 
   let expected =
     "▿ (1.25, 2.75)\n" +
@@ -630,11 +647,11 @@ Reflection.test("CGSize") {
 
 Reflection.test("CGRect") {
   var output = ""
-  dump(
-    CGRect(
-      origin: CGPoint(x: 1.25, y: 2.25),
-      size: CGSize(width: 10.25, height: 11.75)),
-    to: &output)
+  let rect = CGRect(
+    origin: CGPoint(x: 1.25, y: 2.25),
+    size: CGSize(width: 10.25, height: 11.75))
+  assertCustomReflectable(rect)
+  dump(rect, to: &output)
 
   let expected =
     "▿ (1.25, 2.25, 10.25, 11.75)\n" +
@@ -743,14 +760,17 @@ Reflection.test("Name of metatype of artificial subclass") {
   expectEqual(String(reflecting: type(of: obj)), "a.TestArtificialSubclass")
 }
 
-@objc class StringConvertibleInDebugAndOtherwise : NSObject {
+@objc class StringConvertibleInDebugAndOtherwise_Native : NSObject {
   override var description: String { return "description" }
   override var debugDescription: String { return "debugDescription" }
 }
 
 Reflection.test("NSObject is properly CustomDebugStringConvertible") {
-  let object = StringConvertibleInDebugAndOtherwise()
-  expectEqual(String(reflecting: object), object.debugDescription)
+  let objectNative = StringConvertibleInDebugAndOtherwise_Native()
+  let objectObjC = StringConvertibleInDebugAndOtherwise_ObjC()
+
+  expectEqual(String(reflecting: objectNative), objectNative.debugDescription)
+  expectEqual(String(reflecting: objectObjC), objectObjC.debugDescription)
 }
 
 Reflection.test("NSRange QuickLook") {
@@ -779,7 +799,7 @@ ObjCConformsToProtocolTestSuite.test("cast/metatype") {
   expectTrue(SomeSubclass.self is SomeObjCProto.Type)
 }
 
-// SR-7357
+// https://github.com/apple/swift/issues/49905
 
 extension Optional where Wrapped == NSData {
     private class Inner {
@@ -796,8 +816,8 @@ RuntimeClassNamesTestSuite.test("private class nested in same-type-constrained e
   let base: NSData? = nil
   let util = base.asInner
 
-  let clas = unsafeBitCast(type(of: util), to: NSObject.self)
-  let desc = clas.description
+  let clazz = unsafeBitCast(type(of: util), to: NSObject.self)
+  let desc = clazz.description
   expectEqual("_TtCE1a", desc.prefix(7))
   expectEqual("Inner", desc.suffix(5))
 }

@@ -1,4 +1,4 @@
-// RUN: %target-sil-opt -enable-sil-verify-all -verify-sil-ownership %s -predictable-deadalloc-elim | %FileCheck %s
+// RUN: %target-sil-opt -enable-sil-verify-all %s -predictable-deadalloc-elim | %FileCheck %s
 
 sil_stage canonical
 
@@ -14,6 +14,11 @@ struct KlassWithKlassTuple {
   var first: Klass
   var second: (Klass, Klass)
   var third: Klass
+}
+
+enum FakeOptional<T> {
+case none
+case some(T)
 }
 
 ///////////
@@ -139,7 +144,7 @@ bb0(%0 : @owned $Builtin.NativeObject, %1 : $*Builtin.NativeObject):
   %2 = alloc_stack $Builtin.NativeObject
   store %0 to [init] %2 : $*Builtin.NativeObject
   destroy_addr %2 : $*Builtin.NativeObject
-  copy_addr %1 to [initialization] %2 : $*Builtin.NativeObject
+  copy_addr %1 to [init] %2 : $*Builtin.NativeObject
   destroy_addr %2 : $*Builtin.NativeObject
   dealloc_stack %2 : $*Builtin.NativeObject
   %9999 = tuple()
@@ -151,15 +156,14 @@ bb0(%0 : @owned $Builtin.NativeObject, %1 : $*Builtin.NativeObject):
 // CHECK: bb0([[ARG0:%.*]] : @owned $Builtin.NativeObject, [[ARG1:%.*]] : $*Builtin.NativeObject):
 // CHECK-NOT: alloc_stack
 // CHECK:  destroy_value [[ARG0]]
-// CHECK:  [[ARG1_LOADED:%.*]] = load [take] [[ARG1]]
-// CHECK:  destroy_value [[ARG1_LOADED]]
+// CHECK:  destroy_addr [[ARG1]]
 // CHECK: } // end sil function 'simple_init_take'
 sil [ossa] @simple_init_take : $@convention(thin) (@owned Builtin.NativeObject, @in Builtin.NativeObject) -> () {
 bb0(%0 : @owned $Builtin.NativeObject, %1 : $*Builtin.NativeObject):
   %2 = alloc_stack $Builtin.NativeObject
   store %0 to [init] %2 : $*Builtin.NativeObject
   destroy_addr %2 : $*Builtin.NativeObject
-  copy_addr [take] %1 to [initialization] %2 : $*Builtin.NativeObject
+  copy_addr [take] %1 to [init] %2 : $*Builtin.NativeObject
   destroy_addr %2 : $*Builtin.NativeObject
   dealloc_stack %2 : $*Builtin.NativeObject
   %9999 = tuple()
@@ -227,11 +231,11 @@ bb3:
 }
 
 // We should not promote this due to this being an assign to %2.
-// CHECK-LABEL: sil [ossa] @simple_diamond_with_assign : $@convention(thin) (@owned Builtin.NativeObject, @in_guaranteed Builtin.NativeObject) -> () {
+// CHECK-LABEL: sil [ossa] @simple_diamond_with_assign : $@convention(thin) (@owned Builtin.NativeObject, @in Builtin.NativeObject) -> () {
 // CHECK: alloc_stack
 // CHECK: copy_addr
 // CHECK: } // end sil function 'simple_diamond_with_assign'
-sil [ossa] @simple_diamond_with_assign : $@convention(thin) (@owned Builtin.NativeObject, @in_guaranteed Builtin.NativeObject) -> () {
+sil [ossa] @simple_diamond_with_assign : $@convention(thin) (@owned Builtin.NativeObject, @in Builtin.NativeObject) -> () {
 bb0(%0 : @owned $Builtin.NativeObject, %1 : $*Builtin.NativeObject):
   %2 = alloc_stack $Builtin.NativeObject
   store %0 to [init] %2 : $*Builtin.NativeObject
@@ -242,6 +246,7 @@ bb1:
   br bb3
 
 bb2:
+  destroy_addr %1 : $*Builtin.NativeObject
   br bb3
 
 bb3:
@@ -256,11 +261,12 @@ bb3:
 // this test shows that we /tried/ and failed with the available value test
 // instead of failing earlier due to the copy_addr being an assign since we
 // explode the copy_addr.
-// CHECK-LABEL: sil [ossa] @simple_diamond_with_assign_remove : $@convention(thin) (@owned Builtin.NativeObject, @in_guaranteed Builtin.NativeObject) -> () {
+//
+// CHECK-LABEL: sil [ossa] @simple_diamond_with_assign_remove : $@convention(thin) (@owned Builtin.NativeObject, @in Builtin.NativeObject) -> () {
 // CHECK: alloc_stack
 // CHECK-NOT: copy_addr
 // CHECK: } // end sil function 'simple_diamond_with_assign_remove'
-sil [ossa] @simple_diamond_with_assign_remove : $@convention(thin) (@owned Builtin.NativeObject, @in_guaranteed Builtin.NativeObject) -> () {
+sil [ossa] @simple_diamond_with_assign_remove : $@convention(thin) (@owned Builtin.NativeObject, @in Builtin.NativeObject) -> () {
 bb0(%0 : @owned $Builtin.NativeObject, %1 : $*Builtin.NativeObject):
   %2 = alloc_stack $Builtin.NativeObject
   store %0 to [init] %2 : $*Builtin.NativeObject
@@ -268,10 +274,11 @@ bb0(%0 : @owned $Builtin.NativeObject, %1 : $*Builtin.NativeObject):
 
 bb1:
   destroy_addr %2 : $*Builtin.NativeObject
-  copy_addr [take] %1 to [initialization] %2 : $*Builtin.NativeObject
+  copy_addr [take] %1 to [init] %2 : $*Builtin.NativeObject
   br bb3
 
 bb2:
+  destroy_addr %1 : $*Builtin.NativeObject
   br bb3
 
 bb3:
@@ -367,6 +374,9 @@ struct NativeObjectTriple {
   var f2: NativeObjectPair
 }
 
+sil @owned_user : $@convention(thin) (@owned Builtin.NativeObject) -> @owned Builtin.NativeObject
+sil @owned_native_object_triple_user : $@convention(thin) (@owned NativeObjectTriple) -> @owned NativeObjectTriple
+
 // diamond_test_4 from predictable_memopt.sil after running through
 // predictable-memaccess-opt. We should be able to eliminate %2.
 // CHECK-LABEL: sil [ossa] @diamond_test_4 : $@convention(thin) (@owned Builtin.NativeObject, @owned NativeObjectPair) -> () {
@@ -414,3 +424,328 @@ bb0(%0 : @owned $NativeObjectPair, %1 : @owned $Builtin.NativeObject):
   %9999 = tuple()
   return %9999 : $()
 }
+
+// CHECK-LABEL: sil [ossa] @load_take_opt_simple : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+// CHECK: bb0([[ARG:%.*]] : @owned $Builtin.NativeObject):
+// CHECK-NOT: alloc_stack
+// CHECK-NOT: load [take]
+// CHECK:   [[RESULT:%.*]] = apply {{%.*}}([[ARG]])
+// CHECK:   destroy_value [[RESULT]]
+// CHECK-NOT: alloc_stack
+// CHECK: } // end sil function 'load_take_opt_simple'
+sil [ossa] @load_take_opt_simple : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+bb0(%0 : @owned $Builtin.NativeObject):
+  %1 = alloc_stack $Builtin.NativeObject
+  store %0 to [init] %1 : $*Builtin.NativeObject
+  %0hat = load [take] %1 : $*Builtin.NativeObject
+  %f = function_ref @owned_user : $@convention(thin) (@owned Builtin.NativeObject) -> @owned Builtin.NativeObject
+  %0hathat = apply %f(%0hat) : $@convention(thin) (@owned Builtin.NativeObject) -> @owned Builtin.NativeObject
+  store %0hathat to [init] %1 : $*Builtin.NativeObject
+  destroy_addr %1 : $*Builtin.NativeObject
+  dealloc_stack %1 : $*Builtin.NativeObject
+  %9999 = tuple()
+  return %9999 : $()
+}
+
+// We do not handle this today since we do not understand how to handle the
+// destroy_value. We could teach the pass how to do this though.
+//
+// CHECK-LABEL: sil [ossa] @load_take_opt_simple_box : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+// CHECK: bb0([[ARG:%.*]] : @owned $Builtin.NativeObject):
+// CHECK: alloc_box
+// CHECK: } // end sil function 'load_take_opt_simple_box'
+sil [ossa] @load_take_opt_simple_box : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+bb0(%0 : @owned $Builtin.NativeObject):
+  %1 = alloc_box ${ var Builtin.NativeObject }
+  %2 = project_box %1 : ${ var Builtin.NativeObject }, 0
+  store %0 to [init] %2 : $*Builtin.NativeObject
+  %0hat = load [take] %2 : $*Builtin.NativeObject
+  %f = function_ref @owned_user : $@convention(thin) (@owned Builtin.NativeObject) -> @owned Builtin.NativeObject
+  %0hathat = apply %f(%0hat) : $@convention(thin) (@owned Builtin.NativeObject) -> @owned Builtin.NativeObject
+  store %0hathat to [init] %2 : $*Builtin.NativeObject
+  destroy_value %1 : ${ var Builtin.NativeObject }
+  %9999 = tuple()
+  return %9999 : $()
+}
+
+// This test makes sure that we first eliminate the destroy_addr, before we
+// eliminate the load [take] since the load [take] value is the available value
+// of the destroy_addr.
+//
+// CHECK-LABEL: sil [ossa] @load_take_opt_identity : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+// CHECK: bb0([[ARG:%.*]] : @owned $Builtin.NativeObject):
+// CHECK:   destroy_value [[ARG]]
+// CHECK: } // end sil function 'load_take_opt_identity'
+sil [ossa] @load_take_opt_identity : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+bb0(%0 : @owned $Builtin.NativeObject):
+  %1 = alloc_stack $Builtin.NativeObject
+  store %0 to [init] %1 : $*Builtin.NativeObject
+  %0hat = load [take] %1 : $*Builtin.NativeObject
+  store %0hat to [init] %1 : $*Builtin.NativeObject
+  destroy_addr %1 : $*Builtin.NativeObject
+  dealloc_stack %1 : $*Builtin.NativeObject
+  %9999 = tuple()
+  return %9999 : $()
+}
+
+// CHECK-LABEL: sil [ossa] @diamond_test_4_with_load_take : $@convention(thin) (@owned Builtin.NativeObject, @owned NativeObjectPair) -> () {
+// CHECK-NOT: alloc_stack
+// CHECK: } // end sil function 'diamond_test_4_with_load_take'
+sil [ossa] @diamond_test_4_with_load_take : $@convention(thin) (@owned Builtin.NativeObject, @owned NativeObjectPair) -> () {
+bb0(%0 : @owned $Builtin.NativeObject, %1 : @owned $NativeObjectPair):
+  %2 = alloc_stack $NativeObjectTriple
+  cond_br undef, bb1, bb2
+
+bb1:
+  %4 = struct_element_addr %2 : $*NativeObjectTriple, #NativeObjectTriple.f1
+  %5 = struct_element_addr %2 : $*NativeObjectTriple, #NativeObjectTriple.f2
+  store %0 to [init] %4 : $*Builtin.NativeObject
+  store %1 to [init] %5 : $*NativeObjectPair
+  br bb3
+
+bb2:
+  %13 = struct_element_addr %2 : $*NativeObjectTriple, #NativeObjectTriple.f1
+  %14 = struct_element_addr %2 : $*NativeObjectTriple, #NativeObjectTriple.f2
+  store %0 to [init] %13 : $*Builtin.NativeObject
+  store %1 to [init] %14 : $*NativeObjectPair
+  br bb3
+
+bb3:
+  %f = function_ref @owned_native_object_triple_user : $@convention(thin) (@owned NativeObjectTriple) -> @owned NativeObjectTriple
+  %loaded2 = load [take] %2 : $*NativeObjectTriple
+  %fout = apply %f(%loaded2) : $@convention(thin) (@owned NativeObjectTriple) -> @owned NativeObjectTriple
+  store %fout to [init] %2 : $*NativeObjectTriple
+  destroy_addr %2 : $*NativeObjectTriple
+  dealloc_stack %2 : $*NativeObjectTriple
+  %9999 = tuple()
+  return %9999 : $()
+}
+
+// In this case, there isn't any cleanup of %1 along bbNone since. Make sure we
+// handle it appropriately and eliminate the alloc_stack.
+//
+// CHECK-LABEL: sil [ossa] @leak_along_nopayload_case_is_ok : $@convention(thin) (@owned Optional<Builtin.NativeObject>) -> () {
+// CHECK-NOT: alloc_stack
+// CHECK: } // end sil function 'leak_along_nopayload_case_is_ok'
+sil [ossa] @leak_along_nopayload_case_is_ok : $@convention(thin) (@owned Optional<Builtin.NativeObject>) -> () {
+bb0(%0 : @owned $Optional<Builtin.NativeObject>):
+  %1 = alloc_stack $Optional<Builtin.NativeObject>
+  %2 = copy_value %0 : $Optional<Builtin.NativeObject>
+  store %0 to [init] %1 : $*Optional<Builtin.NativeObject>
+  %3 = copy_value %2 : $Optional<Builtin.NativeObject>
+  %4 = begin_borrow %3 : $Optional<Builtin.NativeObject>
+  destroy_value %2 : $Optional<Builtin.NativeObject>
+  switch_enum %4 : $Optional<Builtin.NativeObject>, case #Optional.some!enumeult: bbSome, case #Optional.none!enumelt: bbNone
+
+bbNone:
+  end_borrow %4 : $Optional<Builtin.NativeObject>
+  destroy_value %3 : $Optional<Builtin.NativeObject>
+  dealloc_stack %1 : $*Optional<Builtin.NativeObject>
+  br bbEnd
+
+bbSome(%obj : @guaranteed $Builtin.NativeObject):
+  end_borrow %4 : $Optional<Builtin.NativeObject>
+  destroy_value %3 : $Optional<Builtin.NativeObject>
+  %1Loaded = load [take] %1 : $*Optional<Builtin.NativeObject>
+  destroy_value %1Loaded : $Optional<Builtin.NativeObject>
+  dealloc_stack %1 : $*Optional<Builtin.NativeObject>
+  br bbEnd
+
+bbEnd:
+  %9999 = tuple()
+  return %9999 : $()
+}
+
+// Add an unreachable into the mix so that we do not have any destroy_value on
+// %0 when we promote.
+// CHECK-LABEL: sil [ossa] @leak_along_nopayload_case_and_unreachable_is_ok : $@convention(thin) (@owned Optional<Builtin.NativeObject>) -> () {
+// CHECK-NOT: alloc_stack
+// CHECK: } // end sil function 'leak_along_nopayload_case_and_unreachable_is_ok'
+sil [ossa] @leak_along_nopayload_case_and_unreachable_is_ok : $@convention(thin) (@owned Optional<Builtin.NativeObject>) -> () {
+bb0(%0 : @owned $Optional<Builtin.NativeObject>):
+  %1 = alloc_stack $Optional<Builtin.NativeObject>
+  %2 = copy_value %0 : $Optional<Builtin.NativeObject>
+  store %0 to [init] %1 : $*Optional<Builtin.NativeObject>
+  %3 = copy_value %2 : $Optional<Builtin.NativeObject>
+  %4 = begin_borrow %3 : $Optional<Builtin.NativeObject>
+  destroy_value %2 : $Optional<Builtin.NativeObject>
+  switch_enum %4 : $Optional<Builtin.NativeObject>, case #Optional.some!enumeult: bbSome, case #Optional.none!enumelt: bbNone
+
+bbNone:
+  end_borrow %4 : $Optional<Builtin.NativeObject>
+  destroy_value %3 : $Optional<Builtin.NativeObject>
+  dealloc_stack %1 : $*Optional<Builtin.NativeObject>
+  br bbEnd
+
+bbSome(%obj : @guaranteed $Builtin.NativeObject):
+  end_borrow %4 : $Optional<Builtin.NativeObject>
+  destroy_value %3 : $Optional<Builtin.NativeObject>
+  unreachable
+
+bbEnd:
+  %9999 = tuple()
+  return %9999 : $()
+}
+
+// CHECK-LABEL: sil [ossa] @leak_along_nopayload_case_and_unreachable_is_ok_with_destroyaddr : $@convention(thin) (@owned Optional<Builtin.NativeObject>) -> () {
+// CHECK-NOT: alloc_stack
+// CHECK: } // end sil function 'leak_along_nopayload_case_and_unreachable_is_ok_with_destroyaddr'
+sil [ossa] @leak_along_nopayload_case_and_unreachable_is_ok_with_destroyaddr : $@convention(thin) (@owned Optional<Builtin.NativeObject>) -> () {
+bb0(%0 : @owned $Optional<Builtin.NativeObject>):
+  %1 = alloc_stack $Optional<Builtin.NativeObject>
+  %2 = copy_value %0 : $Optional<Builtin.NativeObject>
+  store %0 to [init] %1 : $*Optional<Builtin.NativeObject>
+  %3 = copy_value %2 : $Optional<Builtin.NativeObject>
+  %4 = begin_borrow %3 : $Optional<Builtin.NativeObject>
+  destroy_value %2 : $Optional<Builtin.NativeObject>
+  switch_enum %4 : $Optional<Builtin.NativeObject>, case #Optional.some!enumeult: bbSome, case #Optional.none!enumelt: bbNone
+
+bbNone:
+  end_borrow %4 : $Optional<Builtin.NativeObject>
+  destroy_value %3 : $Optional<Builtin.NativeObject>
+  dealloc_stack %1 : $*Optional<Builtin.NativeObject>
+  br bbEnd
+
+bbSome(%obj : @guaranteed $Builtin.NativeObject):
+  end_borrow %4 : $Optional<Builtin.NativeObject>
+  destroy_value %3 : $Optional<Builtin.NativeObject>
+  destroy_addr %1 : $*Optional<Builtin.NativeObject>
+  unreachable
+
+bbEnd:
+  %9999 = tuple()
+  return %9999 : $()
+}
+
+// CHECK-LABEL: sil [ossa] @leak_along_nopayload_case_and_unreachable_is_ok_with_deallocstack : $@convention(thin) (@owned Optional<Builtin.NativeObject>) -> () {
+// CHECK-NOT: alloc_stack
+// CHECK: } // end sil function 'leak_along_nopayload_case_and_unreachable_is_ok_with_deallocstack'
+sil [ossa] @leak_along_nopayload_case_and_unreachable_is_ok_with_deallocstack : $@convention(thin) (@owned Optional<Builtin.NativeObject>) -> () {
+bb0(%0 : @owned $Optional<Builtin.NativeObject>):
+  %1 = alloc_stack $Optional<Builtin.NativeObject>
+  %2 = copy_value %0 : $Optional<Builtin.NativeObject>
+  store %0 to [init] %1 : $*Optional<Builtin.NativeObject>
+  %3 = copy_value %2 : $Optional<Builtin.NativeObject>
+  %4 = begin_borrow %3 : $Optional<Builtin.NativeObject>
+  destroy_value %2 : $Optional<Builtin.NativeObject>
+  switch_enum %4 : $Optional<Builtin.NativeObject>, case #Optional.some!enumeult: bbSome, case #Optional.none!enumelt: bbNone
+
+bbNone:
+  end_borrow %4 : $Optional<Builtin.NativeObject>
+  destroy_value %3 : $Optional<Builtin.NativeObject>
+  dealloc_stack %1 : $*Optional<Builtin.NativeObject>
+  br bbEnd
+
+bbSome(%obj : @guaranteed $Builtin.NativeObject):
+  end_borrow %4 : $Optional<Builtin.NativeObject>
+  destroy_value %3 : $Optional<Builtin.NativeObject>
+  dealloc_stack %1 : $*Optional<Builtin.NativeObject>
+  unreachable
+
+bbEnd:
+  %9999 = tuple()
+  return %9999 : $()
+}
+
+// Make sure that we can handle this test case without asserting. Previously the
+// pass had memory safety issues since we could delete %0 below before %1 is
+// optimized. When %1 was optimized we would be using as its available value a
+// stale pointer to %0.
+// CHECK-LABEL: sil [ossa] @promoting_loadtake_with_other_promoting_loadtake : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+// CHECK-NOT: load [take]
+// CHECK: } // end sil function 'promoting_loadtake_with_other_promoting_loadtake'
+sil [ossa] @promoting_loadtake_with_other_promoting_loadtake : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+bb0(%arg : @owned $Builtin.NativeObject):
+  %mem = alloc_stack $Builtin.NativeObject
+  store %arg to [init] %mem : $*Builtin.NativeObject
+  %0 = load [take] %mem : $*Builtin.NativeObject
+  store %0 to [init] %mem : $*Builtin.NativeObject
+  %1 = load [take] %mem : $*Builtin.NativeObject
+  destroy_value %1 : $Builtin.NativeObject
+  dealloc_stack %mem : $*Builtin.NativeObject
+  %9999 = tuple()
+  return %9999 : $()
+}
+
+// CHECK-LABEL: sil [ossa] @bail_on_forwardingunowned_use : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+// CHECK: alloc_stack
+// CHECK: } // end sil function 'bail_on_forwardingunowned_use'
+sil [ossa] @bail_on_forwardingunowned_use : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+bb0(%arg : @owned $Builtin.NativeObject):
+  br bb1(%arg : $Builtin.NativeObject)
+
+bb1(%unowned : @unowned $Builtin.NativeObject):
+  %mem = alloc_stack $Builtin.NativeObject
+  store %arg to [init] %mem : $*Builtin.NativeObject
+  %0 = load [take] %mem : $*Builtin.NativeObject
+  store %0 to [init] %mem : $*Builtin.NativeObject
+  %1 = load [take] %mem : $*Builtin.NativeObject
+  destroy_value %1 : $Builtin.NativeObject
+  unreachable
+}
+
+// CHECK-LABEL: sil [ossa] @bail_on_forwardingunowned_use_negativecase : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+// CHECK-NOT: alloc_stack
+// CHECK: } // end sil function 'bail_on_forwardingunowned_use_negativecase'
+sil [ossa] @bail_on_forwardingunowned_use_negativecase : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+bb0(%arg : @owned $Builtin.NativeObject):
+  %mem = alloc_stack $Builtin.NativeObject
+  store %arg to [init] %mem : $*Builtin.NativeObject
+  %0 = load [take] %mem : $*Builtin.NativeObject
+  store %0 to [init] %mem : $*Builtin.NativeObject
+  %1 = load [take] %mem : $*Builtin.NativeObject
+  destroy_value %1 : $Builtin.NativeObject
+  unreachable
+}
+
+enum ErrorEnum : Error {
+  case errorCase(label: [any Error])
+  case other
+}
+
+sil [ossa] @test_complete_lifetime : $@convention(thin) (@owned ErrorEnum) -> () {
+
+bb0(%0 : @owned $ErrorEnum):
+  %1 = alloc_stack $any Error
+  %2 = alloc_existential_box $any Error, $ErrorEnum
+  %3 = project_existential_box $ErrorEnum in %2 : $any Error
+  store %2 to [init] %1 : $*any Error
+  store %0 to [init] %3 : $*ErrorEnum
+  %6 = load [take] %1 : $*any Error
+  dealloc_stack %1 : $*any Error
+  %8 = alloc_stack $any Error
+  %9 = copy_value %6 : $any Error
+  store %9 to [init] %8 : $*any Error
+  %11 = alloc_stack $ErrorEnum
+  checked_cast_addr_br copy_on_success any Error in %8 : $*any Error to ErrorEnum in %11 : $*ErrorEnum, bb2, bb3
+
+bb1:
+  %13 = tuple ()
+  return %13 : $()
+
+bb2:
+  %15 = load [take] %11 : $*ErrorEnum
+  destroy_value %15 : $ErrorEnum
+  dealloc_stack %11 : $*ErrorEnum
+  destroy_addr %8 : $*any Error
+  dealloc_stack %8 : $*any Error
+  destroy_value %6 : $any Error
+  br bb1
+
+bb3:
+  dealloc_stack %11 : $*ErrorEnum
+  destroy_addr %8 : $*any Error
+  dealloc_stack %8 : $*any Error
+  %25 = copy_value %6 : $any Error
+  cond_br undef, bb4, bb5
+
+bb4:
+  br bb6
+
+bb5:
+  br bb6
+
+bb6:
+  unreachable
+}
+

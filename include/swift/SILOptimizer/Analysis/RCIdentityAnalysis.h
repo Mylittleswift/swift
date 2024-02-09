@@ -55,7 +55,7 @@ public:
   /// *NOTE* This ignores obvious ARC escapes where the a potential
   /// user of the RC is not managed by ARC. For instance
   /// unchecked_trivial_bit_cast.
-  void getRCUses(SILValue V, llvm::SmallVectorImpl<Operand *> &Uses);
+  void getRCUses(SILValue V, SmallVectorImpl<Operand *> &Uses);
 
   /// A helper method that calls getRCUses and then maps each operand to the
   /// operands user and then uniques the list.
@@ -63,21 +63,11 @@ public:
   /// *NOTE* The routine asserts that the passed in Users array is empty for
   /// simplicity. If needed this can be changed, but it is not necessary given
   /// current uses.
-  void getRCUsers(SILValue V, llvm::SmallVectorImpl<SILInstruction *> &Users);
+  void getRCUsers(SILValue V, SmallVectorImpl<SILInstruction *> &Users);
 
-  void handleDeleteNotification(SILNode *node) {
-    auto value = dyn_cast<ValueBase>(node);
-    if (!value)
-      return;
-
-    // Check the cache. If we don't find it, there is nothing to do.
-    auto Iter = RCCache.find(SILValue(value));
-    if (Iter == RCCache.end())
-      return;
-
-    // Then erase Iter from the cache.
-    RCCache.erase(Iter);
-  }
+  /// Like getRCUses except uses a callback to prevent the need for an
+  /// intermediate array.
+  void visitRCUses(SILValue V, function_ref<void(Operand *)> Visitor);
 
 private:
   SILValue getRCIdentityRootInner(SILValue V, unsigned RecursionDepth);
@@ -100,18 +90,6 @@ public:
   RCIdentityAnalysis(const RCIdentityAnalysis &) = delete;
   RCIdentityAnalysis &operator=(const RCIdentityAnalysis &) = delete;
 
-  virtual void handleDeleteNotification(SILNode *node) override {
-    // If the parent function of this instruction was just turned into an
-    // external declaration, bail. This happens during SILFunction destruction.
-    SILFunction *F = node->getFunction();
-    if (F->isExternalDeclaration()) {
-      return;
-    }
-    get(F)->handleDeleteNotification(node);
-  }
-
-  virtual bool needsNotifications() override { return true; }
-
   static bool classof(const SILAnalysis *S) {
     return S->getKind() == SILAnalysisKind::RCIdentity;
   }
@@ -120,7 +98,7 @@ public:
   
   virtual std::unique_ptr<RCIdentityFunctionInfo>
   newFunctionAnalysis(SILFunction *F) override {
-    return llvm::make_unique<RCIdentityFunctionInfo>(DA);
+    return std::make_unique<RCIdentityFunctionInfo>(DA);
   }
 
   virtual bool shouldInvalidate(SILAnalysis::InvalidationKind K) override {

@@ -1,5 +1,6 @@
 // RUN: %target-run-stdlib-swift
 // REQUIRES: executable_test
+// UNSUPPORTED: freestanding
 
 import StdlibUnittest
 import Swift
@@ -84,16 +85,12 @@ var testCharacters = [
   "\u{0061}\u{0300}\u{0300}\u{0300}\u{0300}", // UTF-8: 9 bytes
 ]
 
-// Only run it on ObjC platforms. Supported Linux versions do not have a
-// recent enough ICU
-#if _runtime(_ObjC)
 testCharacters += [
   "\u{0061}\u{0300}\u{0300}\u{0300}\u{0300}\u{0300}", // UTF-8: 11 bytes
   "\u{0061}\u{0300}\u{0300}\u{0300}\u{0300}\u{0300}\u{0300}", // UTF-8: 13 bytes
   "\u{0061}\u{0300}\u{0300}\u{0300}\u{0300}\u{0300}\u{0300}\u{0300}", // UTF-8: 15 bytes
   "\u{0061}\u{0300}\u{0300}\u{0300}\u{0300}\u{0300}\u{0300}\u{0300}\u{0300}", // UTF-8: 17 bytes
 ]
-#endif
 
 testCharacters += [
   // U+00A9 COPYRIGHT SIGN
@@ -105,8 +102,6 @@ testCharacters += [
   "\u{00a9}\u{0300}\u{0300}\u{0300}\u{0300}", // UTF-8: 10 bytes
 ]
 
-// Only run it on recent enough versions of ICU
-#if _runtime(_ObjC)
 if #available(iOS 11.0, macOS 10.13, tvOS 11.0, watchOS 4.0, *) {
   testCharacters += [
     "\u{00a9}\u{0300}\u{0300}\u{0300}\u{0300}\u{0300}", // UTF-8: 12 bytes
@@ -117,7 +112,6 @@ if #available(iOS 11.0, macOS 10.13, tvOS 11.0, watchOS 4.0, *) {
     "👩‍👩‍👦‍👦", // UTF-8: 25 bytes
   ]
 }
-#endif
 
 func randomGraphemeCluster(_ minSize: Int, _ maxSize: Int) -> String {
   let n = Int.random(in: (minSize + 1) ..< maxSize)
@@ -224,9 +218,6 @@ CharacterTests.test("CR-LF") {
 }
 
 CharacterTests.test("Unicode 9 grapheme breaking") {
-  // Only run it on ObjC platforms. Supported Linux versions do not have a
-  // recent enough ICU for Unicode 9 support.
-#if _runtime(_ObjC)
   // Check for Unicode 9 or later
   guard #available(iOS 10.0, macOS 10.12, *) else { return }
 
@@ -241,7 +232,6 @@ CharacterTests.test("Unicode 9 grapheme breaking") {
   let skinTone = "👋👋🏻👋🏼👋🏽👋🏾👋🏿"
   expectEqual(6, skinTone.count)
   expectEqual(skinTone.reversed().count, skinTone.count)
-#endif
 }
 
 /// Test that a given `String` can be transformed into a `Character` and back
@@ -347,6 +337,19 @@ CharacterTests.test("String.append(_: Character)") {
   }
 }
 
+CharacterTests.test("utf6/16/unicodescalar views") {
+  for c in testCharacters {
+    expectEqualSequence(String(c).unicodeScalars, c.unicodeScalars)
+    expectEqualSequence(String(c).utf8, c.utf8)
+    expectEqualSequence(String(c).utf16, c.utf16)
+
+    expectEqualSequence(
+      String(c).unicodeScalars.reversed(), c.unicodeScalars.reversed())
+    expectEqualSequence(String(c).utf8.reversed(), c.utf8.reversed())
+    expectEqualSequence(String(c).utf16.reversed(), c.utf16.reversed())
+  }
+}
+
 var UnicodeScalarTests = TestSuite("UnicodeScalar")
 
 UnicodeScalarTests.test("UInt8(ascii: UnicodeScalar)") {
@@ -356,6 +359,8 @@ UnicodeScalarTests.test("UInt8(ascii: UnicodeScalar)") {
   }
 }
 
+#if !os(WASI)
+// Trap tests aren't available on WASI.
 UnicodeScalarTests.test("UInt8(ascii: UnicodeScalar)/non-ASCII should trap")
   .skip(.custom(
     { _isFastAssertConfiguration() },
@@ -365,6 +370,7 @@ UnicodeScalarTests.test("UInt8(ascii: UnicodeScalar)/non-ASCII should trap")
   expectCrashLater()
   _blackHole(UInt8(ascii: us))
 }
+#endif
 
 UnicodeScalarTests.test("UInt32(_: UnicodeScalar),UInt64(_: UnicodeScalar)") {
   for us in baseScalars {
@@ -402,6 +408,21 @@ UnicodeScalarTests.test("LosslessStringConvertible") {
 
   checkLosslessStringConvertible((0xE000...0xF000).map { UnicodeScalar(Int($0))! })
   checkLosslessStringConvertible((0...127).map { UnicodeScalar(Int($0))! })
+}
+
+if #available(SwiftStdlib 5.1, *) {
+  UnicodeScalarTests.test("Views") {
+    let scalars = baseScalars + continuingScalars
+    for scalar in scalars {
+      expectEqual(scalar, String(scalar).unicodeScalars.first!)
+      expectEqualSequence(String(scalar).utf8, scalar.utf8)
+      expectEqualSequence(String(scalar).utf16, scalar.utf16)
+
+      expectEqualSequence(String(scalar).utf8.reversed(), scalar.utf8.reversed())
+      expectEqualSequence(
+        String(scalar).utf16.reversed(), scalar.utf16.reversed())
+    }
+  }
 }
 
 runAllTests()

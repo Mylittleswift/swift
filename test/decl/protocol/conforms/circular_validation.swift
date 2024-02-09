@@ -4,10 +4,16 @@
 // not crash.
 
 protocol P {
-  var x: Int { get set } // expected-note {{protocol requires property 'x' with type 'Int'; do you want to add a stub?}}
+  var x: Int { get set } // expected-note {{protocol requires property 'x' with type 'Int'; add a stub for conformance}}
 }
 
 struct S : P { // expected-error {{type 'S' does not conform to protocol 'P'}}
   static var x = 0 // expected-note {{candidate operates on a type, not an instance as required}}
   var x = S.x // expected-note {{candidate references itself}}
 }
+
+// https://github.com/apple/swift/issues/51713
+// FIXME: Lousy diagnostics on this case.
+protocol P1_51713: P1P2_51713 {} // expected-error {{protocol 'P1_51713' refines itself}}
+protocol P2_51713: P1P2_51713 {}
+typealias P1P2_51713 = P1_51713 & P2_51713

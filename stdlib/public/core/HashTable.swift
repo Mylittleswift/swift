@@ -17,7 +17,7 @@ internal protocol _HashTableDelegate {
 }
 
 @usableFromInline
-@_fixed_layout
+@frozen
 internal struct _HashTable {
   @usableFromInline
   internal typealias Word = _UnsafeBitset.Word
@@ -42,7 +42,7 @@ internal struct _HashTable {
   @inlinable
   internal var bucketCount: Int {
     @inline(__always) get {
-      return bucketMask &+ 1
+      return _assumeNonNegative(bucketMask &+ 1)
     }
   }
 
@@ -51,6 +51,17 @@ internal struct _HashTable {
     @inline(__always) get {
       return _UnsafeBitset.wordCount(forCapacity: bucketCount)
     }
+  }
+
+  /// Return a bitset representation of the occupied buckets in this table.
+  ///
+  /// Note that if we have only a single partial word in the hash table's
+  /// bitset, then its out-of-bounds bits are guaranteed to be all set. These
+  /// filler bits are there to speed up finding holes -- they don't correspond
+  /// to occupied buckets in the table.
+  @_alwaysEmitIntoClient
+  internal var bitset: _UnsafeBitset {
+    _UnsafeBitset(words: words, wordCount: wordCount)
   }
 }
 
@@ -91,13 +102,13 @@ extension _HashTable {
   }
 
   internal static func hashSeed(
-    for object: AnyObject,
+    for object: Builtin.NativeObject,
     scale: Int8
   ) -> Int {
     // We generate a new hash seed whenever a new hash table is allocated and
     // whenever an existing table is resized, so that we avoid certain copy
-    // operations becoming quadratic.  (For background details, see
-    // https://bugs.swift.org/browse/SR-3268)
+    // operations becoming quadratic. For background details, see
+    // https://github.com/apple/swift/issues/45856.
     //
     // Note that we do reuse the existing seed when making copy-on-write copies
     // so that we avoid breaking value semantics.
@@ -118,7 +129,7 @@ extension _HashTable {
 }
 
 extension _HashTable {
-  @_fixed_layout
+  @frozen
   @usableFromInline
   internal struct Bucket {
     @usableFromInline
@@ -172,7 +183,7 @@ extension _HashTable.Bucket: Comparable {
 
 extension _HashTable {
   @usableFromInline
-  @_fixed_layout
+  @frozen
   internal struct Index {
     @usableFromInline
     let bucket: Bucket
@@ -217,7 +228,7 @@ extension _HashTable.Index: Comparable {
 
 extension _HashTable: Sequence {
   @usableFromInline
-  @_fixed_layout
+  @frozen
   internal struct Iterator: IteratorProtocol {
     @usableFromInline
     let hashTable: _HashTable
@@ -405,7 +416,7 @@ extension _HashTable {
   @_effects(releasenone)
   internal func copyContents(of other: _HashTable) {
     _internalInvariant(bucketCount == other.bucketCount)
-    self.words.assign(from: other.words, count: wordCount)
+    self.words.update(from: other.words, count: wordCount)
   }
 
   /// Insert a new entry with the specified hash value into the table.
@@ -435,7 +446,7 @@ extension _HashTable {
       // without a special case.
       words[0] = Word.allBits.subtracting(elementsBelow: bucketCount)
     } else {
-      words.assign(repeating: .empty, count: wordCount)
+      words.update(repeating: .empty, count: wordCount)
     }
   }
 

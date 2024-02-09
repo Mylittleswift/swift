@@ -31,7 +31,7 @@ public:
     }
   }
 
-  static StringRef tokToString(swift::tok T) {
+  static std::string tokToString(swift::tok T) {
     switch (T) {
   #define KEYWORD(X) \
     case swift::tok::kw_##X: return "kw_" #X; break;
@@ -39,7 +39,7 @@ public:
     case swift::tok::X: return #X; break;
 #define POUND(X, Y) \
     case swift::tok::pound_##X: return "pound_" #X; break;
-  #include "swift/Syntax/TokenKinds.def"
+  #include "swift/AST/TokenKinds.def"
 
   #define OTHER(X) \
   case swift::tok::X: return #X; break;
@@ -82,14 +82,10 @@ public:
   }
   
   std::vector<Token> parseAndGetSplitTokens(unsigned BufID) {
-    swift::ParserUnit PU(SM, SourceFileKind::Main, BufID, LangOpts, "unknown");
-
-    bool Done = false;
-    while (!Done) {
-      PU.getParser().parseTopLevel();
-      Done = PU.getParser().Tok.is(tok::eof);
-    }
-    
+    swift::ParserUnit PU(SM, SourceFileKind::Main, BufID, LangOpts,
+                         TypeCheckerOptions(), SILOptions(), "unknown");
+    SmallVector<ASTNode, 8> items;
+    PU.getParser().parseTopLevelItems(items);
     return PU.getParser().getSplitTokens();
   }
   

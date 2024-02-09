@@ -1,7 +1,7 @@
 func test1() {
   if true {
-    let xRenamed = 1
-    print(xRenamed)
+    let <base>x</base> = 1
+    print(<base>x</base>)
   } else {
     let x = 2
     print(x)
@@ -45,5 +45,13 @@ func test4(arg: () throws -> Void) {
 func test5(_ x: Int) {
   let x = x 
   print(x)
+}
+
+func testCaptureVariable() {
+  let capturedVariable = 0
+
+  _ = { [capturedVariable] in
+    print(capturedVariable)
+  }
 }
 

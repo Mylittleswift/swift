@@ -10,10 +10,11 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Basic/Defer.h"
 #include "swift/Basic/LLVMInitialize.h"
 #include "swift/Frontend/Frontend.h"
 #include "swift/Frontend/PrintingDiagnosticConsumer.h"
-#include "swift/IDE/Refactoring.h"
+#include "swift/Refactoring/Refactoring.h"
 #include "swift/IDE/Utils.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
@@ -50,9 +51,13 @@ Action(llvm::cl::desc("kind:"), llvm::cl::init(RefactoringKind::None),
            clEnumValN(RefactoringKind::ConvertStringsConcatenationToInterpolation,
                       "strings-concatenation-to-interpolation", "Perform strings concatenation to interpolation refactoring"),
            clEnumValN(RefactoringKind::ExpandTernaryExpr,
-                     "expand-ternary-expr", "Perform expand ternary expression"),
+                      "expand-ternary-expr", "Perform expand ternary expression"),
            clEnumValN(RefactoringKind::ConvertToTernaryExpr,
                       "convert-to-ternary-expr", "Perform convert to ternary expression"),
+		       clEnumValN(RefactoringKind::ConvertIfLetExprToGuardExpr,
+                      "convert-to-guard", "Perform convert to guard expression"),
+           clEnumValN(RefactoringKind::ConvertGuardExprToIfLetExpr,
+                      "convert-to-iflet", "Perform convert to iflet expression"),
            clEnumValN(RefactoringKind::ExtractFunction,
                       "extract-function", "Perform extract function refactoring"),
            clEnumValN(RefactoringKind::MoveMembersToExtension,
@@ -67,7 +72,20 @@ Action(llvm::cl::desc("kind:"), llvm::cl::init(RefactoringKind::None),
                       "trailingclosure", "Perform trailing closure refactoring"),
            clEnumValN(RefactoringKind::ReplaceBodiesWithFatalError,
                       "replace-bodies-with-fatalError", "Perform trailing closure refactoring"),
-           clEnumValN(RefactoringKind::MemberwiseInitLocalRefactoring, "memberwise-init", "Generate member wise initializer")));
+           clEnumValN(RefactoringKind::MemberwiseInitLocalRefactoring, "memberwise-init", "Generate member wise initializer"),
+           clEnumValN(RefactoringKind::AddEquatableConformance, "add-equatable-conformance", "Add Equatable conformance"),
+           clEnumValN(RefactoringKind::AddExplicitCodableImplementation, "add-explicit-codable-implementation", "Add Explicit Codable Implementation"),
+           clEnumValN(RefactoringKind::ConvertToComputedProperty,
+                      "convert-to-computed-property", "Convert from field initialization to computed property"),
+           clEnumValN(RefactoringKind::ConvertToSwitchStmt, "convert-to-switch-stmt", "Perform convert to switch statement"),
+           clEnumValN(RefactoringKind::ConvertCallToAsyncAlternative,
+                      "convert-call-to-async-alternative", "Convert call to use its async alternative (if any)"),
+           clEnumValN(RefactoringKind::ConvertToAsync,
+                      "convert-to-async", "Convert the entire function to async"),
+           clEnumValN(RefactoringKind::AddAsyncAlternative,
+                      "add-async-alternative", "Add an async alternative of a function taking a callback"),
+           clEnumValN(RefactoringKind::AddAsyncWrapper,
+                      "add-async-wrapper", "Add an async alternative that forwards onto the function taking a callback")));
 
 
 static llvm::cl::opt<std::string>
@@ -80,6 +98,10 @@ SourceFilename("source-filename", llvm::cl::desc("Name of the source file"));
 static llvm::cl::list<std::string>
 InputFilenames(llvm::cl::Positional, llvm::cl::desc("[input files...]"),
                llvm::cl::ZeroOrMore);
+
+static llvm::cl::opt<std::string>
+    RewrittenOutputFile("rewritten-output-file",
+                        llvm::cl::desc("Name of the rewritten output file"));
 
 static llvm::cl::opt<std::string>
 LineColumnPair("pos", llvm::cl::desc("Line:Column pair or /*label*/"));
@@ -103,10 +125,39 @@ static llvm::cl::opt<bool>
 IsNonProtocolType("is-non-protocol-type",
                   llvm::cl::desc("The symbol being renamed is a type and not a protocol"));
 
-static llvm::cl::opt<bool>
-DumpInJason("dump-json",
-            llvm::cl::desc("Whether to dump refactoring edits in Json"),
-            llvm::cl::init(false));
+static llvm::cl::opt<bool> EnableExperimentalConcurrency(
+    "enable-experimental-concurrency",
+    llvm::cl::desc("Whether to enable experimental concurrency or not"));
+
+static llvm::cl::opt<std::string>
+    SDK("sdk", llvm::cl::desc("Path to the SDK to build against"));
+
+static llvm::cl::list<std::string>
+    ImportPaths("I",
+                llvm::cl::desc("Add a directory to the import search path"));
+
+static llvm::cl::opt<std::string>
+Triple("target", llvm::cl::desc("target triple"));
+
+static llvm::cl::opt<std::string> ResourceDir(
+    "resource-dir",
+    llvm::cl::desc("The directory that holds the compiler resource files"));
+
+enum class DumpType {
+  REWRITTEN,
+  JSON,
+  TEXT
+};
+static llvm::cl::opt<DumpType> DumpIn(
+    llvm::cl::desc("Dump edits to stdout as:"),
+    llvm::cl::init(DumpType::REWRITTEN),
+    llvm::cl::values(
+        clEnumValN(DumpType::REWRITTEN, "dump-rewritten",
+                   "rewritten file"),
+        clEnumValN(DumpType::JSON, "dump-json",
+                   "JSON"),
+        clEnumValN(DumpType::TEXT, "dump-text",
+                   "text")));
 
 static llvm::cl::opt<bool>
 AvailableActions("actions",
@@ -125,18 +176,18 @@ bool doesFileExist(StringRef Path) {
 struct RefactorLoc {
   unsigned Line;
   unsigned Column;
-  NameUsage Usage;
+  RenameLocUsage Usage;
 };
 
-NameUsage convertToNameUsage(StringRef RoleString) {
+RenameLocUsage convertToNameUsage(StringRef RoleString) {
   if (RoleString == "unknown")
-    return NameUsage::Unknown;
+    return RenameLocUsage::Unknown;
   if (RoleString == "def")
-    return NameUsage::Definition;
+    return RenameLocUsage::Definition;
   if (RoleString == "ref")
-    return NameUsage::Reference;
+    return RenameLocUsage::Reference;
   if (RoleString == "call")
-    return NameUsage::Call;
+    return RenameLocUsage::Call;
   llvm_unreachable("unhandled role string");
 }
 
@@ -149,9 +200,9 @@ std::vector<RefactorLoc> getLocsByLabelOrPosition(StringRef LabelOrLineCol,
 
   if (LabelOrLineCol.contains(':')) {
     auto LineCol = parseLineCol(LabelOrLineCol);
-    if (LineCol.hasValue()) {
-      LocResults.push_back({LineCol.getValue().first,LineCol.getValue().second,
-        NameUsage::Unknown});
+    if (LineCol.has_value()) {
+      LocResults.push_back({LineCol.value().first, LineCol.value().second,
+                            RenameLocUsage::Unknown});
     } else {
       llvm::errs() << "cannot parse position pair.";
     }
@@ -159,59 +210,59 @@ std::vector<RefactorLoc> getLocsByLabelOrPosition(StringRef LabelOrLineCol,
   }
 
   std::smatch Matches;
-  const std::regex LabelRegex("/\\*([^ *]+)\\*/|\\n");
+  // Intended to match comments like below where the "+offset" and ":usage"
+  // are defaulted to 0 and ref respectively
+  // /*name+offset:usage*/
+  const std::regex LabelRegex("/\\*([^ *:+]+)(?:\\+(\\d+))?(?:\\:([^ *]+))?\\*/|\\n");
 
   std::string::const_iterator SearchStart(Buffer.cbegin());
   unsigned Line = 1;
   unsigned Column = 1;
   while (std::regex_search(SearchStart, Buffer.cend(), Matches, LabelRegex)) {
-    auto EndOffset = Matches.position() + Matches.length();
-    if (Matches[1].matched) {
-      Column += EndOffset;
-      std::string MatchedStorage(Matches[1].str());
-      StringRef Matched(MatchedStorage);
-      size_t ColonPos = Matched.find(':');
-      if (Matched.slice(0, ColonPos) == LabelOrLineCol) {
-        NameUsage Usage = NameUsage::Reference;
-        if (ColonPos != StringRef::npos)
-          Usage = convertToNameUsage(Matched.substr(ColonPos + 1));
-        LocResults.push_back({Line, Column, Usage});
-      }
-    } else {
+    auto EndOffset = Matches.position(0) + Matches.length(0);
+    SWIFT_DEFER { SearchStart += EndOffset; };
+    if (!Matches[1].matched) {
       ++Line;
       Column = 1;
+      continue;
     }
-    SearchStart += EndOffset;
+    Column += EndOffset;
+    if (LabelOrLineCol == Matches[1].str()) {
+      unsigned ColumnOffset = 0;
+      if (Matches[2].length() > 0 && !llvm::to_integer(Matches[2].str(), ColumnOffset))
+        continue; // bad column offset
+      auto Usage = RenameLocUsage::Reference;
+      if (Matches[3].length() > 0)
+        Usage = convertToNameUsage(Matches[3].str());
+      LocResults.push_back({Line, Column + ColumnOffset, Usage});
+    }
   }
   return LocResults;
 }
 
 std::vector<RenameLoc> getRenameLocs(unsigned BufferID, SourceManager &SM,
                                      ArrayRef<RefactorLoc> Locs,
-                                     StringRef OldName, StringRef NewName,
-                                     bool IsFunctionLike,
-                                     bool IsNonProtocolType) {
+                                     StringRef OldName, StringRef NewName) {
   std::vector<RenameLoc> Renames;
-  std::transform(Locs.begin(), Locs.end(), std::back_inserter(Renames), [&](const RefactorLoc &Loc) -> RenameLoc {
-    return {Loc.Line, Loc.Column, Loc.Usage, OldName, NewName, IsFunctionLike,
-      IsNonProtocolType};
-  });
+  llvm::transform(Locs, std::back_inserter(Renames),
+                  [&](const RefactorLoc &Loc) -> RenameLoc {
+                    return {Loc.Line, Loc.Column, Loc.Usage, OldName};
+                  });
   return Renames;
 }
 
 RangeConfig getRange(unsigned BufferID, SourceManager &SM,
                                    RefactorLoc Start,
                                    RefactorLoc End) {
-    RangeConfig Range;
-    SourceLoc EndLoc = SM.getLocForLineCol(BufferID, End.Line,
-                                           End.Column);
-    Range.BufferId = BufferID;
-    Range.Line = Start.Line;
-    Range.Column = Start.Column;
-    Range.Length = SM.getByteDistance(Range.getStart(SM), EndLoc);
+  RangeConfig Range;
+  SourceLoc EndLoc = SM.getLocForLineCol(BufferID, End.Line, End.Column);
+  Range.BufferID = BufferID;
+  Range.Line = Start.Line;
+  Range.Column = Start.Column;
+  Range.Length = SM.getByteDistance(Range.getStart(SM), EndLoc);
 
-    assert(Range.getEnd(SM) == EndLoc);
-    return Range;
+  assert(Range.getEnd(SM) == EndLoc);
+  return Range;
 }
 
 // This function isn't referenced outside its translation unit, but it
@@ -220,6 +271,65 @@ RangeConfig getRange(unsigned BufferID, SourceManager &SM,
 // address of main, and some platforms can't implement getMainExecutable
 // without being given the address of a function in the main executable).
 void anchorForGetMainExecutable() {}
+
+static StringRef syntacticRenameRangeTag(RefactoringRangeKind Kind) {
+  switch (Kind) {
+  case RefactoringRangeKind::BaseName:
+    return "base";
+  case RefactoringRangeKind::KeywordBaseName:
+    return "keywordBase";
+  case RefactoringRangeKind::ParameterName:
+    return "param";
+  case RefactoringRangeKind::NoncollapsibleParameterName:
+    return "noncollapsibleparam";
+  case RefactoringRangeKind::DeclArgumentLabel:
+    return "arglabel";
+  case RefactoringRangeKind::CallArgumentLabel:
+    return "callarg";
+  case RefactoringRangeKind::CallArgumentColon:
+    return "callcolon";
+  case RefactoringRangeKind::CallArgumentCombined:
+    return "callcombo";
+  case RefactoringRangeKind::SelectorArgumentLabel:
+    return "sel";
+  }
+  llvm_unreachable("unhandled kind");
+}
+
+static int printSyntacticRenameRanges(
+    CancellableResult<std::vector<SyntacticRenameRangeDetails>> RenameRanges,
+    SourceManager &SM, unsigned BufferId, llvm::raw_ostream &OS) {
+  switch (RenameRanges.getKind()) {
+  case CancellableResultKind::Success:
+    break; // Handled below
+  case CancellableResultKind::Failure:
+    OS << RenameRanges.getError();
+    return 1;
+  case CancellableResultKind::Cancelled:
+    OS << "<cancelled>";
+    return 1;
+  }
+  SourceEditOutputConsumer outputConsumer(SM, BufferId, OS);
+  for (auto RangeDetails : RenameRanges.getResult()) {
+    if (RangeDetails.Type == RegionType::Mismatch ||
+        RangeDetails.Type == RegionType::Unmatched) {
+      continue;
+    }
+    for (const auto &Range : RangeDetails.Ranges) {
+      std::string NewText;
+      llvm::raw_string_ostream OS(NewText);
+      StringRef Tag = syntacticRenameRangeTag(Range.RangeKind);
+      OS << "<" << Tag;
+      if (Range.Index.has_value())
+        OS << " index=" << *Range.Index;
+      OS << ">" << Range.Range.str() << "</" << Tag << ">";
+      Replacement Repl{/*Path=*/{}, Range.Range, /*BufferName=*/{}, OS.str(),
+                       /*RegionsWorthNote=*/{}};
+      outputConsumer.SourceEditConsumer::accept(SM, Repl);
+    }
+  }
+  return RenameRanges.getResult().empty();
+}
 
 int main(int argc, char *argv[]) {
   PROGRAM_START(argc, argv);
@@ -238,11 +348,24 @@ int main(int argc, char *argv[]) {
   Invocation.setMainExecutablePath(
     llvm::sys::fs::getMainExecutable(argv[0],
     reinterpret_cast<void *>(&anchorForGetMainExecutable)));
+
+  Invocation.setSDKPath(options::SDK);
+  Invocation.setImportSearchPaths(options::ImportPaths);
+  if (!options::Triple.empty())
+    Invocation.setTargetTriple(options::Triple);
+
+  if (!options::ResourceDir.empty())
+    Invocation.setRuntimeResourcePath(options::ResourceDir);
+
   Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(
       options::SourceFilename);
+  Invocation.getFrontendOptions().RequestedAction = FrontendOptions::ActionType::Typecheck;
   Invocation.getLangOptions().AttachCommentsToDecls = true;
   Invocation.getLangOptions().CollectParsedToken = true;
-  Invocation.getLangOptions().BuildSyntaxTree = true;
+  Invocation.getLangOptions().DisableAvailabilityChecking = true;
+
+  if (options::EnableExperimentalConcurrency)
+    Invocation.getLangOptions().EnableExperimentalConcurrency = true;
 
   for (auto FileName : options::InputFilenames)
     Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(FileName);
@@ -251,13 +374,16 @@ int main(int argc, char *argv[]) {
   // Display diagnostics to stderr.
   PrintingDiagnosticConsumer PrintDiags;
   CI.addDiagnosticConsumer(&PrintDiags);
-  if (CI.setup(Invocation))
+  std::string InstanceSetupError;
+  if (CI.setup(Invocation, InstanceSetupError)) {
+    llvm::errs() << InstanceSetupError << '\n';
     return 1;
-
+  }
+  registerIDERequestFunctions(CI.getASTContext().evaluator);
   switch (options::Action) {
     case RefactoringKind::GlobalRename:
     case RefactoringKind::FindGlobalRenameRanges:
-      CI.performParseOnly(/*EvaluateConditionals*/true);
+      // No type-checking required.
       break;
     default:
       CI.performSema();
@@ -275,8 +401,8 @@ int main(int argc, char *argv[]) {
   assert(SF && "no source file?");
 
   SourceManager &SM = SF->getASTContext().SourceMgr;
-  unsigned BufferID = SF->getBufferID().getValue();
-  std::string Buffer = SM.getRangeForBuffer(BufferID).str();
+  unsigned BufferID = SF->getBufferID().value();
+  std::string Buffer = SM.getRangeForBuffer(BufferID).str().str();
 
   auto Start = getLocsByLabelOrPosition(options::LineColumnPair, Buffer);
   if (Start.empty()) {
@@ -299,8 +425,9 @@ int main(int argc, char *argv[]) {
 
   if (options::Action == RefactoringKind::FindLocalRenameRanges) {
     RangeConfig Range = getRange(BufferID, SM, StartLoc, EndLoc);
-    FindRenameRangesAnnotatingConsumer Consumer(SM, BufferID, llvm::outs());
-    return findLocalRenameRanges(SF, Range, Consumer, PrintDiags);
+    auto SyntacticRenameRanges = findLocalRenameRanges(SF, Range);
+    return printSyntacticRenameRanges(SyntacticRenameRanges, SM, BufferID,
+                                      llvm::outs());
   }
 
   if (options::Action == RefactoringKind::GlobalRename ||
@@ -321,36 +448,29 @@ int main(int argc, char *argv[]) {
       NewName = "";
     }
 
-    std::vector<RenameLoc>
-    RenameLocs = getRenameLocs(BufferID, SM, Start, options::OldName, NewName,
-                               options::IsFunctionLike.getNumOccurrences(),
-                               options::IsNonProtocolType.getNumOccurrences());
+    std::vector<RenameLoc> RenameLocs =
+        getRenameLocs(BufferID, SM, Start, options::OldName, NewName);
 
-    switch (options::Action) {
-    case RefactoringKind::GlobalRename: {
-      SourceEditOutputConsumer EditConsumer(SM, BufferID, llvm::outs());
-      return syntacticRename(SF, RenameLocs, EditConsumer, PrintDiags);
-    }
-    case RefactoringKind::FindGlobalRenameRanges: {
-      FindRenameRangesAnnotatingConsumer Consumer(SM, BufferID, llvm::outs());
-      return findSyntacticRenameRanges(SF, RenameLocs, Consumer, PrintDiags);
-    }
-    default:
+    if (options::Action != RefactoringKind::FindGlobalRenameRanges) {
       llvm_unreachable("unexpected refactoring kind");
     }
+    auto SyntacticRenameRanges =
+        findSyntacticRenameRanges(SF, RenameLocs, NewName);
+    return printSyntacticRenameRanges(SyntacticRenameRanges, SM, BufferID,
+                                      llvm::outs());
   }
 
   RangeConfig Range = getRange(BufferID, SM, StartLoc, EndLoc);
 
   if (options::Action == RefactoringKind::None) {
-    std::vector<RefactoringKind> Scratch;
-    ArrayRef<RefactoringKind> AllKinds;
-    bool RangeStartMayNeedRename = false;
-    AllKinds = collectAvailableRefactorings(SF, Range,RangeStartMayNeedRename,
-                                            Scratch, {&PrintDiags});
+    bool CollectRangeStartRefactorings = false;
+    auto Refactorings = collectRefactorings(
+        SF, Range, CollectRangeStartRefactorings, {&PrintDiags});
     llvm::outs() << "Action begins\n";
-    for (auto Kind : AllKinds) {
-      llvm::outs() << getDescriptiveRefactoringKindName(Kind) << "\n";
+    for (auto Info : Refactorings) {
+      if (Info.AvailableKind == RefactorAvailableKind::Available) {
+        llvm::outs() << getDescriptiveRefactoringKindName(Info.Kind) << "\n";
+      }
     }
     llvm::outs() << "Action ends\n";
     return 0;
@@ -360,14 +480,36 @@ int main(int argc, char *argv[]) {
   RefactoringConfig.Range = Range;
   RefactoringConfig.PreferredName = options::NewName;
   std::string Error;
-  std::unique_ptr<SourceEditConsumer> pConsumer;
-  if (options::DumpInJason)
-    pConsumer.reset(new SourceEditJsonConsumer(llvm::outs()));
-  else
-    pConsumer.reset(new SourceEditOutputConsumer(SF->getASTContext().SourceMgr,
-                                                      BufferID,
-                                                      llvm::outs()));
 
-  return refactorSwiftModule(CI.getMainModule(), RefactoringConfig, *pConsumer,
-                             PrintDiags);
+  StringRef RewrittenOutputFile = options::RewrittenOutputFile;
+  if (RewrittenOutputFile.empty())
+    RewrittenOutputFile = "-";
+  std::error_code EC;
+  llvm::raw_fd_ostream RewriteStream(RewrittenOutputFile, EC);
+  if (RewriteStream.has_error()) {
+    llvm::errs() << "Could not open rewritten output file";
+    return 1;
+  }
+
+  SmallVector<std::unique_ptr<SourceEditConsumer>> Consumers;
+  if (!options::RewrittenOutputFile.empty() ||
+      options::DumpIn == options::DumpType::REWRITTEN) {
+    Consumers.emplace_back(new SourceEditOutputConsumer(
+        SF->getASTContext().SourceMgr, BufferID, RewriteStream));
+  }
+  switch (options::DumpIn) {
+  case options::DumpType::REWRITTEN:
+    // Already added
+    break;
+  case options::DumpType::JSON:
+    Consumers.emplace_back(new SourceEditJsonConsumer(llvm::outs()));
+    break;
+  case options::DumpType::TEXT:
+    Consumers.emplace_back(new SourceEditTextConsumer(llvm::outs()));
+    break;
+  }
+
+  BroadcastingSourceEditConsumer BroadcastConsumer(Consumers);
+  return refactorSwiftModule(CI.getMainModule(), RefactoringConfig,
+                             BroadcastConsumer, PrintDiags);
 }

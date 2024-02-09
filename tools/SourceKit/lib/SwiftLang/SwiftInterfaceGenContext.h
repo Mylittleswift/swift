@@ -21,6 +21,7 @@
 namespace swift {
   class CompilerInvocation;
   class ValueDecl;
+  class ModuleDecl;
 }
 
 namespace SourceKit {
@@ -33,14 +34,11 @@ namespace SourceKit {
 class SwiftInterfaceGenContext :
   public llvm::ThreadSafeRefCountedBase<SwiftInterfaceGenContext> {
 public:
-  static SwiftInterfaceGenContextRef create(StringRef DocumentName,
-                                            bool IsModule,
-                                            StringRef ModuleOrHeaderName,
-                                            Optional<StringRef> Group,
-                                            swift::CompilerInvocation Invocation,
-                                            std::string &ErrorMsg,
-                                            bool SynthesizedExtensions,
-                                            Optional<StringRef> InterestedUSR);
+  static SwiftInterfaceGenContextRef
+  create(StringRef DocumentName, bool IsModule, StringRef ModuleOrHeaderName,
+         llvm::Optional<StringRef> Group, swift::CompilerInvocation Invocation,
+         std::string &ErrorMsg, bool SynthesizedExtensions,
+         llvm::Optional<StringRef> InterestedUSR);
 
   static SwiftInterfaceGenContextRef
     createForTypeInterface(swift::CompilerInvocation Invocation,
@@ -58,6 +56,7 @@ public:
   StringRef getDocumentName() const;
   StringRef getModuleOrHeaderName() const;
   bool isModule() const;
+  swift::ModuleDecl *getModuleDecl() const;
 
   bool matches(StringRef ModuleName, const swift::CompilerInvocation &Invok);
 

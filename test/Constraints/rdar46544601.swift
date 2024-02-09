@@ -3,7 +3,7 @@
 struct D {}
 
 class Future<T> {
-  func then<U>(_ fn: @escaping (T) -> Future<U>) -> Future<U> { fatalError() }
+  func then<U>(_ fn: @escaping (T) -> Future<U>) -> Future<U> { fatalError() } // expected-note {{in call to function 'then'}}
   func thenThrowing<U>(_ fn: @escaping (T) throws -> U) -> Future<U> { fatalError() }
   func whenFailure(_ fn: @escaping (Error) -> Void) {}
 
@@ -12,13 +12,11 @@ class Future<T> {
 
 protocol P {
   func foo(arr: [D], data: ArraySlice<UInt8>) -> Future<D>
-  // expected-note@-1 {{found this candidate}}
   func bar(root: D, from: P) -> Future<D>
 }
 
 extension P {
   func foo(arr: [D] = [], data: [UInt8]) -> Future<D> { fatalError() }
-  // expected-note@-1 {{found this candidate}}
 }
 
 func crash(_ p: P, payload: [UInt8]) throws {
@@ -26,9 +24,8 @@ func crash(_ p: P, payload: [UInt8]) throws {
     return Future<(D, [D])>()
   }.then { (id, arr) in
     p.foo(arr: arr, data: []).and(result: (id, arr))
-    // expected-error@-1 {{mbiguous reference to member 'foo(arr:data:)'}}
-  }.then { args0 in
+  }.then { args0 in // expected-error {{generic parameter 'U' could not be inferred}}
     let (parentID, args1) = args0
-    p.bar(root: parentID, from: p).and(args1)
+    p.bar(root: parentID, from: p).and(result: args1)
   }.whenFailure { _ in }
 }

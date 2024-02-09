@@ -60,8 +60,8 @@ extension String {
   ///         print(asciiPrefix)
   ///     }
   ///     // Prints "My favorite emoji is "
-  @_fixed_layout
-  public struct UnicodeScalarView {
+  @frozen
+  public struct UnicodeScalarView: Sendable {
     @usableFromInline
     internal var _guts: _StringGuts
 
@@ -91,33 +91,33 @@ extension String.UnicodeScalarView: BidirectionalCollection {
   /// nonempty.
   ///
   /// If the string is empty, `startIndex` is equal to `endIndex`.
-  @inlinable
-  public var startIndex: Index {
-    @inline(__always) get { return _guts.startIndex }
-  }
+  @inlinable @inline(__always)
+  public var startIndex: Index { return _guts.startIndex }
 
   /// The "past the end" position---that is, the position one greater than
   /// the last valid subscript argument.
   ///
   /// In an empty Unicode scalars view, `endIndex` is equal to `startIndex`.
-  @inlinable
-  public var endIndex: Index {
-    @inline(__always) get { return _guts.endIndex }
-  }
+  @inlinable @inline(__always)
+  public var endIndex: Index { return _guts.endIndex }
 
   /// Returns the next consecutive location after `i`.
   ///
   /// - Precondition: The next location exists.
   @inlinable @inline(__always)
   public func index(after i: Index) -> Index {
-    _internalInvariant(i < endIndex)
-    // TODO(String performance): isASCII fast-path
+    let i = _guts.validateScalarIndex(i)
+    return _uncheckedIndex(after: i)
+  }
 
+  @_alwaysEmitIntoClient
+  @inline(__always)
+  internal func _uncheckedIndex(after i: Index) -> Index {
+    // TODO(String performance): isASCII fast-path
     if _fastPath(_guts.isFastUTF8) {
       let len = _guts.fastUTF8ScalarLength(startingAt: i._encodedOffset)
-      return i.encoded(offsetBy: len)
+      return i.encoded(offsetBy: len)._scalarAligned._knownUTF8
     }
-
     return _foreignIndex(after: i)
   }
 
@@ -126,15 +126,24 @@ extension String.UnicodeScalarView: BidirectionalCollection {
   /// - Precondition: The previous location exists.
   @inlinable @inline(__always)
   public func index(before i: Index) -> Index {
-    precondition(i._encodedOffset > 0)
-    // TODO(String performance): isASCII fast-path
+    let i = _guts.validateInclusiveScalarIndex(i)
+    // Note: Aligning an index may move it closer towards the `startIndex`, so
+    // the `i > startIndex` check needs to come after rounding.
+    _precondition(i > startIndex, "String index is out of bounds")
 
+    return _uncheckedIndex(before: i)
+  }
+
+  @_alwaysEmitIntoClient
+  @inline(__always)
+  internal func _uncheckedIndex(before i: Index) -> Index {
+    // TODO(String performance): isASCII fast-path
     if _fastPath(_guts.isFastUTF8) {
-      let len = _guts.withFastUTF8 { utf8 -> Int in
-        return _utf8ScalarLength(utf8, endingAt: i._encodedOffset)
+      let len = _guts.withFastUTF8 { utf8 in
+        _utf8ScalarLength(utf8, endingAt: i._encodedOffset)
       }
       _internalInvariant(len <= 4, "invalid UTF8")
-      return i.encoded(offsetBy: -len)
+      return i.encoded(offsetBy: 0 &- len)._scalarAligned._knownUTF8
     }
 
     return _foreignIndex(before: i)
@@ -156,19 +165,86 @@ extension String.UnicodeScalarView: BidirectionalCollection {
   ///
   /// - Parameter position: A valid index of the character view. `position`
   ///   must be less than the view's end index.
-  @inlinable
+  @inlinable @inline(__always)
   public subscript(position: Index) -> Unicode.Scalar {
-    @inline(__always) get {
-      String(_guts)._boundsCheck(position)
-      let i = _guts.scalarAlign(position)
-      return _guts.errorCorrectedScalar(startingAt: i._encodedOffset).0
+    let i = _guts.validateScalarIndex(position)
+    return _guts.errorCorrectedScalar(startingAt: i._encodedOffset).0
+  }
+
+  @_alwaysEmitIntoClient // Swift 5.1 bug fix
+  public func distance(from start: Index, to end: Index) -> Int {
+    let start = _guts.validateInclusiveScalarIndex(start)
+    let end = _guts.validateInclusiveScalarIndex(end)
+
+    var i = start
+    var count = 0
+    if i < end {
+      while i < end {
+        count += 1
+        i = _uncheckedIndex(after: i)
+      }
+    } else if i > end {
+      while i > end {
+        count -= 1
+        i = _uncheckedIndex(before: i)
+      }
     }
+    return count
+  }
+
+  @_alwaysEmitIntoClient
+  public func index(_ i: Index, offsetBy distance: Int) -> Index {
+    var i = _guts.validateInclusiveScalarIndex(i)
+
+    if distance >= 0 {
+      for _ in stride(from: 0, to: distance, by: 1) {
+        _precondition(i._encodedOffset < _guts.count, "String index is out of bounds")
+        i = _uncheckedIndex(after: i)
+      }
+    } else {
+      for _ in stride(from: 0, to: distance, by: -1) {
+        _precondition(i._encodedOffset > 0, "String index is out of bounds")
+        i = _uncheckedIndex(before: i)
+      }
+    }
+    return i
+  }
+
+  @_alwaysEmitIntoClient
+  public func index(
+    _ i: Index, offsetBy distance: Int, limitedBy limit: Index
+  ) -> Index? {
+    // Note: `limit` is intentionally not scalar aligned to ensure our behavior
+    // exactly matches the documentation above. We do need to ensure it has a
+    // matching encoding, though. The same goes for `start`, which is used to
+    // determine whether the limit applies at all.
+    let limit = _guts.ensureMatchingEncoding(limit)
+    let start = _guts.ensureMatchingEncoding(i)
+
+    var i = _guts.validateInclusiveScalarIndex(i)
+
+    if distance >= 0 {
+      for _ in stride(from: 0, to: distance, by: 1) {
+        guard limit < start || i < limit else { return nil }
+        _precondition(i._encodedOffset < _guts.count, "String index is out of bounds")
+        i = _uncheckedIndex(after: i)
+      }
+      guard limit < start || i <= limit else { return nil }
+    } else {
+      for _ in stride(from: 0, to: distance, by: -1) {
+        guard limit > start || i > limit else { return nil }
+        _precondition(i._encodedOffset > 0, "String index is out of bounds")
+        i = _uncheckedIndex(before: i)
+      }
+      guard limit > start || i >= limit else { return nil }
+    }
+    return i
   }
 }
 
 extension String.UnicodeScalarView {
-  @_fixed_layout
-  public struct Iterator: IteratorProtocol {
+  @frozen
+  public struct Iterator: IteratorProtocol, Sendable {
     @usableFromInline
     internal var _guts: _StringGuts
 
@@ -201,10 +277,8 @@ extension String.UnicodeScalarView {
 }
 
 extension String.UnicodeScalarView: CustomStringConvertible {
- @inlinable
- public var description: String {
-   @inline(__always) get { return String(_guts) }
- }
+ @inlinable @inline(__always)
+ public var description: String { return String(_guts) }
 }
 
 extension String.UnicodeScalarView: CustomDebugStringConvertible {
@@ -244,10 +318,18 @@ extension String {
   public var unicodeScalars: UnicodeScalarView {
     @inline(__always) get { return UnicodeScalarView(_guts) }
     @inline(__always) set { _guts = newValue._guts }
+
+    @inlinable @inline(__always)
+    _modify {
+      var view = self.unicodeScalars
+      self = ""
+      defer { self._guts = view._guts }
+      yield &view
+    }
   }
 }
 
-extension String.UnicodeScalarView : RangeReplaceableCollection {
+extension String.UnicodeScalarView: RangeReplaceableCollection {
   /// Creates an empty view instance.
   @inlinable @inline(__always)
   public init() {
@@ -282,7 +364,7 @@ extension String.UnicodeScalarView : RangeReplaceableCollection {
   /// - Parameter newElements: A sequence of Unicode scalar values.
   ///
   /// - Complexity: O(*n*), where *n* is the length of the resulting view.
-  public mutating func append<S : Sequence>(contentsOf newElements: S)
+  public mutating func append<S: Sequence>(contentsOf newElements: S)
   where S.Element == Unicode.Scalar {
     // TODO(String performance): Skip extra String allocation
     let scalars = String(decoding: newElements.map { $0.value }, as: UTF32.self)
@@ -296,7 +378,7 @@ extension String.UnicodeScalarView : RangeReplaceableCollection {
   /// string.
   ///
   /// - Parameters:
-  ///   - bounds: The range of elements to replace. The bounds of the range
+  ///   - subrange: The range of elements to replace. The bounds of the range
   ///     must be valid indices of the view.
   ///   - newElements: The new Unicode scalar values to add to the string.
   ///
@@ -305,18 +387,15 @@ extension String.UnicodeScalarView : RangeReplaceableCollection {
   ///   removes elements at the end of the string, the complexity is O(*n*),
   ///   where *n* is equal to `bounds.count`.
   public mutating func replaceSubrange<C>(
-    _ bounds: Range<Index>,
+    _ subrange: Range<Index>,
     with newElements: C
-  ) where C : Collection, C.Element == Unicode.Scalar {
-    // TODO(String performance): Skip extra String and Array allocation
-
-    let utf8Replacement = newElements.flatMap { String($0).utf8 }
-    let replacement = utf8Replacement.withUnsafeBufferPointer {
-      return String._uncheckedFromUTF8($0)
-    }
-    var copy = String(_guts)
-    copy.replaceSubrange(bounds, with: replacement)
-    self = copy.unicodeScalars
+  ) where C: Collection, C.Element == Unicode.Scalar {
+    // FIXME: This method used to not properly validate indices before 5.7;
+    // temporarily allow older binaries to keep invoking undefined behavior as
+    // before.
+    let subrange = _guts.validateScalarRange_5_7(subrange)
+    _guts.replaceSubrange(subrange, with: newElements)
+    _invariantCheck()
   }
 }
 
@@ -352,10 +431,20 @@ extension String.UnicodeScalarIndex {
     _ sourcePosition: String.Index,
     within unicodeScalars: String.UnicodeScalarView
   ) {
-    guard unicodeScalars._guts.isOnUnicodeScalarBoundary(sourcePosition) else {
+    // As a special exception, we allow `sourcePosition` to be an UTF-16 index
+    // when `self` is a UTF-8 string (or vice versa), to preserve compatibility
+    // with (broken) code that keeps using indices from a bridged string after
+    // converting the string to a native representation. Such indices are
+    // invalid, but returning nil here can break code that appeared to work fine
+    // for ASCII strings in Swift releases prior to 5.7.
+    let i = unicodeScalars._guts.ensureMatchingEncoding(sourcePosition)
+    guard
+      i._encodedOffset <= unicodeScalars._guts.count,
+      unicodeScalars._guts.isOnUnicodeScalarBoundary(i)
+    else {
       return nil
     }
-    self = sourcePosition
+    self = i
   }
 
   /// Returns the position in the given string that corresponds exactly to this
@@ -366,7 +455,7 @@ extension String.UnicodeScalarIndex {
   /// in the string.
   ///
   ///     let cafe = "Café 🍵"
-  ///     let i = cafe.unicodeScalars.firstIndex(of: "🍵")
+  ///     let i = cafe.unicodeScalars.firstIndex(of: "🍵")!
   ///     let j = i.samePosition(in: cafe)!
   ///     print(cafe[j...])
   ///     // Prints "🍵"
@@ -383,14 +472,15 @@ extension String.UnicodeScalarIndex {
   }
 }
 
+#if SWIFT_ENABLE_REFLECTION
 // Reflection
-extension String.UnicodeScalarView : CustomReflectable {
+extension String.UnicodeScalarView: CustomReflectable {
   /// Returns a mirror that reflects the Unicode scalars view of a string.
   public var customMirror: Mirror {
     return Mirror(self, unlabeledChildren: self)
   }
 }
-
+#endif
 
 //===--- Slicing Support --------------------------------------------------===//
 /// In Swift 3.2, in the absence of type context,
@@ -407,7 +497,8 @@ extension String.UnicodeScalarView {
 
   @available(swift, introduced: 4)
   public subscript(r: Range<Index>) -> String.UnicodeScalarView.SubSequence {
-    return String.UnicodeScalarView.SubSequence(self, _bounds: r)
+    let r = _guts.validateScalarRange(r)
+    return SubSequence(_unchecked: self, bounds: r)
   }
 }
 
@@ -418,9 +509,10 @@ extension String.UnicodeScalarView {
   internal func _foreignIndex(after i: Index) -> Index {
     _internalInvariant(_guts.isForeign)
     let cu = _guts.foreignErrorCorrectedUTF16CodeUnit(at: i)
-    let len = _isLeadingSurrogate(cu) ? 2 : 1
+    let len = UTF16.isLeadSurrogate(cu) ? 2 : 1
 
-    return i.encoded(offsetBy: len)
+    let r = i.encoded(offsetBy: len)._scalarAligned
+    return r._knownUTF16
   }
 
   @usableFromInline @inline(never)
@@ -429,8 +521,9 @@ extension String.UnicodeScalarView {
     _internalInvariant(_guts.isForeign)
     let priorIdx = i.priorEncoded
     let cu = _guts.foreignErrorCorrectedUTF16CodeUnit(at: priorIdx)
-    let len = _isTrailingSurrogate(cu) ? 2 : 1
+    let len = UTF16.isTrailSurrogate(cu) ? 2 : 1
 
-    return i.encoded(offsetBy: -len)
+    let r = i.encoded(offsetBy: -len)._scalarAligned
+    return r._knownUTF16
   }
 }

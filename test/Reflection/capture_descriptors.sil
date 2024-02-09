@@ -1,8 +1,13 @@
 
 // REQUIRES: no_asan
+
+// https://github.com/apple/swift/issues/55339
+// XFAIL: OS=openbsd
+// UNSUPPORTED: OS=linux-android, OS=linux-androideabi
+
 // RUN: %empty-directory(%t)
-// RUN: %target-build-swift %s -emit-module -emit-library -module-name capture_descriptors -o %t/capture_descriptors%{target-shared-library-suffix}
-// RUN: %target-swift-reflection-dump -binary-filename %t/capture_descriptors%{target-shared-library-suffix} | %FileCheck %s
+// RUN: %target-build-swift %s -emit-module -emit-library -module-name capture_descriptors -o %t/capture_descriptors%{target-shared-library-suffix} -L%t/../../.. -lBlocksRuntime
+// RUN: %target-swift-reflection-dump %t/capture_descriptors%{target-shared-library-suffix} | %FileCheck %s
 
 sil_stage canonical
 
@@ -42,7 +47,14 @@ bb0(%i : $Int, %p : $@thick P.Type):
 
 // CHECK:      - Capture types:
 // CHECK-NEXT: (struct Swift.Int)
-// CHECK-NEXT: (builtin Builtin.NativeObject)
+// CHECK-NEXT: (sil_box_with_layout
+// CHECK-NEXT:   (layout
+// CHECK-NEXT:     (var
+// CHECK-NEXT:       (generic_type_parameter depth=0 index=0)))
+// CHECK-NEXT:   (generic_signature
+// CHECK-NEXT:     (substitution
+// CHECK-NEXT:       (generic_type_parameter depth=0 index=0)
+// CHECK-NEXT:       (struct Swift.Int))))
 // CHECK-NEXT: (existential_metatype
 // CHECK-NEXT:   (protocol_composition
 // CHECK-NEXT:     (protocol capture_descriptors.P)))
@@ -56,13 +68,15 @@ sil [ossa] @generic_callee2 : $@convention(thin) <T, U> (@in T, @owned <τ_0_0> 
 bb0(%i : $*T, %b : @owned $<τ_0_0> { var τ_0_0 } <U>):
   %12 = tuple ()
   destroy_value %b : $<τ_0_0> { var τ_0_0 } <U>
+  destroy_addr %i : $*T
   return %12 : $()
 }
 
-sil [ossa] @concrete_caller2 : $@convention(thin) () -> @owned @callee_guaranteed () -> () {
-bb0:
+sil [ossa] @concrete_caller2 : $@convention(thin) (Int) -> @owned @callee_guaranteed () -> () {
+bb0(%0 : $Int):
   %f = function_ref @generic_callee2 : $@convention(thin) <T, U> (@in T, @owned <τ_0_0> { var τ_0_0 } <U>) -> ()
   %i = alloc_stack $Int
+  store %0 to [trivial] %i : $*Int
   %b = alloc_box $<τ_0_0> { var τ_0_0 } <String>
   %c = partial_apply [callee_guaranteed] %f<Int, String>(%i, %b) : $@convention(thin) <T, U> (@in T, @owned <τ_0_0> { var τ_0_0 } <U>) -> ()
   dealloc_stack %i : $*Int
@@ -77,7 +91,14 @@ bb0:
 
 // CHECK:      - Capture types:
 // CHECK-NEXT: (struct Swift.Int)
-// CHECK-NEXT: (builtin Builtin.NativeObject)
+// CHECK-NEXT: (sil_box_with_layout
+// CHECK-NEXT:   (layout
+// CHECK-NEXT:     (var
+// CHECK-NEXT:       (generic_type_parameter depth=0 index=0)))
+// CHECK-NEXT:   (generic_signature
+// CHECK-NEXT:     (substitution
+// CHECK-NEXT:       (generic_type_parameter depth=0 index=0)
+// CHECK-NEXT:       (struct Swift.String))))
 // CHECK-NEXT:   - Metadata sources:
 
 
@@ -92,12 +113,13 @@ bb0(%t : $*T):
   return %12 : $()
 }
 
-sil [ossa] @generic_caller3 : $@convention(thin) <A, B, C> () -> @owned @callee_guaranteed () -> () {
-bb0:
+sil [ossa] @generic_caller3 : $@convention(thin) <A, B, C> (@owned Optional<@callee_guaranteed @substituted <X, Y> (@in_guaranteed X) -> @out Y for <A, B>>) -> @owned @callee_guaranteed () -> () {
+bb0(%0 : @owned $Optional<@callee_guaranteed @substituted <X, Y> (@in_guaranteed X) -> @out Y for <A, B>>):
   %f = function_ref @generic_callee3 : $@convention(thin) <T, U> (@in_guaranteed T) -> ()
-  %t = alloc_stack $Optional<@callee_guaranteed (@in_guaranteed A) -> @out B>
+  %t = alloc_stack $Optional<@callee_guaranteed @substituted <X, Y> (@in_guaranteed X) -> @out Y for <A, B>>
+  store %0 to [init] %t : $*Optional<@callee_guaranteed @substituted <X, Y> (@in_guaranteed X) -> @out Y for <A, B>>
   %c = partial_apply [callee_guaranteed] %f<Optional<(A) -> B>, (B, (C) -> Int)>(%t) : $@convention(thin) <T, U> (@in_guaranteed T) -> ()
-  dealloc_stack %t : $*Optional<@callee_guaranteed (@in_guaranteed A) -> @out B>
+  dealloc_stack %t : $*Optional<@callee_guaranteed @substituted <X, Y> (@in_guaranteed X) -> @out Y for <A, B>>
   return %c : $@callee_guaranteed () -> ()
 }
 
@@ -115,10 +137,14 @@ bb0:
 // CHECK-NEXT:     (result
 // CHECK-NEXT:       (generic_type_parameter depth=0 index=1)))
 // CHECK-NEXT: (closure_binding index=0)
-// CHECK-NEXT: (generic_type_parameter depth=0 index=1)
+// CHECK-NEXT: (tuple
+// CHECK-NEXT:   (generic_type_parameter depth=0 index=1)
+// CHECK-NEXT:   (function
+// CHECK-NEXT:     (parameters
+// CHECK-NEXT:       (generic_type_parameter depth=0 index=2)
+// CHECK-NEXT:     (result
+// CHECK-NEXT:       (struct Swift.Int)))
 // CHECK-NEXT: (closure_binding index=1)
-// CHECK-NEXT: (generic_type_parameter depth=0 index=2)
-// CHECK-NEXT: (closure_binding index=2)
 
 
 // Generic caller and generic callee -- and one of the type parameters is
@@ -186,10 +212,10 @@ sil_vtable GenericClass {}
 // CHECK-NEXT:     (generic_type_parameter depth=0 index=1)
 // CHECK-NEXT:     (generic_type_parameter depth=0 index=2)))
 // CHECK-NEXT: - Metadata sources:
-// CHECK-NEXT: (generic_type_parameter depth=0 index=2)
+// CHECK-NEXT: (tuple
+// CHECK-NEXT:   (generic_type_parameter depth=0 index=2)
+// CHECK-NEXT:   (generic_type_parameter depth=0 index=0))
 // CHECK-NEXT: (closure_binding index=0)
-// CHECK-NEXT: (generic_type_parameter depth=0 index=0)
-// CHECK-NEXT: (closure_binding index=1)
 // CHECK-NEXT: (tuple
 // CHECK-NEXT:   (generic_type_parameter depth=0 index=0)
 // CHECK-NEXT:   (generic_type_parameter depth=0 index=1))
@@ -283,9 +309,9 @@ bb0(%0 : $*P):
 
 sil [ossa] @existential_caller : $@convention(thin) (@in P) -> () {
 bb0(%0 : $*P):
-  %payload = open_existential_addr immutable_access %0 : $*P to $*@opened("2D7A8F84-2973-11E7-838D-34363BD08DA0") P
+  %payload = open_existential_addr immutable_access %0 : $*P to $*@opened("2D7A8F84-2973-11E7-838D-34363BD08DA0", P) Self
   %f = function_ref @existential_callee : $@convention(thin) <τ_0_0 where τ_0_0 : P> () -> @out P
-  %result = partial_apply [callee_guaranteed] %f<@opened("2D7A8F84-2973-11E7-838D-34363BD08DA0") P>() : $@convention(thin) <τ_0_0 where τ_0_0 : P> () -> @out P
+  %result = partial_apply [callee_guaranteed] %f<@opened("2D7A8F84-2973-11E7-838D-34363BD08DA0", P) Self>() : $@convention(thin) <τ_0_0 where τ_0_0 : P> () -> @out P
   destroy_value %result : $@callee_guaranteed () -> @out P
   destroy_addr %0 : $*P
   %tuple = tuple ()

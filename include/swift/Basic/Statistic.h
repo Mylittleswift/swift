@@ -13,10 +13,11 @@
 #ifndef SWIFT_BASIC_STATISTIC_H
 #define SWIFT_BASIC_STATISTIC_H
 
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Timer.h"
 #include "swift/Basic/LLVM.h"
-#include "swift/Basic/Timer.h"
 
 #include <thread>
 #include <tuple>
@@ -25,8 +26,7 @@
 
 #define SWIFT_FUNC_STAT_NAMED(DEBUG_TYPE)                               \
   do {                                                                  \
-    static llvm::Statistic FStat =                                      \
-      {DEBUG_TYPE, __func__, __func__, {0}, {false}};                   \
+    static llvm::Statistic FStat = {DEBUG_TYPE, __func__, __func__};    \
     ++FStat;                                                            \
   } while (0)
 
@@ -69,6 +69,11 @@ class SourceFile;
 class SourceManager;
 class Stmt;
 class TypeRepr;
+struct FingerprintAndMembers;
+
+/// Get the number of instructions executed since this process was launched.
+/// Returns 0 if the number of instructions executed could not be determined.
+uint64_t getInstructionsExecuted();
 
 // There are a handful of cases where the swift compiler can introduce
 // counter-measurement noise via nondeterminism, especially via
@@ -140,6 +145,7 @@ public:
 private:
   bool currentProcessExitStatusSet;
   int currentProcessExitStatus;
+  long maxChildRSS = 0;
   SmallString<128> StatsFilename;
   SmallString<128> TraceFilename;
   SmallString<128> ProfileDirname;
@@ -151,15 +157,19 @@ private:
 
   SourceManager *SourceMgr;
   clang::SourceManager *ClangSourceMgr;
-  Optional<AlwaysOnDriverCounters> DriverCounters;
-  Optional<AlwaysOnFrontendCounters> FrontendCounters;
-  Optional<AlwaysOnFrontendCounters> LastTracedFrontendCounters;
-  Optional<std::vector<FrontendStatsEvent>> FrontendStatsEvents;
+  llvm::Optional<AlwaysOnDriverCounters> DriverCounters;
+  llvm::Optional<AlwaysOnFrontendCounters> FrontendCounters;
+  llvm::Optional<AlwaysOnFrontendCounters> LastTracedFrontendCounters;
+  llvm::Optional<std::vector<FrontendStatsEvent>> FrontendStatsEvents;
 
   // These are unique_ptr so we can use incomplete types here.
   std::unique_ptr<RecursionSafeTimers> RecursiveTimers;
   std::unique_ptr<StatsProfilers> EventProfilers;
   std::unique_ptr<StatsProfilers> EntityProfilers;
+
+  /// Whether we are currently flushing statistics and should not therefore
+  /// record any additional stats until we've finished.
+  bool IsFlushingTracesAndProfiles;
 
   void publishAlwaysOnStatsToLLVM();
   void printAlwaysOnStatsAndTimers(raw_ostream &OS);
@@ -192,6 +202,8 @@ public:
   void flushTracesAndProfiles();
   void noteCurrentProcessExitStatus(int);
   void saveAnyFrontendStatsEvents(FrontendStatsTracer const &T, bool IsEntry);
+  void recordJobMaxRSS(long rss);
+  int64_t getChildrenMaxResidentSetSize();
 };
 
 // This is a non-nested type just to make it less work to write at call sites.

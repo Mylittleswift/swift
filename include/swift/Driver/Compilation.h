@@ -19,12 +19,13 @@
 
 #include "swift/Basic/ArrayRefView.h"
 #include "swift/Basic/LLVM.h"
+#include "swift/Basic/LangOptions.h"
+#include "swift/Basic/NullablePtr.h"
 #include "swift/Basic/OutputFileMap.h"
 #include "swift/Basic/Statistic.h"
 #include "swift/Driver/Driver.h"
 #include "swift/Driver/Job.h"
 #include "swift/Driver/Util.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Chrono.h"
 
@@ -55,7 +56,7 @@ namespace driver {
 enum class OutputLevel {
   /// Indicates that normal output should be produced.
   Normal,
-  
+
   /// Indicates that only jobs should be printed and not run. (-###)
   PrintJobs,
 
@@ -73,7 +74,31 @@ enum class PreserveOnSignal : bool {
   Yes
 };
 
+using CommandSet = llvm::SmallPtrSet<const Job *, 16>;
+
 class Compilation {
+public:
+  struct Result {
+    /// Set to true if any job exits abnormally (i.e. crashes).
+    bool hadAbnormalExit;
+    /// The exit code of this driver process.
+    int exitCode;
+
+    Result(bool hadAbnormalExit, int exitCode)
+        : hadAbnormalExit(hadAbnormalExit), exitCode(exitCode) {}
+
+    Result(const Result &) = delete;
+    Result &operator=(const Result &) = delete;
+
+    Result(Result &&) = default;
+    Result &operator=(Result &&) = default;
+
+    /// Construct a \c Compilation::Result from just an exit code.
+    static Result code(int code) {
+      return Compilation::Result{false, code};
+    }
+  };
+
 public:
   /// The filelist threshold value to pass to ensure file lists are never used
   static const size_t NEVER_USE_FILELIST = SIZE_MAX;
@@ -106,6 +131,16 @@ private:
 
   /// The Jobs which will be performed by this compilation.
   SmallVector<std::unique_ptr<const Job>, 32> Jobs;
+  // The Jobs which represent external actions performed by other drivers in
+  // the build graph.
+  //
+  // These Jobs are never scheduled into the build graph. This vector is
+  // populated by the routine that computes the set of incremental external
+  // dependencies that affect the current computation. Due to the way the
+  // Driver models multiple aspects of the incremental compilation scheduler
+  // by mapping to and from Jobs, it is necessary to lie and retain a set of
+  // pseudo-Jobs.
+  SmallVector<std::unique_ptr<const Job>, 32> ExternalJobs;
 
   /// The original (untranslated) input argument list.
   ///
@@ -128,41 +163,9 @@ private:
   /// These apply whether the compilation succeeds or fails. If the
   llvm::StringMap<PreserveOnSignal> TempFilePaths;
 
-  /// Write information about this compilation to this file.
-  ///
-  /// This is used for incremental builds.
-  std::string CompilationRecordPath;
-
-  /// A hash representing all the arguments that could trigger a full rebuild.
-  std::string ArgsHash;
-
-  /// When the build was started.
-  ///
-  /// This should be as close as possible to when the driver was invoked, since
-  /// it's used as a lower bound.
-  llvm::sys::TimePoint<> BuildStartTime;
-
-  /// The time of the last build.
-  ///
-  /// If unknown, this will be some time in the past.
-  llvm::sys::TimePoint<> LastBuildTime = llvm::sys::TimePoint<>::min();
-
   /// Indicates whether this Compilation should continue execution of subtasks
   /// even if they returned an error status.
   bool ContinueBuildingAfterErrors = false;
-
-  /// Indicates whether tasks should only be executed if their output is out
-  /// of date.
-  bool EnableIncrementalBuild;
-
-  /// When true, emit duplicated compilation record file whose filename is
-  /// suffixed with '~moduleonly'.
-  ///
-  /// This compilation record is used by '-emit-module'-only incremental builds
-  /// so that module-only builds do not affect compilation record file for
-  /// normal builds, while module-only incremental builds are able to use
-  /// artifacts of normal builds if they are already up to date.
-  bool OutputCompilationRecordForModuleOnlyBuild = false;
 
   /// Indicates whether groups of parallel frontend jobs should be merged
   /// together and run in composite "batch jobs" when possible, to reduce
@@ -174,11 +177,11 @@ private:
 
   /// Overrides parallelism level and \c BatchSizeLimit, sets exact
   /// count of batches, if in batch-mode.
-  const Optional<unsigned> BatchCount;
+  const llvm::Optional<unsigned> BatchCount;
 
   /// Overrides maximum batch size, if in batch-mode and not overridden
   /// by \c BatchCount.
-  const Optional<unsigned> BatchSizeLimit;
+  const llvm::Optional<unsigned> BatchSizeLimit;
 
   /// True if temporary files should not be deleted.
   const bool SaveTemps;
@@ -206,20 +209,23 @@ private:
   /// limit filelists will be used.
   size_t FilelistThreshold;
 
-  /// Scaffolding to permit experimentation with finer-grained dependencies and
-  /// faster rebuilds.
-  const bool EnableExperimentalDependencies;
+  /// Because each frontend job outputs the same info in its .d file, only do it
+  /// on the first job that actually runs. Write out dummies for the rest of the
+  /// jobs. This hack saves a lot of time in the build system when incrementally
+  /// building a project with many files. Record if a scheduled job has already
+  /// added -emit-dependency-path.
+  bool HaveAlreadyAddedDependencyPath = false;
 
-  /// Helpful for debugging, but slows down the driver. So, only turn on when
-  /// needed.
-  const bool VerifyExperimentalDependencyGraphAfterEveryImport;
-  /// Helpful for debugging, but slows down the driver. So, only turn on when
-  /// needed.
-  const bool EmitExperimentalDependencyDotFileAfterEveryImport;
+public:
+  /// When set, only the first scheduled frontend job gets the argument needed
+  /// to produce a make-style dependency file. The other jobs create dummy files
+  /// in the driver. This hack speeds up incremental compilation by reducing the
+  /// time for the build system to read each dependency file, which are all
+  /// identical. This optimization can be disabled by passing
+  /// -disable-only-one-dependency-file on the command line.
+  const bool OnlyOneDependencyFile;
 
-  /// Experiment with inter-file dependencies
-  const bool ExperimentalDependenciesIncludeIntrafileOnes;
-
+private:
   template <typename T>
   static T *unwrap(const std::unique_ptr<T> &p) {
     return p.get();
@@ -237,23 +243,15 @@ public:
               std::unique_ptr<llvm::opt::InputArgList> InputArgs,
               std::unique_ptr<llvm::opt::DerivedArgList> TranslatedArgs,
               InputFileList InputsWithTypes,
-              std::string CompilationRecordPath,
-              bool OutputCompilationRecordForModuleOnlyBuild,
-              StringRef ArgsHash, llvm::sys::TimePoint<> StartTime,
-              llvm::sys::TimePoint<> LastBuildTime,
               size_t FilelistThreshold,
-              bool EnableIncrementalBuild = false,
               bool EnableBatchMode = false,
               unsigned BatchSeed = 0,
-              Optional<unsigned> BatchCount = None,
-              Optional<unsigned> BatchSizeLimit = None,
+              llvm::Optional<unsigned> BatchCount = llvm::None,
+              llvm::Optional<unsigned> BatchSizeLimit = llvm::None,
               bool SaveTemps = false,
               bool ShowDriverTimeCompilation = false,
               std::unique_ptr<UnifiedStatsReporter> Stats = nullptr,
-              bool EnableExperimentalDependencies = false,
-              bool VerifyExperimentalDependencyGraphAfterEveryImport = false,
-              bool EmitExperimentalDependencyDotFileAfterEveryImport = false,
-              bool ExperimentalDependenciesIncludeIntrafileOnes = false);
+              bool OnlyOneDependencyFile = false);
   // clang-format on
   ~Compilation();
 
@@ -283,7 +281,11 @@ public:
   UnwrappedArrayView<const Job> getJobs() const {
     return llvm::makeArrayRef(Jobs);
   }
-  Job *addJob(std::unique_ptr<Job> J);
+
+  /// To send job list to places that don't truck in fancy array views.
+  std::vector<const Job *> getJobsSimply() const {
+    return std::vector<const Job *>(getJobs().begin(), getJobs().end());
+  }
 
   void addTemporaryFile(StringRef file,
                         PreserveOnSignal preserve = PreserveOnSignal::No) {
@@ -302,29 +304,6 @@ public:
     return DerivedOutputFileMap;
   }
 
-  bool getIncrementalBuildEnabled() const {
-    return EnableIncrementalBuild;
-  }
-  void disableIncrementalBuild() {
-    EnableIncrementalBuild = false;
-  }
-
-  bool getEnableExperimentalDependencies() const {
-    return EnableExperimentalDependencies;
-  }
-
-  bool getVerifyExperimentalDependencyGraphAfterEveryImport() const {
-    return VerifyExperimentalDependencyGraphAfterEveryImport;
-  }
-
-  bool getEmitExperimentalDependencyDotFileAfterEveryImport() const {
-    return EmitExperimentalDependencyDotFileAfterEveryImport;
-  }
-
-  bool getExperimentalDependenciesIncludeIntrafileOnes() const {
-    return ExperimentalDependenciesIncludeIntrafileOnes;
-  }
-
   bool getBatchModeEnabled() const {
     return EnableBatchMode;
   }
@@ -334,13 +313,6 @@ public:
   }
   void setContinueBuildingAfterErrors(bool Value = true) {
     ContinueBuildingAfterErrors = Value;
-  }
-
-  bool getShowIncrementalBuildDecisions() const {
-    return ShowIncrementalBuildDecisions;
-  }
-  void setShowIncrementalBuildDecisions(bool value = true) {
-    ShowIncrementalBuildDecisions = value;
   }
 
   bool getShowJobLifecycle() const {
@@ -358,6 +330,16 @@ public:
     return FilelistThreshold;
   }
 
+  /// Since every make-style dependency file contains
+  /// the same information, incremental builds are sped up by only emitting one
+  /// of those files. Since the build system expects to see the files existing,
+  /// create dummy files for those jobs that don't emit real dependencies.
+  /// \param path The dependency file path
+  /// \param addDependencyPath A function to add an -emit-dependency-path
+  /// argument
+  void addDependencyPathOrCreateDummy(StringRef path,
+                                      function_ref<void()> addDependencyPath);
+
   UnifiedStatsReporter *getStatsReporter() const {
     return Stats.get();
   }
@@ -365,7 +347,7 @@ public:
   /// True if extra work has to be done when tracing through the dependency
   /// graph, either in order to print dependencies or to collect statistics.
   bool getTraceDependencies() const {
-    return getShowIncrementalBuildDecisions() || getStatsReporter();
+    return getStatsReporter();
   }
 
   OutputLevel getOutputLevel() const {
@@ -376,17 +358,11 @@ public:
     return BatchSeed;
   }
 
-  llvm::sys::TimePoint<> getLastBuildTime() const {
-    return LastBuildTime;
-  }
-
-  Optional<unsigned> getBatchCount() const {
+  llvm::Optional<unsigned> getBatchCount() const {
     return BatchCount;
   }
 
-  Optional<unsigned> getBatchSizeLimit() const {
-    return BatchSizeLimit;
-  }
+  llvm::Optional<unsigned> getBatchSizeLimit() const { return BatchSizeLimit; }
 
   /// Requests the path to a file containing all input source files. This can
   /// be shared across jobs.
@@ -403,7 +379,7 @@ public:
   ///
   /// \returns result code for the Compilation's Jobs; 0 indicates success and
   /// -2 indicates that one of the Compilation's Jobs crashed during execution
-  int performJobs(std::unique_ptr<sys::TaskQueue> &&TQ);
+  Compilation::Result performJobs(std::unique_ptr<sys::TaskQueue> &&TQ);
 
   /// Returns whether the callee is permitted to pass -emit-loaded-module-trace
   /// to a frontend job.
@@ -421,16 +397,37 @@ public:
     }
   }
 
+  /// How many .swift input files?
+  unsigned countSwiftInputs() const;
+
+  /// Unfortunately the success or failure of a Swift compilation is currently
+  /// sensitive to the order in which files are processed, at least in terms of
+  /// the order of processing extensions (and likely other ways we haven't
+  /// discovered yet). So long as this is true, we need to make sure any batch
+  /// job we build names its inputs in an order that's a subsequence of the
+  /// sequence of inputs the driver was initially invoked with.
+  ///
+  /// Also use to write out information in a consistent order.
+  template <typename JobCollection>
+  void sortJobsToMatchCompilationInputs(
+      const JobCollection &unsortedJobs,
+      SmallVectorImpl<const Job *> &sortedJobs) const;
+
+private:
+  friend class Driver;
+  friend class PerformJobsState;
+
+  Job *addJob(std::unique_ptr<Job> J);
+  Job *addExternalJob(std::unique_ptr<Job> J);
+
 private:
   /// Perform all jobs.
   ///
-  /// \param[out] abnormalExit Set to true if any job exits abnormally (i.e.
-  /// crashes).
   /// \param TQ The task queue on which jobs will be scheduled.
   ///
   /// \returns exit code of the first failed Job, or 0 on success. If a Job
   /// crashes during execution, a negative value will be returned.
-  int performJobsImpl(bool &abnormalExit, std::unique_ptr<sys::TaskQueue> &&TQ);
+  Compilation::Result performJobsImpl(std::unique_ptr<sys::TaskQueue> &&TQ);
 
   /// Performs a single Job by executing in place, if possible.
   ///
@@ -440,7 +437,7 @@ private:
   /// will no longer exist, or it will call exit() if the program was
   /// successfully executed. In the event of an error, this function will return
   /// a negative value indicating a failure to execute.
-  int performSingleCommand(const Job *Cmd);
+  Compilation::Result performSingleCommand(const Job *Cmd);
 };
 
 } // end namespace driver

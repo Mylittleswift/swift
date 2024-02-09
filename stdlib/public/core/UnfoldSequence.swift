@@ -100,8 +100,15 @@ public typealias UnfoldFirstSequence<T> = UnfoldSequence<T, (T?, Bool)>
 ///
 /// Instances of `UnfoldSequence` are created with the functions
 /// `sequence(first:next:)` and `sequence(state:next:)`.
-@_fixed_layout // generic-performance
-public struct UnfoldSequence<Element, State> : Sequence, IteratorProtocol {
+@frozen // generic-performance
+public struct UnfoldSequence<Element, State>: Sequence, IteratorProtocol {
+  @usableFromInline // generic-performance
+  internal var _state: State
+  @usableFromInline // generic-performance
+  internal let _next: (inout State) -> Element?
+  @usableFromInline // generic-performance
+  internal var _done = false
+
   @inlinable // generic-performance
   public mutating func next() -> Element? {
     guard !_done else { return nil }
@@ -118,11 +125,4 @@ public struct UnfoldSequence<Element, State> : Sequence, IteratorProtocol {
     self._state = _state
     self._next = _next
   }
-
-  @usableFromInline // generic-performance
-  internal var _state: State
-  @usableFromInline // generic-performance
-  internal let _next: (inout State) -> Element?
-  @usableFromInline // generic-performance
-  internal var _done = false
 }

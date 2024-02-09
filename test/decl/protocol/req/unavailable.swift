@@ -40,3 +40,54 @@ struct ConformsToP2 {
 }
 extension ConformsToP2: P {} // expected-error{{type 'ConformsToP2' does not conform to protocol 'P'}}
 // expected-error@-1 {{unavailable instance method 'foo(bar:)' was used to satisfy a requirement of protocol 'P'}}
+
+@available(*, unavailable)
+struct ConformsToP3: P {
+  func foo(bar: Foo) { }
+}
+
+// Ok, an unavailable decl should be allowed to witness a requirement when the
+// conforming type is itself unavailable.
+@available(*, unavailable)
+struct ConformsToP4: P {
+  @available(*, unavailable)
+  func foo(bar: Foo) { }
+}
+
+struct ConformsToP5 {}
+
+// Ok, an unavailable decl should be allowed to witness a requirement when the
+// conformance extension is itself unavailable.
+@available(*, unavailable)
+extension ConformsToP5: P {
+  @available(*, unavailable)
+  func foo(bar: Foo) { }
+}
+
+@available(*, unavailable)
+enum UnavailableEnum {
+  struct ConformsToP6: P {
+    @available(*, unavailable)
+    func foo(bar: Foo) { }
+  }
+}
+
+// Include message string from @available attribute if provided
+protocol Unavail {
+  associatedtype T
+  func req() // expected-note {{requirement 'req()' declared here}}
+}
+extension Unavail {
+  func req() {}
+}
+extension Unavail where T == Self {
+  @available(*, unavailable, message: "write it yourself") func req() {} // expected-note {{'req()' declared here}}
+}
+
+struct NonSelfT: Unavail {
+  typealias T = Int
+}
+struct SelfT: Unavail { // expected-error {{type 'SelfT' does not conform to protocol 'Unavail'}}
+  // expected-error@-1 {{unavailable instance method 'req()' was used to satisfy a requirement of protocol 'Unavail': write it yourself}}
+  typealias T = SelfT
+}

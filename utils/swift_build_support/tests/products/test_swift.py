@@ -15,12 +15,7 @@ import shutil
 import sys
 import tempfile
 import unittest
-try:
-    # py2
-    from StringIO import StringIO
-except ImportError:
-    # py3
-    from io import StringIO
+from io import StringIO
 
 from swift_build_support import shell
 from swift_build_support.products import Swift
@@ -57,7 +52,22 @@ class SwiftTestCase(unittest.TestCase):
             benchmark_num_o_iterations=3,
             disable_guaranteed_normal_arguments=True,
             force_optimized_typechecker=False,
-            enable_stdlibcore_exclusivity_checking=False)
+            enable_stdlibcore_exclusivity_checking=False,
+            enable_experimental_differentiable_programming=False,
+            enable_experimental_concurrency=False,
+            enable_experimental_cxx_interop=False,
+            enable_cxx_interop_swift_bridging_header=False,
+            enable_experimental_distributed=False,
+            enable_experimental_noncopyable_generics=False,
+            enable_experimental_observation=False,
+            swift_enable_backtracing=False,
+            enable_synchronization=False,
+            build_early_swiftsyntax=False,
+            build_swift_stdlib_static_print=False,
+            build_swift_stdlib_unicode_data=True,
+            swift_freestanding_is_darwin=False,
+            build_swift_private_stdlib=True,
+            swift_tools_ld64_lto_codegen_only_for_supporting_targets=False)
 
         # Setup shell
         shell.dry_run = True
@@ -86,8 +96,22 @@ class SwiftTestCase(unittest.TestCase):
             build_dir='/path/to/build')
         expected = [
             '-DCMAKE_EXPORT_COMPILE_COMMANDS=TRUE',
-            '-DSWIFT_FORCE_OPTIMIZED_TYPECHECKER=FALSE',
-            '-DSWIFT_STDLIB_ENABLE_STDLIBCORE_EXCLUSIVITY_CHECKING=FALSE'
+            '-DSWIFT_FORCE_OPTIMIZED_TYPECHECKER:BOOL=FALSE',
+            '-DSWIFT_STDLIB_ENABLE_STDLIBCORE_EXCLUSIVITY_CHECKING:BOOL=FALSE',
+            '-DSWIFT_ENABLE_EXPERIMENTAL_DIFFERENTIABLE_PROGRAMMING:BOOL=FALSE',
+            '-DSWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY:BOOL=FALSE',
+            '-DSWIFT_ENABLE_EXPERIMENTAL_CXX_INTEROP:BOOL=FALSE',
+            '-DSWIFT_ENABLE_CXX_INTEROP_SWIFT_BRIDGING_HEADER:BOOL=FALSE',
+            '-DSWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED:BOOL=FALSE',
+            '-DSWIFT_ENABLE_EXPERIMENTAL_NONCOPYABLE_GENERICS:BOOL=FALSE',
+            '-DSWIFT_ENABLE_EXPERIMENTAL_OBSERVATION:BOOL=FALSE',
+            '-DSWIFT_ENABLE_BACKTRACING:BOOL=FALSE',
+            '-DSWIFT_ENABLE_SYNCHRONIZATION:BOOL=FALSE',
+            '-DSWIFT_STDLIB_STATIC_PRINT=FALSE',
+            '-DSWIFT_FREESTANDING_IS_DARWIN:BOOL=FALSE',
+            '-DSWIFT_STDLIB_BUILD_PRIVATE:BOOL=TRUE',
+            '-DSWIFT_STDLIB_ENABLE_UNICODE_DATA=TRUE',
+            '-DSWIFT_TOOLS_LD64_LTO_CODEGEN_ONLY_FOR_SUPPORTING_TARGETS:BOOL=FALSE',
         ]
         self.assertEqual(set(swift.cmake_options), set(expected))
 
@@ -101,8 +125,22 @@ class SwiftTestCase(unittest.TestCase):
         flags_set = [
             '-DSWIFT_RUNTIME_USE_SANITIZERS=Thread',
             '-DCMAKE_EXPORT_COMPILE_COMMANDS=TRUE',
-            '-DSWIFT_FORCE_OPTIMIZED_TYPECHECKER=FALSE',
-            '-DSWIFT_STDLIB_ENABLE_STDLIBCORE_EXCLUSIVITY_CHECKING=FALSE'
+            '-DSWIFT_FORCE_OPTIMIZED_TYPECHECKER:BOOL=FALSE',
+            '-DSWIFT_STDLIB_ENABLE_STDLIBCORE_EXCLUSIVITY_CHECKING:BOOL=FALSE',
+            '-DSWIFT_ENABLE_EXPERIMENTAL_DIFFERENTIABLE_PROGRAMMING:BOOL=FALSE',
+            '-DSWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY:BOOL=FALSE',
+            '-DSWIFT_ENABLE_EXPERIMENTAL_CXX_INTEROP:BOOL=FALSE',
+            '-DSWIFT_ENABLE_CXX_INTEROP_SWIFT_BRIDGING_HEADER:BOOL=FALSE',
+            '-DSWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED:BOOL=FALSE',
+            '-DSWIFT_ENABLE_EXPERIMENTAL_NONCOPYABLE_GENERICS:BOOL=FALSE',
+            '-DSWIFT_ENABLE_EXPERIMENTAL_OBSERVATION:BOOL=FALSE',
+            '-DSWIFT_ENABLE_BACKTRACING:BOOL=FALSE',
+            '-DSWIFT_ENABLE_SYNCHRONIZATION:BOOL=FALSE',
+            '-DSWIFT_STDLIB_STATIC_PRINT=FALSE',
+            '-DSWIFT_FREESTANDING_IS_DARWIN:BOOL=FALSE',
+            '-DSWIFT_STDLIB_BUILD_PRIVATE:BOOL=TRUE',
+            '-DSWIFT_STDLIB_ENABLE_UNICODE_DATA=TRUE',
+            '-DSWIFT_TOOLS_LD64_LTO_CODEGEN_ONLY_FOR_SUPPORTING_TARGETS:BOOL=FALSE',
         ]
         self.assertEqual(set(swift.cmake_options), set(flags_set))
 
@@ -286,7 +324,7 @@ class SwiftTestCase(unittest.TestCase):
             source_dir='/path/to/src',
             build_dir='/path/to/build')
         self.assertEqual(
-            ['-DSWIFT_FORCE_OPTIMIZED_TYPECHECKER=TRUE'],
+            ['-DSWIFT_FORCE_OPTIMIZED_TYPECHECKER:BOOL=TRUE'],
             [x for x in swift.cmake_options
              if 'SWIFT_FORCE_OPTIMIZED_TYPECHECKER' in x])
 
@@ -298,6 +336,161 @@ class SwiftTestCase(unittest.TestCase):
             source_dir='/path/to/src',
             build_dir='/path/to/build')
         self.assertEqual(
-            ['-DSWIFT_STDLIB_ENABLE_STDLIBCORE_EXCLUSIVITY_CHECKING=TRUE'],
+            ['-DSWIFT_STDLIB_ENABLE_STDLIBCORE_EXCLUSIVITY_CHECKING:BOOL='
+             'TRUE'],
             [x for x in swift.cmake_options
              if 'SWIFT_STDLIB_ENABLE_STDLIBCORE_EXCLUSIVITY_CHECKING' in x])
+
+    def test_experimental_differentiable_programming_flags(self):
+        self.args.enable_experimental_differentiable_programming = True
+        swift = Swift(
+            args=self.args,
+            toolchain=self.toolchain,
+            source_dir='/path/to/src',
+            build_dir='/path/to/build')
+        self.assertEqual(
+            ['-DSWIFT_ENABLE_EXPERIMENTAL_DIFFERENTIABLE_PROGRAMMING:BOOL='
+             'TRUE'],
+            [x for x in swift.cmake_options
+             if 'DSWIFT_ENABLE_EXPERIMENTAL_DIFFERENTIABLE_PROGRAMMING' in x])
+
+    def test_experimental_concurrency_flags(self):
+        self.args.enable_experimental_concurrency = True
+        swift = Swift(
+            args=self.args,
+            toolchain=self.toolchain,
+            source_dir='/path/to/src',
+            build_dir='/path/to/build')
+        self.assertEqual(
+            ['-DSWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY:BOOL='
+             'TRUE'],
+            [x for x in swift.cmake_options
+             if 'DSWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY' in x])
+
+    def test_experimental_cxx_interop_flags(self):
+        self.args.enable_experimental_cxx_interop = True
+        swift = Swift(
+            args=self.args,
+            toolchain=self.toolchain,
+            source_dir='/path/to/src',
+            build_dir='/path/to/build')
+        self.assertEqual(
+            ['-DSWIFT_ENABLE_EXPERIMENTAL_CXX_INTEROP:BOOL=TRUE'],
+            [option for option in swift.cmake_options
+             if 'DSWIFT_ENABLE_EXPERIMENTAL_CXX_INTEROP' in option])
+
+    def test_experimental_cxx_interop_bridging_header_flags(self):
+        self.args.enable_cxx_interop_swift_bridging_header = True
+        swift = Swift(
+            args=self.args,
+            toolchain=self.toolchain,
+            source_dir='/path/to/src',
+            build_dir='/path/to/build')
+        self.assertEqual(
+            ['-DSWIFT_ENABLE_CXX_INTEROP_SWIFT_BRIDGING_HEADER:BOOL=TRUE'],
+            [option for option in swift.cmake_options
+             if 'DSWIFT_ENABLE_CXX_INTEROP_SWIFT_BRIDGING_HEADER' in option])
+
+    def test_experimental_distributed_flags(self):
+        self.args.enable_experimental_distributed = True
+        swift = Swift(
+            args=self.args,
+            toolchain=self.toolchain,
+            source_dir='/path/to/src',
+            build_dir='/path/to/build')
+        self.assertEqual(
+            ['-DSWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED:BOOL='
+             'TRUE'],
+            [x for x in swift.cmake_options
+             if 'DSWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED' in x])
+
+    def test_experimental_noncopyable_generics_flags(self):
+        self.args.enable_experimental_noncopyable_generics = True
+        swift = Swift(
+            args=self.args,
+            toolchain=self.toolchain,
+            source_dir='/path/to/src',
+            build_dir='/path/to/build')
+        self.assertEqual(
+            ['-DSWIFT_ENABLE_EXPERIMENTAL_NONCOPYABLE_GENERICS:BOOL='
+             'TRUE'],
+            [x for x in swift.cmake_options
+             if 'DSWIFT_ENABLE_EXPERIMENTAL_NONCOPYABLE_GENERICS' in x])
+
+    def test_experimental_observation_flags(self):
+        self.args.enable_experimental_observation = True
+        swift = Swift(
+            args=self.args,
+            toolchain=self.toolchain,
+            source_dir='/path/to/src',
+            build_dir='/path/to/build')
+        self.assertEqual(
+            ['-DSWIFT_ENABLE_EXPERIMENTAL_OBSERVATION:BOOL='
+             'TRUE'],
+            [x for x in swift.cmake_options
+             if 'DSWIFT_ENABLE_EXPERIMENTAL_OBSERVATION' in x])
+
+    def test_backtracing_flags(self):
+        self.args.swift_enable_backtracing = True
+        swift = Swift(
+            args=self.args,
+            toolchain=self.toolchain,
+            source_dir='/path/to/src',
+            build_dir='/path/to/build')
+        self.assertEqual(
+            ['-DSWIFT_ENABLE_BACKTRACING:BOOL='
+             'TRUE'],
+            [x for x in swift.cmake_options
+             if 'DSWIFT_ENABLE_BACKTRACING' in x])
+
+    def test_synchronization_flags(self):
+        self.args.enable_synchronization = True
+        swift = Swift(
+            args=self.args,
+            toolchain=self.toolchain,
+            source_dir='/path/to/src',
+            build_dir='/path/to/build')
+        self.assertEqual(
+            ['-DSWIFT_ENABLE_SYNCHRONIZATION:BOOL='
+             'TRUE'],
+            [x for x in swift.cmake_options
+             if 'DSWIFT_ENABLE_SYNCHRONIZATION' in x])
+
+    def test_freestanding_is_darwin_flags(self):
+        self.args.swift_freestanding_is_darwin = True
+        swift = Swift(
+            args=self.args,
+            toolchain=self.toolchain,
+            source_dir='/path/to/src',
+            build_dir='/path/to/build')
+        self.assertEqual(
+            ['-DSWIFT_FREESTANDING_IS_DARWIN:BOOL='
+             'TRUE'],
+            [x for x in swift.cmake_options
+                if 'SWIFT_FREESTANDING_IS_DARWIN' in x])
+
+    def test_build_swift_private_stdlib_flags(self):
+        self.args.build_swift_private_stdlib = False
+        swift = Swift(
+            args=self.args,
+            toolchain=self.toolchain,
+            source_dir='/path/to/src',
+            build_dir='/path/to/build')
+        self.assertEqual(
+            ['-DSWIFT_STDLIB_BUILD_PRIVATE:BOOL='
+             'FALSE'],
+            [x for x in swift.cmake_options
+                if 'SWIFT_STDLIB_BUILD_PRIVATE' in x])
+
+    def test_swift_tools_ld64_lto_codegen_only_for_supporting_targets(self):
+        self.args.swift_tools_ld64_lto_codegen_only_for_supporting_targets = True
+        swift = Swift(
+            args=self.args,
+            toolchain=self.toolchain,
+            source_dir='/path/to/src',
+            build_dir='/path/to/build')
+        self.assertEqual(
+            ['-DSWIFT_TOOLS_LD64_LTO_CODEGEN_ONLY_FOR_SUPPORTING_TARGETS:BOOL='
+             'TRUE'],
+            [x for x in swift.cmake_options
+                if 'SWIFT_TOOLS_LD64_LTO_CODEGEN_ONLY_FOR_SUPPORTING_TARGETS' in x])

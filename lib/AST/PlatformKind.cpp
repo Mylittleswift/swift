@@ -16,8 +16,10 @@
 
 #include "swift/AST/PlatformKind.h"
 #include "swift/Basic/LangOptions.h"
+#include "swift/Basic/Platform.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/ErrorHandling.h"
+
 
 using namespace swift;
 
@@ -45,15 +47,70 @@ StringRef swift::prettyPlatformString(PlatformKind platform) {
   llvm_unreachable("bad PlatformKind");
 }
 
-Optional<PlatformKind> swift::platformFromString(StringRef Name) {
+llvm::Optional<PlatformKind> swift::platformFromString(StringRef Name) {
   if (Name == "*")
     return PlatformKind::none;
-  return llvm::StringSwitch<Optional<PlatformKind>>(Name)
+  return llvm::StringSwitch<llvm::Optional<PlatformKind>>(Name)
 #define AVAILABILITY_PLATFORM(X, PrettyName) .Case(#X, PlatformKind::X)
 #include "swift/AST/PlatformKinds.def"
-      .Case("macOS", PlatformKind::OSX)
-      .Case("macOSApplicationExtension", PlatformKind::OSXApplicationExtension)
-      .Default(Optional<PlatformKind>());
+      .Case("OSX", PlatformKind::macOS)
+      .Case("OSXApplicationExtension", PlatformKind::macOSApplicationExtension)
+      .Default(llvm::Optional<PlatformKind>());
+}
+
+llvm::Optional<StringRef>
+swift::closestCorrectedPlatformString(StringRef candidate) {
+  auto lowerCasedCandidate = candidate.lower();
+  auto lowerCasedCandidateRef = StringRef(lowerCasedCandidate);
+  auto minDistance = std::numeric_limits<unsigned int>::max();
+  llvm::Optional<StringRef> result = llvm::None;
+#define AVAILABILITY_PLATFORM(X, PrettyName)                                   \
+  {                                                                            \
+    auto platform = StringRef(#X);                                             \
+    auto distance = lowerCasedCandidateRef.edit_distance(platform.lower());    \
+    if (distance == 0) {                                                       \
+      return platform;                                                         \
+    }                                                                          \
+    if (distance < minDistance) {                                              \
+      minDistance = distance;                                                  \
+      result = platform;                                                       \
+    }                                                                          \
+  }
+#include "swift/AST/PlatformKinds.def"
+  // If the most similar platform distance is greater than this threshold,
+  // it's not similar enough to be suggested as correction.
+  const unsigned int distanceThreshold = 5;
+  return (minDistance < distanceThreshold) ? result : llvm::None;
+}
+
+llvm::Optional<PlatformKind>
+swift::basePlatformForExtensionPlatform(PlatformKind Platform) {
+  switch (Platform) {
+  case PlatformKind::macOSApplicationExtension:
+    return PlatformKind::macOS;
+  case PlatformKind::iOSApplicationExtension:
+    return PlatformKind::iOS;
+  case PlatformKind::macCatalystApplicationExtension:
+    return PlatformKind::macCatalyst;
+  case PlatformKind::tvOSApplicationExtension:
+    return PlatformKind::tvOS;
+  case PlatformKind::watchOSApplicationExtension:
+    return PlatformKind::watchOS;
+  case PlatformKind::macOS:
+  case PlatformKind::iOS:
+  case PlatformKind::macCatalyst:
+  case PlatformKind::tvOS:
+  case PlatformKind::watchOS:
+  case PlatformKind::OpenBSD:
+  case PlatformKind::Windows:
+  case PlatformKind::none:
+    return llvm::None;
+  }
+  llvm_unreachable("bad PlatformKind");
+}
+
+static bool isApplicationExtensionPlatform(PlatformKind Platform) {
+  return basePlatformForExtensionPlatform(Platform).has_value();
 }
 
 static bool isPlatformActiveForTarget(PlatformKind Platform,
@@ -61,43 +118,55 @@ static bool isPlatformActiveForTarget(PlatformKind Platform,
                                       bool EnableAppExtensionRestrictions) {
   if (Platform == PlatformKind::none)
     return true;
-  
-  if (Platform == PlatformKind::OSXApplicationExtension ||
-      Platform == PlatformKind::iOSApplicationExtension)
-    if (!EnableAppExtensionRestrictions)
-      return false;
-  
+
+  if (!EnableAppExtensionRestrictions &&
+      isApplicationExtensionPlatform(Platform))
+    return false;
+
   // FIXME: This is an awful way to get the current OS.
   switch (Platform) {
-    case PlatformKind::OSX:
-    case PlatformKind::OSXApplicationExtension:
+    case PlatformKind::macOS:
+    case PlatformKind::macOSApplicationExtension:
       return Target.isMacOSX();
     case PlatformKind::iOS:
     case PlatformKind::iOSApplicationExtension:
       return Target.isiOS() && !Target.isTvOS();
+    case PlatformKind::macCatalyst:
+    case PlatformKind::macCatalystApplicationExtension:
+      return tripleIsMacCatalystEnvironment(Target);
     case PlatformKind::tvOS:
     case PlatformKind::tvOSApplicationExtension:
       return Target.isTvOS();
     case PlatformKind::watchOS:
     case PlatformKind::watchOSApplicationExtension:
       return Target.isWatchOS();
+    case PlatformKind::OpenBSD:
+      return Target.isOSOpenBSD();
+    case PlatformKind::Windows:
+      return Target.isOSWindows();
     case PlatformKind::none:
       llvm_unreachable("handled above");
   }
   llvm_unreachable("bad PlatformKind");
 }
 
-bool swift::isPlatformActive(PlatformKind Platform, LangOptions &LangOpts) {
-  llvm::Triple TT = LangOpts.Target;
-  return isPlatformActiveForTarget(Platform, TT,
+bool swift::isPlatformActive(PlatformKind Platform, const LangOptions &LangOpts,
+                             bool ForTargetVariant) {
+  if (ForTargetVariant) {
+    assert(LangOpts.TargetVariant && "Must have target variant triple");
+    return isPlatformActiveForTarget(Platform, *LangOpts.TargetVariant,
+                                     LangOpts.EnableAppExtensionRestrictions);
+  }
+
+  return isPlatformActiveForTarget(Platform, LangOpts.Target,
                                    LangOpts.EnableAppExtensionRestrictions);
 }
 
-PlatformKind swift::targetPlatform(LangOptions &LangOpts) {
+PlatformKind swift::targetPlatform(const LangOptions &LangOpts) {
   if (LangOpts.Target.isMacOSX()) {
     return (LangOpts.EnableAppExtensionRestrictions
-                ? PlatformKind::OSXApplicationExtension
-                : PlatformKind::OSX);
+                ? PlatformKind::macOSApplicationExtension
+                : PlatformKind::macOS);
   }
 
   if (LangOpts.Target.isTvOS()) {
@@ -113,10 +182,48 @@ PlatformKind swift::targetPlatform(LangOptions &LangOpts) {
   }
 
   if (LangOpts.Target.isiOS()) {
+    if (tripleIsMacCatalystEnvironment(LangOpts.Target))
+      return (LangOpts.EnableAppExtensionRestrictions
+                  ? PlatformKind::macCatalystApplicationExtension
+                  : PlatformKind::macCatalyst);
     return (LangOpts.EnableAppExtensionRestrictions
                 ? PlatformKind::iOSApplicationExtension
                 : PlatformKind::iOS);
   }
 
   return PlatformKind::none;
+}
+
+bool swift::inheritsAvailabilityFromPlatform(PlatformKind Child,
+                                             PlatformKind Parent) {
+  if (auto ChildPlatformBase = basePlatformForExtensionPlatform(Child)) {
+    if (Parent == ChildPlatformBase)
+      return true;
+  }
+
+  if (Child == PlatformKind::macCatalyst && Parent == PlatformKind::iOS)
+    return true;
+
+  if (Child == PlatformKind::macCatalystApplicationExtension) {
+    if (Parent == PlatformKind::iOS ||
+        Parent == PlatformKind::iOSApplicationExtension) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+llvm::VersionTuple swift::canonicalizePlatformVersion(
+    PlatformKind platform, const llvm::VersionTuple &version) {
+
+  // Canonicalize macOS version for macOS Big Sur to treat
+  // 10.16 as 11.0.
+  if (platform == PlatformKind::macOS ||
+      platform == PlatformKind::macOSApplicationExtension) {
+    return llvm::Triple::getCanonicalVersionForOS(llvm::Triple::MacOSX,
+                                                  version);
+  }
+
+  return version;
 }

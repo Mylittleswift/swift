@@ -4,8 +4,8 @@
 // RUN: %target-swift-emit-silgen -I %t -primary-file %s %S/private_import.swift -module-name main -swift-version 5 | %FileCheck %s
 // RUN: %target-swift-emit-silgen -I %t %s %S/private_import.swift -module-name main -swift-version 5 | %FileCheck %s
 // RUN: %target-swift-emit-silgen -I %t %S/private_import.swift %s -module-name main -swift-version 5 | %FileCheck %s
-// RUN: %target-swift-emit-ir -verify-sil-ownership -I %t -primary-file %s %S/private_import.swift -module-name main -o /dev/null
-// RUN: %target-swift-emit-ir -verify-sil-ownership -I %t -O -primary-file %s %S/private_import.swift -module-name main -o /dev/null
+// RUN: %target-swift-emit-ir -I %t -primary-file %s %S/private_import.swift -module-name main -o /dev/null
+// RUN: %target-swift-emit-ir -I %t -O -primary-file %s %S/private_import.swift -module-name main -o /dev/null
 
 @_private(sourceFile: "private_import_module.swift") import Mod
 
@@ -36,8 +36,8 @@ func test(internalSub: Sub, publicSub: PublicSub) {
 
 // CHECK-LABEL: sil hidden [ossa] @$s4main4test11internalSub06publicD0yAA0D0C_AA06PublicD0CtF
 // CHECK: bb0([[ARG0:%.*]] : @guaranteed $Sub, [[ARG1:%.*]] : @guaranteed $PublicSub):
-// CHECK: = class_method [[ARG0]] : $Sub, #Sub.foo!1
-// CHECK: = class_method [[ARG1]] : $PublicSub, #PublicSub.foo!1
+// CHECK: = class_method [[ARG0]] : $Sub, #Sub.foo :
+// CHECK: = class_method [[ARG1]] : $PublicSub, #PublicSub.foo :
 // CHECK: } // end sil function '$s4main4test11internalSub06publicD0yAA0D0C_AA06PublicD0CtF'
 
 

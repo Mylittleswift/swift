@@ -8,8 +8,6 @@
 # See https://swift.org/LICENSE.txt for license information
 # See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 
-from __future__ import print_function
-
 import collections
 import os
 import re
@@ -65,20 +63,12 @@ def add_function(sizes, function, start_addr, end_addr, group_by_prefix):
         sizes[function] += size
 
 
-def flatten(*args):
-    for x in args:
-        if hasattr(x, '__iter__'):
-            for y in flatten(*x):
-                yield y
-        else:
-            yield x
-
-
-def read_sizes(sizes, file_name, function_details, group_by_prefix):
+def read_sizes(sect_sizes, seg_sizes, file_name, function_details,
+               group_by_prefix):
     # Check if multiple architectures are supported by the object file.
     # Prefer arm64 if available.
     architectures = subprocess.check_output(
-        ["otool", "-V", "-f", file_name]).split("\n")
+        ["otool", "-V", "-f", file_name]).decode('utf-8').split("\n")
     arch = None
     arch_pattern = re.compile(r'architecture ([\S]+)')
     for architecture in architectures:
@@ -86,37 +76,41 @@ def read_sizes(sizes, file_name, function_details, group_by_prefix):
         if arch_match:
             if arch is None:
                 arch = arch_match.group(1)
-            if "arm64" in arch:
+            if "arm64" == arch:
                 arch = "arm64"
     if arch is not None:
-        arch_params = ["-arch", arch]
+        cmd = ["otool", "-arch", arch]
     else:
-        arch_params = []
+        cmd = ["otool"]
 
     if function_details:
         content = subprocess.check_output(
-            flatten([
-                "otool",
-                arch_params,
+            cmd + [
                 "-l",
                 "-v",
                 "-t",
-                file_name]
-            )).split("\n")
-        content += subprocess.check_output(flatten(
-            ["otool", arch_params, "-v", "-s", "__TEXT", "__textcoal_nt",
-             file_name])).split("\n")
+                file_name]).decode('utf-8').split("\n")
+        content += subprocess.check_output(
+            cmd + [
+                "-v",
+                "-s",
+                "__TEXT",
+                "__textcoal_nt",
+                file_name]).decode('utf-8').split("\n")
     else:
         content = subprocess.check_output(
-            flatten(["otool", arch_params, "-l", file_name])).split("\n")
+            cmd + ["-l", file_name]).decode('utf-8').split("\n")
 
+    seg_name = None
     sect_name = None
     curr_func = None
     start_addr = None
     end_addr = None
 
     section_pattern = re.compile(r' +sectname ([\S]+)')
-    size_pattern = re.compile(r' +size ([\da-fx]+)')
+    seg_pattern = re.compile(r' +segname ([\S]+)')
+    sect_size_pattern = re.compile(r' +size ([\da-fx]+)')
+    seg_size_pattern = re.compile(r' +filesize ([\da-fx]+)')
     asmline_pattern = re.compile(r'^([0-9a-fA-F]+)\s')
     label_pattern = re.compile(r'^((\-*\[[^\]]*\])|[^\/\s]+):$')
 
@@ -131,24 +125,31 @@ def read_sizes(sizes, file_name, function_details, group_by_prefix):
             sect_name = None
         else:
             label_match = label_pattern.match(line)
-            size_match = size_pattern.match(line)
+            sect_size_match = sect_size_pattern.match(line)
             section_match = section_pattern.match(line)
+            seg_match = seg_pattern.match(line)
+            seg_size_match = seg_size_pattern.match(line)
             if label_match:
                 func_name = label_match.group(1)
-                add_function(sizes, curr_func, start_addr,
+                add_function(sect_sizes, curr_func, start_addr,
                              end_addr, group_by_prefix)
                 curr_func = func_name
                 start_addr = None
                 end_addr = None
-            elif size_match and sect_name and group_by_prefix:
-                size = int(size_match.group(1), 16)
-                sizes[sect_name] += size
+            elif sect_size_match and sect_name and group_by_prefix:
+                size = int(sect_size_match.group(1), 16)
+                sect_sizes[sect_name] += size
             elif section_match:
                 sect_name = section_match.group(1)
                 if sect_name == "__textcoal_nt":
                     sect_name = "__text"
+            elif seg_match:
+                seg_name = seg_match.group(1)
+            elif seg_size_match and seg_name and group_by_prefix:
+                seg_size = int(seg_size_match.group(1), 16)
+                seg_sizes[seg_name] += seg_size
 
-    add_function(sizes, curr_func, start_addr, end_addr, group_by_prefix)
+    add_function(sect_sizes, curr_func, start_addr, end_addr, group_by_prefix)
 
 
 def compare_sizes(old_sizes, new_sizes, name_key, title, total_size_key="",
@@ -190,15 +191,19 @@ def compare_sizes(old_sizes, new_sizes, name_key, title, total_size_key="",
                       (title, name_key, old_size, new_size, perc))
 
 
-def compare_sizes_of_file(old_files, new_files, all_sections, list_categories,
-                          csv=None):
-    old_sizes = collections.defaultdict(int)
-    new_sizes = collections.defaultdict(int)
+def compare_sizes_of_file(old_files, new_files, all_sections, all_segments,
+                          list_categories, csv=None):
+    old_sect_sizes = collections.defaultdict(int)
+    new_sect_sizes = collections.defaultdict(int)
+    old_seg_sizes = collections.defaultdict(int)
+    new_seg_sizes = collections.defaultdict(int)
 
     for old_file in old_files:
-        read_sizes(old_sizes, old_file, list_categories, True)
+        read_sizes(old_sect_sizes, old_seg_sizes, old_file, list_categories,
+                   True)
     for new_file in new_files:
-        read_sizes(new_sizes, new_file, list_categories, True)
+        read_sizes(new_sect_sizes, new_seg_sizes,
+                   new_file, list_categories, True)
 
     if len(old_files) == 1 and len(new_files) == 1:
         old_base = os.path.basename(old_files[0])
@@ -209,33 +214,50 @@ def compare_sizes_of_file(old_files, new_files, all_sections, list_categories,
     else:
         title = "old-new"
 
-    compare_sizes(old_sizes, new_sizes, "__text", title, "", csv=csv)
+    compare_sizes(old_sect_sizes, new_sect_sizes, "__text", title, "", csv=csv)
 
     if list_categories:
         for cat in categories:
             cat_name = cat[0]
-            compare_sizes(old_sizes, new_sizes, cat_name, "", "__text",
+            compare_sizes(old_sect_sizes, new_sect_sizes, cat_name, "", "__text",
                           csv=csv)
 
     if all_sections:
         section_title = "    section"
 
-        compare_sizes(old_sizes, new_sizes, "__textcoal_nt", section_title,
+        compare_sizes(old_sect_sizes, new_sect_sizes,
+                      "__textcoal_nt", section_title, csv=csv)
+        compare_sizes(old_sect_sizes, new_sect_sizes,
+                      "__stubs", section_title, csv=csv)
+        compare_sizes(old_sect_sizes, new_sect_sizes,
+                      "__const", section_title, csv=csv)
+        compare_sizes(old_sect_sizes, new_sect_sizes,
+                      "__cstring", section_title, csv=csv)
+        compare_sizes(old_sect_sizes, new_sect_sizes,
+                      "__objc_methname", section_title, csv=csv)
+        compare_sizes(old_sect_sizes, new_sect_sizes,
+                      "__const", section_title, csv=csv)
+        compare_sizes(old_sect_sizes, new_sect_sizes,
+                      "__objc_const", section_title, csv=csv)
+        compare_sizes(old_sect_sizes, new_sect_sizes,
+                      "__data", section_title, csv=csv)
+        compare_sizes(old_sect_sizes, new_sect_sizes,
+                      "__swift5_proto", section_title, csv=csv)
+        compare_sizes(old_sect_sizes, new_sect_sizes,
+                      "__common", section_title, csv=csv)
+        compare_sizes(old_sect_sizes, new_sect_sizes,
+                      "__bss", section_title, csv=csv)
+
+    if all_segments:
+        segment_title = "    segment"
+        compare_sizes(old_seg_sizes, new_seg_sizes, "__TEXT", segment_title,
                       csv=csv)
-        compare_sizes(old_sizes, new_sizes, "__stubs", section_title, csv=csv)
-        compare_sizes(old_sizes, new_sizes, "__const", section_title, csv=csv)
-        compare_sizes(old_sizes, new_sizes, "__cstring", section_title,
+        compare_sizes(old_seg_sizes, new_seg_sizes, "__DATA", segment_title,
                       csv=csv)
-        compare_sizes(old_sizes, new_sizes, "__objc_methname", section_title,
+        compare_sizes(old_seg_sizes, new_seg_sizes, "__LLVM_COV", segment_title,
                       csv=csv)
-        compare_sizes(old_sizes, new_sizes, "__const", section_title, csv=csv)
-        compare_sizes(old_sizes, new_sizes, "__objc_const", section_title,
+        compare_sizes(old_seg_sizes, new_seg_sizes, "__LINKEDIT", segment_title,
                       csv=csv)
-        compare_sizes(old_sizes, new_sizes, "__data", section_title, csv=csv)
-        compare_sizes(old_sizes, new_sizes, "__swift5_proto", section_title,
-                      csv=csv)
-        compare_sizes(old_sizes, new_sizes, "__common", section_title, csv=csv)
-        compare_sizes(old_sizes, new_sizes, "__bss", section_title, csv=csv)
 
 
 def list_function_sizes(size_array):
@@ -249,9 +271,9 @@ def compare_function_sizes(old_files, new_files, csv=None):
     old_sizes = collections.defaultdict(int)
     new_sizes = collections.defaultdict(int)
     for name in old_files:
-        read_sizes(old_sizes, name, True, False)
+        read_sizes(old_sizes, [], name, True, False)
     for name in new_files:
-        read_sizes(new_sizes, name, True, False)
+        read_sizes(new_sizes, [], name, True, False)
 
     only_in_file1 = []
     only_in_file2 = []

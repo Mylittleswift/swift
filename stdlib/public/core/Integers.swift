@@ -1,8 +1,8 @@
-//===--- Integers.swift.gyb -----------------------------------*- swift -*-===//
+//===--- Integers.swift ---------------------------------------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2018 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2020 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -16,7 +16,7 @@
 
 // FIXME(integers): This should go in the stdlib separately, probably.
 extension ExpressibleByIntegerLiteral
-  where Self : _ExpressibleByBuiltinIntegerLiteral {
+  where Self: _ExpressibleByBuiltinIntegerLiteral {
   @_transparent
   public init(integerLiteral value: Self) {
     self = value
@@ -58,10 +58,8 @@ extension ExpressibleByIntegerLiteral
 /// =============================================
 ///
 /// To add `AdditiveArithmetic` protocol conformance to your own custom type,
-/// implement the required operators, and provide a static `zero` property
-/// using a type that can represent the magnitude of any value of your custom
-/// type.
-public protocol AdditiveArithmetic : Equatable {
+/// implement the required operators, and provide a static `zero` property.
+public protocol AdditiveArithmetic: Equatable {
   /// The zero value.
   ///
   /// Zero is the identity element for addition. For any value,
@@ -128,11 +126,24 @@ public protocol AdditiveArithmetic : Equatable {
   static func -=(lhs: inout Self, rhs: Self)
 }
 
-public extension AdditiveArithmetic where Self : ExpressibleByIntegerLiteral {
+public extension AdditiveArithmetic {
+  @_alwaysEmitIntoClient
+  static func +=(lhs: inout Self, rhs: Self) {
+    lhs = lhs + rhs
+  }
+
+  @_alwaysEmitIntoClient
+  static func -=(lhs: inout Self, rhs: Self) {
+    lhs = lhs - rhs
+  }
+}
+
+public extension AdditiveArithmetic where Self: ExpressibleByIntegerLiteral {
   /// The zero value.
   ///
   /// Zero is the identity element for addition. For any value,
   /// `x + .zero == x` and `.zero + x == x`.
+  @inlinable @inline(__always)
   static var zero: Self {
     return 0
   }
@@ -177,7 +188,7 @@ public extension AdditiveArithmetic where Self : ExpressibleByIntegerLiteral {
 /// the required initializer and operators, and provide a `magnitude` property
 /// using a type that can represent the magnitude of any value of your custom
 /// type.
-public protocol Numeric : AdditiveArithmetic, ExpressibleByIntegerLiteral {
+public protocol Numeric: AdditiveArithmetic, ExpressibleByIntegerLiteral {
   /// Creates a new instance from the given integer, if it can be represented
   /// exactly.
   ///
@@ -193,11 +204,11 @@ public protocol Numeric : AdditiveArithmetic, ExpressibleByIntegerLiteral {
   ///     // y == nil
   ///
   /// - Parameter source: A value to convert to this type.
-  init?<T : BinaryInteger>(exactly source: T)
+  init?<T: BinaryInteger>(exactly source: T)
 
   /// A type that can represent the absolute value of any possible value of the
   /// conforming type.
-  associatedtype Magnitude : Comparable, Numeric
+  associatedtype Magnitude: Comparable, Numeric
 
   /// The magnitude of this value.
   ///
@@ -247,7 +258,7 @@ public protocol Numeric : AdditiveArithmetic, ExpressibleByIntegerLiteral {
   static func *=(lhs: inout Self, rhs: Self)
 }
 
-/// A type that can represent both positive and negative values.
+/// A numeric type with a negation operation.
 ///
 /// The `SignedNumeric` protocol extends the operations defined by the
 /// `Numeric` protocol to include a value's additive inverse.
@@ -269,7 +280,7 @@ public protocol Numeric : AdditiveArithmetic, ExpressibleByIntegerLiteral {
 ///     let x = Int.min
 ///     let y = -x
 ///     // Overflow error
-public protocol SignedNumeric : Numeric {
+public protocol SignedNumeric: Numeric {
   /// Returns the additive inverse of the specified value.
   ///
   /// The negation operator (prefix `-`) returns the additive inverse of its
@@ -369,7 +380,7 @@ extension SignedNumeric {
 /// - Parameter x: A signed number.
 /// - Returns: The absolute value of `x`.
 @inlinable
-public func abs<T : SignedNumeric & Comparable>(_ x: T) -> T {
+public func abs<T: SignedNumeric & Comparable>(_ x: T) -> T {
   if T.self == T.Magnitude.self {
     return unsafeBitCast(x.magnitude, to: T.self)
   }
@@ -394,6 +405,12 @@ extension AdditiveArithmetic {
     return x
   }
 }
+
+#if !$Embedded
+public typealias _CustomStringConvertibleOrNone = CustomStringConvertible
+#else
+public typealias _CustomStringConvertibleOrNone = Any
+#endif
 
 //===----------------------------------------------------------------------===//
 //===--- BinaryInteger ----------------------------------------------------===//
@@ -556,8 +573,8 @@ extension AdditiveArithmetic {
 ///     }
 ///     // Prints "23 is greater than -23."
 public protocol BinaryInteger :
-  Hashable, Numeric, CustomStringConvertible, Strideable
-  where Magnitude : BinaryInteger, Magnitude.Magnitude == Magnitude
+  Hashable, Numeric, _CustomStringConvertibleOrNone, Strideable
+  where Magnitude: BinaryInteger, Magnitude.Magnitude == Magnitude
 {
   /// A Boolean value indicating whether this type is a signed integer type.
   ///
@@ -579,7 +596,7 @@ public protocol BinaryInteger :
   ///     // y == nil
   ///
   /// - Parameter source: A floating-point value to convert to an integer.
-  init?<T : BinaryFloatingPoint>(exactly source: T)
+  init?<T: BinaryFloatingPoint>(exactly source: T)
 
   /// Creates an integer from the given floating-point value, rounding toward
   /// zero.
@@ -601,7 +618,7 @@ public protocol BinaryInteger :
   /// - Parameter source: A floating-point value to convert to an integer.
   ///   `source` must be representable in this type after rounding toward
   ///   zero.
-  init<T : BinaryFloatingPoint>(_ source: T)
+  init<T: BinaryFloatingPoint>(_ source: T)
 
   /// Creates a new instance from the given integer.
   ///
@@ -618,7 +635,7 @@ public protocol BinaryInteger :
   ///
   /// - Parameter source: An integer to convert. `source` must be representable
   ///   in this type.
-  init<T : BinaryInteger>(_ source: T)
+  init<T: BinaryInteger>(_ source: T)
 
   /// Creates a new instance from the bit pattern of the given instance by
   /// sign-extending or truncating to fit this type.
@@ -656,7 +673,7 @@ public protocol BinaryInteger :
   ///     // 'y' has a binary representation of 11111111_11101011
   ///
   /// - Parameter source: An integer to convert to this type.
-  init<T : BinaryInteger>(truncatingIfNeeded source: T)
+  init<T: BinaryInteger>(truncatingIfNeeded source: T)
 
   /// Creates a new instance with the representable value that's closest to the
   /// given integer.
@@ -678,13 +695,13 @@ public protocol BinaryInteger :
   ///     // y == 0
   ///
   /// - Parameter source: An integer to convert to this type.
-  init<T : BinaryInteger>(clamping source: T)
+  init<T: BinaryInteger>(clamping source: T)
 
   /// A type that represents the words of a binary integer.
   ///
   /// The `Words` type must conform to the `RandomAccessCollection` protocol
-  /// with an `Element` type of `UInt` and `Index` type of `Int.
-  associatedtype Words : RandomAccessCollection
+  /// with an `Element` type of `UInt` and `Index` type of `Int`.
+  associatedtype Words: RandomAccessCollection
       where Words.Element == UInt, Words.Index == Int
 
   /// A collection containing the words of this value's binary
@@ -716,6 +733,8 @@ public protocol BinaryInteger :
   ///     let x = Int8(bitPattern: 0b1111_1000)
   ///     // x == -8
   ///     // x.trailingZeroBitCount == 3
+  ///
+  /// If the value is zero, then `trailingZeroBitCount` is equal to `bitWidth`.
   var trailingZeroBitCount: Int { get }
 
   /// Returns the quotient of dividing the first value by the second.
@@ -1196,7 +1215,7 @@ public protocol BinaryInteger :
   ///
   /// - Parameter rhs: The value to divide this value by.
   /// - Returns: A tuple containing the quotient and remainder of this value
-  ///   divided by `rhs`. The remainder has the same sign as `rhs`.
+  ///   divided by `rhs`. The remainder has the same sign as `lhs`.
   func quotientAndRemainder(dividingBy rhs: Self)
     -> (quotient: Self, remainder: Self)
 
@@ -1480,6 +1499,7 @@ extension BinaryInteger {
 //===--- CustomStringConvertible conformance ------------------------------===//
 //===----------------------------------------------------------------------===//
 
+@_unavailableInEmbedded
 extension BinaryInteger {
   internal func _description(radix: Int, uppercase: Bool) -> String {
     _precondition(2...36 ~= radix, "Radix must be between 2 and 36")
@@ -1542,6 +1562,7 @@ extension BinaryInteger {
   }
 
   /// A textual representation of this value.
+  @_semantics("binaryInteger.description")
   public var description: String {
     return _description(radix: 10, uppercase: false)
   }
@@ -1603,17 +1624,15 @@ extension BinaryInteger {
   @inlinable
   @inline(__always)
   public func advanced(by n: Int) -> Self {
-    if !Self.isSigned {
+    if Self.isSigned {
+      return self.bitWidth < n.bitWidth
+        ? Self(Int(truncatingIfNeeded: self) + n)
+        : self + Self(truncatingIfNeeded: n)
+    } else {
       return n < (0 as Int)
-        ? self - Self(-n)
-        : self + Self(n)
+        ? self - Self(UInt(bitPattern: ~n &+ 1))
+        : self + Self(UInt(bitPattern: n))
     }
-    if (self < (0 as Self)) == (n < (0 as Self)) {
-      return self + Self(n)
-    }
-    return self.magnitude < n.magnitude
-      ? Self(Int(self) + n)
-      : self + Self(n)
   }
 }
 
@@ -1642,41 +1661,28 @@ extension BinaryInteger {
   ///   - rhs: Another integer to compare.
   @_transparent
   public static func == <
-    Other : BinaryInteger
+    Other: BinaryInteger
   >(lhs: Self, rhs: Other) -> Bool {
-    let lhsNegative = Self.isSigned && lhs < (0 as Self)
-    let rhsNegative = Other.isSigned && rhs < (0 as Other)
-
-    if lhsNegative != rhsNegative { return false }
-
-    // Here we know the values are of the same sign.
-    //
-    // There are a few possible scenarios from here:
-    //
-    // 1. Both values are negative
-    //  - If one value is strictly wider than the other, then it is safe to
-    //    convert to the wider type.
-    //  - If the values are of the same width, it does not matter which type we
-    //    choose to convert to as the values are already negative, and thus
-    //    include the sign bit if two's complement representation already.
-    // 2. Both values are non-negative
-    //  - If one value is strictly wider than the other, then it is safe to
-    //    convert to the wider type.
-    //  - If the values are of the same width, than signedness matters, as not
-    //    unsigned types are 'wider' in a sense they don't need to 'waste' the
-    //    sign bit. Therefore it is safe to convert to the unsigned type.
-
-    if lhs.bitWidth < rhs.bitWidth {
-      return Other(truncatingIfNeeded: lhs) == rhs
+    // Use bit pattern conversion to widen the comparand with smaller bit width.
+    if Self.isSigned == Other.isSigned {
+      return lhs.bitWidth >= rhs.bitWidth ?
+        lhs == Self(truncatingIfNeeded: rhs) :
+        Other(truncatingIfNeeded: lhs) == rhs
     }
-    if lhs.bitWidth > rhs.bitWidth {
-      return lhs == Self(truncatingIfNeeded: rhs)
+    // If `Self` is signed but `Other` is unsigned, then we have to
+    // be a little more careful about widening, since:
+    // (1) a fixed-width signed type can't represent the largest values of
+    //     a fixed-width unsigned type of equal bit width; and
+    // (2) an unsigned type (obviously) can't represent a negative value.
+    if Self.isSigned {    
+      return lhs.bitWidth > rhs.bitWidth ? // (1)
+        lhs == Self(truncatingIfNeeded: rhs) :
+        (lhs >= (0 as Self) && Other(truncatingIfNeeded: lhs) == rhs) // (2)
     }
-
-    if Self.isSigned {
-      return Other(truncatingIfNeeded: lhs) == rhs
-    }
-    return lhs == Self(truncatingIfNeeded: rhs)
+    // Analogous reasoning applies if `Other` is signed but `Self` is not.
+    return lhs.bitWidth < rhs.bitWidth ?
+      Other(truncatingIfNeeded: lhs) == rhs :
+      (rhs >= (0 as Other) && lhs == Self(truncatingIfNeeded: rhs))
   }
 
   /// Returns a Boolean value indicating whether the two given values are not
@@ -1699,7 +1705,7 @@ extension BinaryInteger {
   ///   - rhs: Another integer to compare.
   @_transparent
   public static func != <
-    Other : BinaryInteger
+    Other: BinaryInteger
   >(lhs: Self, rhs: Other) -> Bool {
     return !(lhs == rhs)
   }
@@ -1715,35 +1721,27 @@ extension BinaryInteger {
   ///   - lhs: An integer to compare.
   ///   - rhs: Another integer to compare.
   @_transparent
-  public static func < <Other : BinaryInteger>(lhs: Self, rhs: Other) -> Bool {
-    let lhsNegative = Self.isSigned && lhs < (0 as Self)
-    let rhsNegative = Other.isSigned && rhs < (0 as Other)
-    if lhsNegative != rhsNegative { return lhsNegative }
-
-    if lhs == (0 as Self) && rhs == (0 as Other) { return false }
-
-    // if we get here, lhs and rhs have the same sign. If they're negative,
-    // then Self and Other are both signed types, and one of them can represent
-    // values of the other type. Otherwise, lhs and rhs are positive, and one
-    // of Self, Other may be signed and the other unsigned.
-
-    let rhsAsSelf = Self(truncatingIfNeeded: rhs)
-    let rhsAsSelfNegative = rhsAsSelf < (0 as Self)
-
-
-    // Can we round-trip rhs through Other?
-    if Other(truncatingIfNeeded: rhsAsSelf) == rhs &&
-      // This additional check covers the `Int8.max < (128 as UInt8)` case.
-      // Since the types are of the same width, init(truncatingIfNeeded:)
-      // will result in a simple bitcast, so that rhsAsSelf would be -128, and
-      // `lhs < rhsAsSelf` will return false.
-      // We basically guard against that bitcast by requiring rhs and rhsAsSelf
-      // to be the same sign.
-      rhsNegative == rhsAsSelfNegative {
-      return lhs < rhsAsSelf
+  public static func < <Other: BinaryInteger>(lhs: Self, rhs: Other) -> Bool {
+    // Use bit pattern conversion to widen the comparand with smaller bit width.
+    if Self.isSigned == Other.isSigned {
+      return lhs.bitWidth >= rhs.bitWidth ?
+        lhs < Self(truncatingIfNeeded: rhs) :
+        Other(truncatingIfNeeded: lhs) < rhs
     }
-
-    return Other(truncatingIfNeeded: lhs) < rhs
+    // If `Self` is signed but `Other` is unsigned, then we have to
+    // be a little more careful about widening, since:
+    // (1) a fixed-width signed type can't represent the largest values of
+    //     a fixed-width unsigned type of equal bit width; and
+    // (2) an unsigned type (obviously) can't represent a negative value.
+    if Self.isSigned {
+      return lhs.bitWidth > rhs.bitWidth ? // (1)
+        lhs < Self(truncatingIfNeeded: rhs) :
+        (lhs < (0 as Self) || Other(truncatingIfNeeded: lhs) < rhs) // (2)
+    }
+    // Analogous reasoning applies if `Other` is signed but `Self` is not.
+    return lhs.bitWidth < rhs.bitWidth ?
+      Other(truncatingIfNeeded: lhs) < rhs :
+      (rhs > (0 as Other) && lhs < Self(truncatingIfNeeded: rhs))
   }
 
   /// Returns a Boolean value indicating whether the value of the first
@@ -1757,7 +1755,7 @@ extension BinaryInteger {
   ///   - lhs: An integer to compare.
   ///   - rhs: Another integer to compare.
   @_transparent
-  public static func <= <Other : BinaryInteger>(lhs: Self, rhs: Other) -> Bool {
+  public static func <= <Other: BinaryInteger>(lhs: Self, rhs: Other) -> Bool {
     return !(rhs < lhs)
   }
 
@@ -1772,7 +1770,7 @@ extension BinaryInteger {
   ///   - lhs: An integer to compare.
   ///   - rhs: Another integer to compare.
   @_transparent
-  public static func >= <Other : BinaryInteger>(lhs: Self, rhs: Other) -> Bool {
+  public static func >= <Other: BinaryInteger>(lhs: Self, rhs: Other) -> Bool {
     return !(lhs < rhs)
   }
 
@@ -1787,7 +1785,7 @@ extension BinaryInteger {
   ///   - lhs: An integer to compare.
   ///   - rhs: Another integer to compare.
   @_transparent
-  public static func > <Other : BinaryInteger>(lhs: Self, rhs: Other) -> Bool {
+  public static func > <Other: BinaryInteger>(lhs: Self, rhs: Other) -> Bool {
     return rhs < lhs
   }
 }
@@ -1799,12 +1797,12 @@ extension BinaryInteger {
 // another, but the compiler choses the second one, and that results in infinite
 // recursion.
 //
-//     <T : Comparable>(T, T) -> Bool
-//     <T : BinaryInteger, U : BinaryInteger>(T, U) -> Bool
+//     <T: Comparable>(T, T) -> Bool
+//     <T: BinaryInteger, U: BinaryInteger>(T, U) -> Bool
 //
 // so we define:
 //
-//     <T : BinaryInteger>(T, T) -> Bool
+//     <T: BinaryInteger>(T, T) -> Bool
 //
 //===----------------------------------------------------------------------===//
 
@@ -1829,6 +1827,12 @@ extension BinaryInteger {
     return rhs < lhs
   }
 }
+
+#if !$Embedded
+public typealias _LosslessStringConvertibleOrNone = LosslessStringConvertible
+#else
+public protocol _LosslessStringConvertibleOrNone {}
+#endif
 
 //===----------------------------------------------------------------------===//
 //===--- FixedWidthInteger ------------------------------------------------===//
@@ -1864,7 +1868,7 @@ extension BinaryInteger {
 ///     print(Int16.max.binaryString)
 ///     // Prints "0b01111111_11111111"
 ///     print((101 as UInt8).binaryString)
-///     // Prints "0b11001001"
+///     // Prints "0b01100101"
 ///
 /// The `binaryString` implementation uses the static `bitWidth` property and
 /// the right shift operator (`>>`), both of which are available to any type
@@ -1898,9 +1902,10 @@ extension BinaryInteger {
 /// customization points for arithmetic operations. When you provide just those
 /// methods, the standard library provides default implementations for all
 /// other arithmetic methods and operators.
-public protocol FixedWidthInteger : BinaryInteger, LosslessStringConvertible
-where Magnitude : FixedWidthInteger & UnsignedInteger,
-      Stride : FixedWidthInteger & SignedInteger {
+public protocol FixedWidthInteger
+: BinaryInteger, _LosslessStringConvertibleOrNone, _BitwiseCopyable
+where Magnitude: FixedWidthInteger & UnsignedInteger,
+      Stride: FixedWidthInteger & SignedInteger {
   /// The number of bits used for the underlying binary representation of
   /// values of this type.
   ///
@@ -2022,7 +2027,7 @@ where Magnitude : FixedWidthInteger & UnsignedInteger,
   ///     // result.low  == 128
   ///
   /// The product of `x` and `y` is `-1920`, which is too large to represent in
-  /// an `Int8` instance. The `high` and `low` compnents of the `result` value
+  /// an `Int8` instance. The `high` and `low` components of the `result` value
   /// represent `-1920` when concatenated to form a double-width integer; that
   /// is, using `result.high` as the high byte and `result.low` as the low byte
   /// of an `Int16` instance.
@@ -2081,6 +2086,8 @@ where Magnitude : FixedWidthInteger & UnsignedInteger,
   ///     let x: Int8 = 0b0001_1111
   ///     // x == 31
   ///     // x.leadingZeroBitCount == 3
+  ///
+  /// If the value is zero, then `leadingZeroBitCount` is equal to `bitWidth`.
   var leadingZeroBitCount: Int { get }
 
   /// Creates an integer from its big-endian representation, changing the byte
@@ -2313,6 +2320,65 @@ extension FixedWidthInteger {
     return byteSwapped
 #endif
   }
+  
+  // Default implementation of multipliedFullWidth.
+  //
+  // This implementation is mainly intended for [U]Int64 on 32b platforms. It
+  // will not be especially efficient for other types that do not provide their
+  // own implementation, but neither will it be catastrophically bad. It can
+  // surely be improved on even for Int64, but that is mostly an optimization
+  // problem; the basic algorithm here gives the compiler all the information
+  // that it needs to generate efficient code.
+  @_alwaysEmitIntoClient
+  public func multipliedFullWidth(by other: Self) -> (high: Self, low: Magnitude) {
+    // We define a utility function for splitting an integer into high and low
+    // halves. Note that the low part is always unsigned, while the high part
+    // matches the signedness of the input type. Both result types are the
+    // full width of the original number; this may be surprising at first, but
+    // there are two reasons for it:
+    //
+    // - we're going to use these as inputs to a multiplication operation, and
+    //   &* is quite a bit less verbose than `multipliedFullWidth`, so it makes
+    //   the rest of the code in this function somewhat easier to read.
+    //
+    // - there's no "half width type" that we can get at from this generic
+    //   context, so there's not really another option anyway.
+    //
+    // Fortunately, the compiler is pretty good about propagating the necessary
+    // information to optimize away unnecessary arithmetic.
+    func split<T: FixedWidthInteger>(_ x: T) -> (high: T, low: T.Magnitude) {
+      let n = T.bitWidth/2
+      return (x >> n, T.Magnitude(truncatingIfNeeded: x) & ((1 &<< n) &- 1))
+    }
+    // Split `self` and `other` into high and low parts, compute the partial
+    // products carrying high words in as we go. We use the wrapping operators
+    // and `truncatingIfNeeded` inits purely as an optimization hint to the
+    // compiler; none of these operations will ever wrap due to the constraints
+    // on the arithmetic. The bounds are documented before each line for signed
+    // types. For unsigned types, the bounds are much more well known and
+    // easier to derive, so I haven't bothered to document them here, but they
+    // all boil down to the fact that a*b + c + d cannot overflow a double-
+    // width result with unsigned a, b, c, d.
+    let (x1, x0) = split(self)
+    let (y1, y0) = split(other)
+    // If B is 2^bitWidth/2, x0 and y0 are in 0 ... B-1, so their product is
+    // in 0 ... B^2-2B+1. For further analysis, we'll need the fact that
+    // the high word is in 0 ... B-2.
+    let p00 = x0 &* y0
+    // x1 is in -B/2 ... B/2-1, so the product x1*y0 is in
+    // -(B^2-B)/2 ... (B^2-3B+2)/2; after adding the high word of p00, the
+    // result is in -(B^2-B)/2 ... (B^2-B-2)/2.
+    let p01 = x1 &* Self(y0) &+ Self(split(p00).high)
+    // The previous analysis holds for this product as well, and the sum is
+    // in -(B^2-B)/2 ... (B^2-B)/2.
+    let p10 = Self(x0) &* y1 &+ Self(split(p01).low)
+    // No analysis is necessary for this term, because we know the product as
+    // a whole cannot overflow, and this term is the final high word of the
+    // product.
+    let p11 = x1 &* y1 &+ split(p01).high &+ split(p10).high
+    // Now we only need to assemble the low word of the product.
+    return (p11, split(p10).low << (bitWidth/2) | split(p00).low)
+  }
 
   /// Returns the result of shifting a value's binary representation the
   /// specified number of digits to the right, masking the shift amount to the
@@ -2393,7 +2459,7 @@ extension FixedWidthInteger {
   @_semantics("optimize.sil.specialize.generic.partial.never")
   @_transparent
   public static func &>> <
-    Other : BinaryInteger
+    Other: BinaryInteger
   >(lhs: Self, rhs: Other) -> Self {
     return lhs &>> Self(truncatingIfNeeded: rhs)
   }
@@ -2429,7 +2495,7 @@ extension FixedWidthInteger {
   @_semantics("optimize.sil.specialize.generic.partial.never")
   @_transparent
   public static func &>>= <
-    Other : BinaryInteger
+    Other: BinaryInteger
   >(lhs: inout Self, rhs: Other) {
     lhs = lhs &>> rhs
   }
@@ -2513,7 +2579,7 @@ extension FixedWidthInteger {
   @_semantics("optimize.sil.specialize.generic.partial.never")
   @_transparent
   public static func &<< <
-    Other : BinaryInteger
+    Other: BinaryInteger
   >(lhs: Self, rhs: Other) -> Self {
     return lhs &<< Self(truncatingIfNeeded: rhs)
   }
@@ -2549,7 +2615,7 @@ extension FixedWidthInteger {
   @_semantics("optimize.sil.specialize.generic.partial.never")
   @_transparent
   public static func &<<= <
-    Other : BinaryInteger
+    Other: BinaryInteger
   >(lhs: inout Self, rhs: Other) {
     lhs = lhs &<< rhs
   }
@@ -2656,11 +2722,6 @@ extension FixedWidthInteger {
     in range: ClosedRange<Self>,
     using generator: inout T
   ) -> Self {
-    _precondition(
-      !range.isEmpty,
-      "Can't get random value with an empty range"
-    )
-
     // Compute delta, the distance between the lower and upper bounds. This
     // value may not representable by the type Bound if Bound is signed, but
     // is always representable as Bound.Magnitude.
@@ -2793,7 +2854,7 @@ extension FixedWidthInteger {
   @_semantics("optimize.sil.specialize.generic.partial.never")
   @_transparent
   public static func >> <
-    Other : BinaryInteger
+    Other: BinaryInteger
   >(lhs: Self, rhs: Other) -> Self {
     var lhs = lhs
     _nonMaskingRightShiftGeneric(&lhs, rhs)
@@ -2803,14 +2864,14 @@ extension FixedWidthInteger {
   @_transparent
   @_semantics("optimize.sil.specialize.generic.partial.never")
   public static func >>= <
-    Other : BinaryInteger
+    Other: BinaryInteger
   >(lhs: inout Self, rhs: Other) {
     _nonMaskingRightShiftGeneric(&lhs, rhs)
   }
 
   @_transparent
   public static func _nonMaskingRightShiftGeneric <
-    Other : BinaryInteger
+    Other: BinaryInteger
   >(_ lhs: inout Self, _ rhs: Other) {
     let shift = rhs < -Self.bitWidth ? -Self.bitWidth
                 : rhs > Self.bitWidth ? Self.bitWidth
@@ -2880,7 +2941,7 @@ extension FixedWidthInteger {
   @_semantics("optimize.sil.specialize.generic.partial.never")
   @_transparent
   public static func << <
-    Other : BinaryInteger
+    Other: BinaryInteger
   >(lhs: Self, rhs: Other) -> Self {
     var lhs = lhs
     _nonMaskingLeftShiftGeneric(&lhs, rhs)
@@ -2890,14 +2951,14 @@ extension FixedWidthInteger {
   @_transparent
   @_semantics("optimize.sil.specialize.generic.partial.never")
   public static func <<= <
-    Other : BinaryInteger
+    Other: BinaryInteger
   >(lhs: inout Self, rhs: Other) {
     _nonMaskingLeftShiftGeneric(&lhs, rhs)
   }
 
   @_transparent
   public static func _nonMaskingLeftShiftGeneric <
-    Other : BinaryInteger
+    Other: BinaryInteger
   >(_ lhs: inout Self, _ rhs: Other) {
     let shift = rhs < -Self.bitWidth ? -Self.bitWidth
                 : rhs > Self.bitWidth ? Self.bitWidth
@@ -2927,7 +2988,7 @@ extension FixedWidthInteger {
   @inlinable
   @_semantics("optimize.sil.specialize.generic.partial.never")
   public // @testable
-  static func _convert<Source : BinaryFloatingPoint>(
+  static func _convert<Source: BinaryFloatingPoint>(
     from source: Source
   ) -> (value: Self?, exact: Bool) {
     guard _fastPath(!source.isZero) else { return (0, true) }
@@ -2938,9 +2999,10 @@ extension FixedWidthInteger {
     let minBitWidth = source.significandWidth
     let isExact = (minBitWidth <= exponent)
     let bitPattern = source.significandBitPattern
-    // `RawSignificand.bitWidth` is not available if `RawSignificand` does not
-    // conform to `FixedWidthInteger`; we can compute this value as follows if
-    // `source` is finite:
+    // Determine the actual number of fractional significand bits.
+    // `Source.significandBitCount` would not reflect the actual number of
+    // fractional significand bits if `Source` is not a fixed-width floating-point
+    // type; we can compute this value as follows if `source` is finite:
     let bitWidth = minBitWidth &+ bitPattern.trailingZeroBitCount
     let shift = exponent - Source.Exponent(bitWidth)
     // Use `Self.Magnitude` to prevent sign extension if `shift < 0`.
@@ -2978,12 +3040,16 @@ extension FixedWidthInteger {
   @inlinable
   @_semantics("optimize.sil.specialize.generic.partial.never")
   @inline(__always)
-  public init<T : BinaryFloatingPoint>(_ source: T) {
+  public init<T: BinaryFloatingPoint>(_ source: T) {
     guard let value = Self._convert(from: source).value else {
+      #if !$Embedded
       fatalError("""
         \(T.self) value cannot be converted to \(Self.self) because it is \
         outside the representable range
         """)
+      #else
+      fatalError("value not representable")
+      #endif
     }
     self = value
   }
@@ -3004,7 +3070,7 @@ extension FixedWidthInteger {
   /// - Parameter source: A floating-point value to convert to an integer.
   @_semantics("optimize.sil.specialize.generic.partial.never")
   @inlinable
-  public init?<T : BinaryFloatingPoint>(exactly source: T) {
+  public init?<T: BinaryFloatingPoint>(exactly source: T) {
     let (temporary, exact) = Self._convert(from: source)
     guard exact, let value = temporary else {
       return nil
@@ -3034,7 +3100,7 @@ extension FixedWidthInteger {
   /// - Parameter source: An integer to convert to this type.
   @inlinable
   @_semantics("optimize.sil.specialize.generic.partial.never")
-  public init<Other : BinaryInteger>(clamping source: Other) {
+  public init<Other: BinaryInteger>(clamping source: Other) {
     if _slowPath(source < Self.min) {
       self = Self.min
     }
@@ -3082,25 +3148,30 @@ extension FixedWidthInteger {
   /// - Parameter source: An integer to convert to this type.
   @inlinable // FIXME(inline-always)
   @inline(__always)
-  public init<T : BinaryInteger>(truncatingIfNeeded source: T) {
+  public init<T: BinaryInteger>(truncatingIfNeeded source: T) {
     if Self.bitWidth <= Int.bitWidth {
       self = Self(_truncatingBits: source._lowWord)
     }
     else {
-      let neg = source < (0 as T)
-      var result: Self = neg ? ~0 : 0
-      var shift: Self = 0
-      let width = Self(_truncatingBits: Self.bitWidth._lowWord)
-      for word in source.words {
-        guard shift < width else { break }
-        // Masking shift is OK here because we have already ensured
-        // that shift < Self.bitWidth. Not masking results in
-        // infinite recursion.
-        result ^= Self(_truncatingBits: neg ? ~word : word) &<< shift
-        shift += Self(_truncatingBits: Int.bitWidth._lowWord)
-      }
-      self = result
+      self = Self._truncatingInit(source)
     }
+  }
+
+  @_alwaysEmitIntoClient
+  internal static func _truncatingInit<T: BinaryInteger>(_ source: T) -> Self {
+    let neg = source < (0 as T)
+    var result: Self = neg ? ~0 : 0
+    var shift: Self = 0
+    let width = Self(_truncatingBits: Self.bitWidth._lowWord)
+    for word in source.words {
+      guard shift < width else { break }
+      // Masking shift is OK here because we have already ensured
+      // that shift < Self.bitWidth. Not masking results in
+      // infinite recursion.
+      result ^= Self(_truncatingBits: neg ? ~word : word) &<< shift
+      shift += Self(_truncatingBits: Int.bitWidth._lowWord)
+    }
+    return result
   }
 
   @_transparent
@@ -3290,7 +3361,7 @@ extension FixedWidthInteger {
     using generator: inout R
   ) -> Self {
     if bitWidth <= UInt64.bitWidth {
-      return Self(truncatingIfNeeded: generator.next() as UInt64)
+      return Self(truncatingIfNeeded: generator.next())
     }
 
     let (quotient, remainder) = bitWidth.quotientAndRemainder(
@@ -3309,8 +3380,19 @@ extension FixedWidthInteger {
 //===--- UnsignedInteger --------------------------------------------------===//
 //===----------------------------------------------------------------------===//
 
+// Implementor's note: UnsignedInteger should have required Magnitude == Self,
+// because it can necessarily represent the magnitude of every value and every
+// recursive generic constraint should terminate unless there is a good
+// semantic reason for it not to do so.
+//
+// However, we cannot easily add this constraint because it changes the
+// mangling of generics constrained on <T: FixedWidthInteger & UnsignedInteger>
+// to be <T: FixedWidthInteger where T.Magnitude == T>. As a practical matter,
+// every unsigned type will satisfy this constraint, so converting between
+// Magnitude and Self in generic code is acceptable.
+
 /// An integer type that can represent only nonnegative values.
-public protocol UnsignedInteger : BinaryInteger { }
+public protocol UnsignedInteger: BinaryInteger { }
 
 extension UnsignedInteger {
   /// The magnitude of this value.
@@ -3338,7 +3420,7 @@ extension UnsignedInteger {
   }
 }
 
-extension UnsignedInteger where Self : FixedWidthInteger {
+extension UnsignedInteger where Self: FixedWidthInteger {
   /// Creates a new instance from the given integer.
   ///
   /// Use this initializer to convert from another integer type when you know
@@ -3361,7 +3443,7 @@ extension UnsignedInteger where Self : FixedWidthInteger {
   @_semantics("optimize.sil.specialize.generic.partial.never")
   @inlinable // FIXME(inline-always)
   @inline(__always)
-  public init<T : BinaryInteger>(_ source: T) {
+  public init<T: BinaryInteger>(_ source: T) {
     // This check is potentially removable by the optimizer
     if T.isSigned {
       _precondition(source >= (0 as T), "Negative value is not representable")
@@ -3392,7 +3474,7 @@ extension UnsignedInteger where Self : FixedWidthInteger {
   @_semantics("optimize.sil.specialize.generic.partial.never")
   @inlinable // FIXME(inline-always)
   @inline(__always)
-  public init?<T : BinaryInteger>(exactly source: T) {
+  public init?<T: BinaryInteger>(exactly source: T) {
     // This check is potentially removable by the optimizer
     if T.isSigned && source < (0 as T) {
       return nil
@@ -3417,17 +3499,143 @@ extension UnsignedInteger where Self : FixedWidthInteger {
   /// For unsigned integer types, this value is always `0`.
   @_transparent
   public static var min: Self { return 0 }
+  
+  @_alwaysEmitIntoClient
+  public func dividingFullWidth(
+    _ dividend: (high: Self, low: Magnitude)
+  ) -> (quotient: Self, remainder: Self) {
+    // Validate preconditions to guarantee that the quotient is representable.
+    precondition(self != .zero, "Division by zero")
+    precondition(dividend.high < self,
+                 "Dividend.high must be smaller than divisor")
+    // UnsignedInteger should have a Magnitude = Self constraint, but does not,
+    // so we have to do this conversion (we can't easily add the constraint
+    // because it changes how generic signatures constrained to
+    // <FixedWidth & Unsigned> are minimized, which changes the mangling).
+    // In practice, "every" UnsignedInteger type will satisfy this, and if one
+    // somehow manages not to in a way that would break this conversion then
+    // a default implementation of this method never could have worked anyway.
+    let low = Self(dividend.low)
+    
+    // The basic algorithm is taken from Knuth (TAoCP, Vol 2, §4.3.1), using
+    // words that are half the size of Self (so the dividend has four words
+    // and the divisor has two). The fact that the denominator has exactly
+    // two words allows for a slight simplification vs. Knuth's Algorithm D,
+    // in that our computed quotient digit is always exactly right, while
+    // in the more general case it can be one too large, requiring a subsequent
+    // borrow.
+    //
+    // Knuth's algorithm (and any long division, really), requires that the
+    // divisor (self) be normalized (meaning that the high-order bit is set).
+    // We begin by counting the leading zeros so we know how many bits we
+    // have to shift to normalize.
+    let lz = leadingZeroBitCount
+    
+    // If the divisor is actually a power of two, division is just a shift,
+    // which we can handle much more efficiently. So we do a check for that
+    // case and early-out if possible.
+    if (self &- 1) & self == .zero {
+      let shift = Self.bitWidth - 1 - lz
+      let q = low &>> shift | dividend.high &<< -shift
+      let r = low & (self &- 1)
+      return (q, r)
+    }
+    
+    // Shift the divisor left by lz bits to normalize it. We shift the
+    // dividend left by the same amount so that we get the quotient is
+    // preserved (we will have to shift right to recover the remainder).
+    // Note that the right shift `low >> (Self.bitWidth - lz)` is
+    // deliberately a non-masking shift because lz might be zero.
+    let v = self &<< lz
+    let uh = dividend.high &<< lz | low >> (Self.bitWidth - lz)
+    let ul = low &<< lz
+    
+    // Now we have a normalized dividend (uh:ul) and divisor (v). Split
+    // v into half-words (vh:vl) so that we can use the "normal" division
+    // on Self as a word / halfword -> halfword division get one halfword
+    // digit of the quotient at a time.
+    let n_2 = Self.bitWidth/2
+    let mask = Self(1) &<< n_2 &- 1
+    let vh = v &>> n_2
+    let vl = v & mask
+    
+    // For the (fairly-common) special case where vl is zero, we can simplify
+    // the arithmetic quite a bit:
+    if vl == .zero {
+      let qh = uh / vh
+      let residual = (uh &- qh &* vh) &<< n_2 | ul &>> n_2
+      let ql = residual / vh
+      
+      return (
+        // Assemble quotient from half-word digits
+        quotient: qh &<< n_2 | ql,
+        // Compute remainder (we can re-use the residual to make this simpler).
+        remainder: ((residual &- ql &* vh) &<< n_2 | ul & mask) &>> lz
+      )
+    }
+    
+    // Helper function: performs a (1½ word)/word division to produce a
+    // half quotient word q. We'll need to use this twice to generate the
+    // full quotient.
+    //
+    // high is the high word of the quotient for this sub-division.
+    // low is the low half-word of the quotient for this sub-division (the
+    //     high half of low must be zero).
+    //
+    // returns the quotient half-word digit. In a more general setting, this
+    // computed digit might be one too large, which has to be accounted for
+    // later on (see Knuth, Algorithm D), but when the divisor is only two
+    // half-words (as here), that can never happen, because we use the full
+    // divisor in the check for the while loop.
+    func generateHalfDigit(high: Self, low: Self) -> Self {
+      // Get q̂ satisfying a = vh q̂ + r̂ with 0 ≤ r̂ < vh:
+      var (q̂, r̂) = high.quotientAndRemainder(dividingBy: vh)
+      // Knuth's "Theorem A" establishes that q̂ is an approximation to
+      // the quotient digit q, satisfying q ≤ q̂ ≤ q + 2. We adjust it
+      // downward as needed until we have the correct q.
+      while q̂ > mask || q̂ &* vl > (r̂ &<< n_2 | low) {
+        q̂ &-= 1
+        r̂ &+= vh
+        if r̂ > mask { break }
+      }
+      return q̂
+    }
+    
+    // Generate the first quotient digit, subtract off its product with the
+    // divisor to generate the residual, then compute the second quotient
+    // digit from that.
+    let qh = generateHalfDigit(high: uh, low: ul &>> n_2)
+    let residual = (uh &<< n_2 | ul &>> n_2) &- (qh &* v)
+    let ql = generateHalfDigit(high: residual, low: ul & mask)
+    
+    return (
+      // Assemble quotient from half-word digits
+      quotient: qh &<< n_2 | ql,
+      // Compute remainder (we can re-use the residual to make this simpler).
+      remainder: ((residual &<< n_2 | ul & mask) &- (ql &* v)) &>> lz
+    )
+  }
 }
-
 
 //===----------------------------------------------------------------------===//
 //===--- SignedInteger ----------------------------------------------------===//
 //===----------------------------------------------------------------------===//
 
 /// An integer type that can represent both positive and negative values.
-public protocol SignedInteger : BinaryInteger, SignedNumeric {
-  // These requirements are for the source code compatibility with Swift 3
+public protocol SignedInteger: BinaryInteger, SignedNumeric {
+  // These requirements are needed for binary compatibility; the following:
+  //
+  // func foo<T>(_ a: T) -> T
+  // where T: SignedInteger & FixedWidthInteger {
+  //   a &+ 1
+  // }
+  //
+  // generated a call to `static Swift.SignedInteger._maskingAdd(A, A) -> A`
+  // when compiled with Swift 5.5 and earlier.
+  @available(*, deprecated, message: "Use &+ instead.")
   static func _maskingAdd(_ lhs: Self, _ rhs: Self) -> Self
+  
+  @available(*, deprecated, message: "Use &- instead.")
   static func _maskingSubtract(_ lhs: Self, _ rhs: Self) -> Self
 }
 
@@ -3442,7 +3650,7 @@ extension SignedInteger {
   }
 }
 
-extension SignedInteger where Self : FixedWidthInteger {
+extension SignedInteger where Self: FixedWidthInteger {
   /// Creates a new instance from the given integer.
   ///
   /// Use this initializer to convert from another integer type when you know
@@ -3465,7 +3673,7 @@ extension SignedInteger where Self : FixedWidthInteger {
   @_semantics("optimize.sil.specialize.generic.partial.never")
   @inlinable // FIXME(inline-always)
   @inline(__always)
-  public init<T : BinaryInteger>(_ source: T) {
+  public init<T: BinaryInteger>(_ source: T) {
     // This check is potentially removable by the optimizer
     if T.isSigned && source.bitWidth > Self.bitWidth {
       _precondition(source >= Self.min,
@@ -3498,7 +3706,7 @@ extension SignedInteger where Self : FixedWidthInteger {
   @_semantics("optimize.sil.specialize.generic.partial.never")
   @inlinable // FIXME(inline-always)
   @inline(__always)
-  public init?<T : BinaryInteger>(exactly source: T) {
+  public init?<T: BinaryInteger>(exactly source: T) {
     // This check is potentially removable by the optimizer
     if T.isSigned && source.bitWidth > Self.bitWidth && source < Self.min {
       return nil
@@ -3537,78 +3745,98 @@ extension SignedInteger where Self : FixedWidthInteger {
     // Having handled those special cases, this is safe.
     return self % other == 0
   }
+  
+  @_alwaysEmitIntoClient
+  public func dividingFullWidth(
+    _ dividend: (high: Self, low: Magnitude)
+  ) -> (quotient: Self, remainder: Self) {
+    // Get magnitude of dividend:
+    var magnitudeHigh = Magnitude(truncatingIfNeeded: dividend.high)
+    var magnitudeLow  = dividend.low
+    if dividend.high < .zero {
+      let carry: Bool
+      (magnitudeLow, carry) = (~magnitudeLow).addingReportingOverflow(1)
+      magnitudeHigh = ~magnitudeHigh &+ (carry ? 1 : 0)
+    }
+    // Do division on magnitudes (using unsigned implementation):
+    let (unsignedQuotient, unsignedRemainder) = magnitude.dividingFullWidth(
+      (high: magnitudeHigh, low: magnitudeLow)
+    )
+    // Fixup sign: quotient is negative if dividend and divisor disagree.
+    // We will also trap here if the quotient does not fit in Self.
+    let quotient: Self
+    if self ^ dividend.high < .zero {
+      // It is possible that the quotient is representable but its magnitude
+      // is not representable as Self (if quotient is Self.min), so we have
+      // to handle that case carefully here.
+      precondition(unsignedQuotient <= Self.min.magnitude,
+                   "Quotient is not representable.")
+      quotient = Self(truncatingIfNeeded: 0 &- unsignedQuotient)
+    } else {
+      quotient = Self(unsignedQuotient)
+    }
+    var remainder = Self(unsignedRemainder)
+    if dividend.high < .zero { remainder = 0 &- remainder }
+    return (quotient, remainder)
+  }
 }
 
 /// Returns the given integer as the equivalent value in a different integer
 /// type.
 ///
-/// The `numericCast(_:)` function traps on overflow in `-O` and `-Onone`
-/// builds.
+/// Calling the `numericCast(_:)` function is equivalent to calling an
+/// initializer for the destination type. `numericCast(_:)` traps on overflow 
+/// in `-O` and `-Onone` builds.
 ///
-/// You can use `numericCast(_:)` to convert a value when the destination type
-/// can be inferred from the context. In the following example, the
-/// `random(in:)` function uses `numericCast(_:)` twice to convert the
-/// argument and return value of the `arc4random_uniform(_:)` function to the
-/// appropriate type.
-///
-///     func random(in range: Range<Int>) -> Int {
-///         return numericCast(arc4random_uniform(numericCast(range.count)))
-///             + range.lowerBound
-///     }
-///
-///     let number = random(in: -10...<10)
-///     // number == -3, perhaps
-///
-/// - Parameter x: The integer to convert, and instance of type `T`.
+/// - Parameter x: The integer to convert, an instance of type `T`.
 /// - Returns: The value of `x` converted to type `U`.
 @inlinable
-public func numericCast<T : BinaryInteger, U : BinaryInteger>(_ x: T) -> U {
+public func numericCast<T: BinaryInteger, U: BinaryInteger>(_ x: T) -> U {
   return U(x)
 }
 
-// FIXME(integers): Absence of &+ causes ambiguity in the code like the
-// following:
-//    func f<T : SignedInteger>(_ x: T, _ y: T) {
-//      var _  = (x &+ (y - 1)) < x
-//    }
-//  Compiler output:
-//  error: ambiguous reference to member '-'
-//    var _  = (x &+ (y - 1)) < x
-//                      ^
+// Needed to support user-defined types conformance to SignedInteger.
+// We need these defaults to exist, but they are not called.
 extension SignedInteger {
-  @_transparent
+  @available(*, deprecated, message: "Use &+ instead.")
   public static func _maskingAdd(_ lhs: Self, _ rhs: Self) -> Self {
     fatalError("Should be overridden in a more specific type")
   }
-
-  @_transparent
+  
+  @available(*, deprecated, message: "Use &- instead.")
   public static func _maskingSubtract(_ lhs: Self, _ rhs: Self) -> Self {
     fatalError("Should be overridden in a more specific type")
   }
 }
 
-extension SignedInteger where Self : FixedWidthInteger {
-  // This overload is supposed to break the ambiguity between the
-  // implementations on SignedInteger and FixedWidthInteger
-  @_transparent
-  public static func &+ (lhs: Self, rhs: Self) -> Self {
-    return _maskingAdd(lhs, rhs)
+// These symbols have to exist for ABI compatibility, but should not be used
+// any longer; we want to find the FixedWidthInteger definitions instead.
+extension SignedInteger where Self: FixedWidthInteger {
+  @available(*, unavailable)
+  public static func &+(lhs: Self, rhs: Self) -> Self {
+    lhs.addingReportingOverflow(rhs).partialValue
   }
-
-  @_transparent
+  
+  // This may be called in rare situations by binaries compiled with
+  // Swift 5.5 and earlier, so we need to keep it around for compatibility.
+  // We can't mark it unavailable, because then the concrete signed integer
+  // types in the standard library would not satisfy the protocol requirements.
+  @available(*, deprecated, message: "Use &+ instead.")
   public static func _maskingAdd(_ lhs: Self, _ rhs: Self) -> Self {
-    return lhs.addingReportingOverflow(rhs).partialValue
+    lhs.addingReportingOverflow(rhs).partialValue
   }
 
-  // This overload is supposed to break the ambiguity between the
-  // implementations on SignedInteger and FixedWidthInteger
-  @_transparent
-  public static func &- (lhs: Self, rhs: Self) -> Self {
-    return _maskingSubtract(lhs, rhs)
+  @available(*, unavailable)
+  public static func &-(lhs: Self, rhs: Self) -> Self {
+    lhs.subtractingReportingOverflow(rhs).partialValue
   }
-
-  @_transparent
+  
+  // This may be called in rare situations by binaries compiled with
+  // Swift 5.5 and earlier, so we need to keep it around for compatibility.
+  // We can't mark it unavailable, because then the concrete signed integer
+  // types in the standard library would not satisfy the protocol requirements.
+  @available(*, deprecated, message: "Use &- instead.")
   public static func _maskingSubtract(_ lhs: Self, _ rhs: Self) -> Self {
-    return lhs.subtractingReportingOverflow(rhs).partialValue
+    lhs.subtractingReportingOverflow(rhs).partialValue
   }
 }

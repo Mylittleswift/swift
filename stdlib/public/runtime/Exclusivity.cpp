@@ -14,17 +14,33 @@
 //
 //===----------------------------------------------------------------------===//
 
+// NOTE: This should really be applied in the CMakeLists.txt.  However, we do
+// not have a way to currently specify that at the target specific level yet.
+
+#if defined(_WIN32)
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#define VCEXTRALEAN
+#endif
+
+#include "swift/Runtime/Exclusivity.h"
+#include "swift/shims/Visibility.h"
+#include "SwiftTLSContext.h"
 #include "swift/Basic/Lazy.h"
 #include "swift/Runtime/Config.h"
 #include "swift/Runtime/Debug.h"
-#include "swift/Runtime/Exclusivity.h"
+#include "swift/Runtime/EnvironmentVariables.h"
 #include "swift/Runtime/Metadata.h"
-#include "ThreadLocalStorage.h"
+#include "swift/Threading/ThreadLocalStorage.h"
+#include <cinttypes>
+#include <cstdio>
 #include <memory>
-#include <stdio.h>
 
 // Pick a return-address strategy
-#if __GNUC__
+#if defined(__wasm__)
+// Wasm can't access call frame for security purposes
+#define get_return_address() ((void*) 0)
+#elif __GNUC__
 #define get_return_address() __builtin_return_address(0)
 #elif _MSC_VER
 #include <intrin.h>
@@ -35,6 +51,7 @@
 #endif
 
 using namespace swift;
+using namespace swift::runtime;
 
 bool swift::_swift_disableExclusivityChecking = false;
 
@@ -46,7 +63,48 @@ static const char *getAccessName(ExclusivityFlags flags) {
   }
 }
 
-LLVM_ATTRIBUTE_ALWAYS_INLINE
+// In asserts builds if the environment variable
+// SWIFT_DEBUG_RUNTIME_EXCLUSIVITY_LOGGING is set, emit logging information.
+#ifndef NDEBUG
+
+static inline bool isExclusivityLoggingEnabled() {
+  return runtime::environment::SWIFT_DEBUG_RUNTIME_EXCLUSIVITY_LOGGING();
+}
+
+static inline void _flockfile_stderr() {
+#if defined(_WIN32)
+  _lock_file(stderr);
+#elif defined(__wasi__)
+  // FIXME: WebAssembly/WASI doesn't support file locking yet (https://github.com/apple/swift/issues/54533).
+#else
+  flockfile(stderr);
+#endif
+}
+
+static inline void _funlockfile_stderr() {
+#if defined(_WIN32)
+  _unlock_file(stderr);
+#elif defined(__wasi__)
+  // FIXME: WebAssembly/WASI doesn't support file locking yet (https://github.com/apple/swift/issues/54533).
+#else
+  funlockfile(stderr);
+#endif
+}
+
+/// Used to ensure that logging printfs are deterministic.
+static inline void withLoggingLock(std::function<void()> func) {
+  assert(isExclusivityLoggingEnabled() &&
+         "Should only be called if exclusivity logging is enabled!");
+
+  _flockfile_stderr();
+  func();
+  fflush(stderr);
+  _funlockfile_stderr();
+}
+
+#endif
+
+SWIFT_ALWAYS_INLINE
 static void reportExclusivityConflict(ExclusivityFlags oldAction, void *oldPC,
                                       ExclusivityFlags newFlags, void *newPC,
                                       void *pointer) {
@@ -95,197 +153,94 @@ static void reportExclusivityConflict(ExclusivityFlags oldAction, void *oldPC,
   _swift_reportToDebugger(RuntimeErrorFlagFatal, message, &details);
 }
 
-namespace {
-
-/// A single access that we're tracking.
-///
-/// The following inputs are accepted by the begin_access runtime entry
-/// point. This table show the action performed by the current runtime to
-/// convert those inputs into stored fields in the Access scratch buffer.
-///
-/// Pointer | Runtime     | Access | PC    | Reported| Access
-/// Argument| Behavior    | Pointer| Arg   | PC      | PC
-/// -------- ------------- -------- ------- --------- ----------
-/// null    | [trap or missing enforcement]
-/// nonnull | [nontracked]| null   | null  | caller  | [discard]
-/// nonnull | [nontracked]| null   | valid | <same>  | [discard]
-/// nonnull | [tracked]   | <same> | null  | caller  | caller
-/// nonnull | [tracked]   | <same> | valid | <same>  | <same>
-///
-/// [nontracked] means that the Access scratch buffer will not be added to the
-/// runtime's list of tracked accesses. However, it may be passed to a
-/// subsequent call to end_unpaired_access. The null Pointer field then
-/// identifies the Access record as nontracked.
-///
-/// The runtime owns the contents of the scratch buffer, which is allocated by
-/// the compiler but otherwise opaque. The runtime may later reuse the Pointer
-/// or PC fields or any spare bits for additional flags, and/or a pointer to
-/// out-of-line storage.
-struct Access {
-  void *Pointer;
-  void *PC;
-  uintptr_t NextAndAction;
-
-  enum : uintptr_t {
-    ActionMask = (uintptr_t)ExclusivityFlags::ActionMask,
-    NextMask = ~ActionMask
-  };
-
-  Access *getNext() const {
-    return reinterpret_cast<Access*>(NextAndAction & NextMask);
-  }
-
-  void setNext(Access *next) {
-    NextAndAction =
-      reinterpret_cast<uintptr_t>(next) | (NextAndAction & ActionMask);
-  }
-
-  ExclusivityFlags getAccessAction() const {
-    return ExclusivityFlags(NextAndAction & ActionMask);
-  }
-
-  void initialize(void *pc, void *pointer, Access *next,
-                  ExclusivityFlags action) {
-    Pointer = pointer;
-    PC = pc;
-    NextAndAction = reinterpret_cast<uintptr_t>(next) | uintptr_t(action);
-  }
-};
-
-static_assert(sizeof(Access) <= sizeof(ValueBuffer) &&
-              alignof(Access) <= alignof(ValueBuffer),
-              "Access doesn't fit in a value buffer!");
-
-/// A set of accesses that we're tracking.  Just a singly-linked list.
-class AccessSet {
-  Access *Head = nullptr;
-public:
-  constexpr AccessSet() {}
-
-  bool insert(Access *access, void *pc, void *pointer, ExclusivityFlags flags) {
-    auto action = getAccessAction(flags);
-
-    for (Access *cur = Head; cur != nullptr; cur = cur->getNext()) {
-      // Ignore accesses to different values.
-      if (cur->Pointer != pointer)
-        continue;
-
-      // If both accesses are reads, it's not a conflict.
-      if (action == ExclusivityFlags::Read &&
-          action == cur->getAccessAction())
-        continue;
-
-      // Otherwise, it's a conflict.
-      reportExclusivityConflict(cur->getAccessAction(), cur->PC,
-                                flags, pc, pointer);
-
-      // 0 means no backtrace will be printed.
-      fatalError(0, "Fatal access conflict detected.\n");
-    }
-    if (!isTracking(flags))
-      return false;
-
-    // Insert to the front of the array so that remove tends to find it faster.
-    access->initialize(pc, pointer, Head, action);
-    Head = access;
-    return true;
-  }
-
-  void remove(Access *access) {
-    auto cur = Head;
-    // Fast path: stack discipline.
-    if (cur == access) {
-      Head = cur->getNext();
-      return;
-    }
-
-    Access *last = cur;
-    for (cur = cur->getNext(); cur != nullptr;
-         last = cur, cur = cur->getNext()) {
-      assert(last->getNext() == cur);
-      if (cur == access) {
-        last->setNext(cur->getNext());
-        return;
-      }
-    }
-
-    swift_runtime_unreachable("access not found in set");
-  }
-
+bool AccessSet::insert(Access *access, void *pc, void *pointer,
+                       ExclusivityFlags flags) {
 #ifndef NDEBUG
-  /// Only available with asserts. Intended to be used with
-  /// swift_dumpTrackedAccess().
-  void forEach(std::function<void (Access *)> action) {
-    for (auto *iter = Head; iter != nullptr; iter = iter->getNext()) {
-      action(iter);
-    }
+  if (isExclusivityLoggingEnabled()) {
+    withLoggingLock(
+        [&]() { fprintf(stderr, "Inserting new access: %p\n", access); });
   }
 #endif
-};
+  auto action = getAccessAction(flags);
 
-} // end anonymous namespace
+  for (Access *cur = Head; cur != nullptr; cur = cur->getNext()) {
+    // Ignore accesses to different values.
+    if (cur->Pointer != pointer)
+      continue;
+
+    // If both accesses are reads, it's not a conflict.
+    if (action == ExclusivityFlags::Read && action == cur->getAccessAction())
+      continue;
+
+    // Otherwise, it's a conflict.
+    reportExclusivityConflict(cur->getAccessAction(), cur->PC, flags, pc,
+                              pointer);
+
+    // 0 means no backtrace will be printed.
+    fatalError(0, "Fatal access conflict detected.\n");
+  }
+  if (!isTracking(flags)) {
+#ifndef NDEBUG
+    if (isExclusivityLoggingEnabled()) {
+      withLoggingLock([&]() { fprintf(stderr, "  Not tracking!\n"); });
+    }
+#endif
+    return false;
+  }
+
+  // Insert to the front of the array so that remove tends to find it faster.
+  access->initialize(pc, pointer, Head, action);
+  Head = access;
+#ifndef NDEBUG
+  if (isExclusivityLoggingEnabled()) {
+    withLoggingLock([&]() {
+      fprintf(stderr, "  Tracking!\n");
+      swift_dumpTrackedAccesses();
+    });
+  }
+#endif
+  return true;
+}
+
+void AccessSet::remove(Access *access) {
+  assert(Head && "removal from empty AccessSet");
+#ifndef NDEBUG
+  if (isExclusivityLoggingEnabled()) {
+    withLoggingLock(
+        [&]() { fprintf(stderr, "Removing access: %p\n", access); });
+  }
+#endif
+  auto cur = Head;
+  // Fast path: stack discipline.
+  if (cur == access) {
+    Head = cur->getNext();
+    return;
+  }
+
+  Access *last = cur;
+  for (cur = cur->getNext(); cur != nullptr; last = cur, cur = cur->getNext()) {
+    assert(last->getNext() == cur);
+    if (cur == access) {
+      last->setNext(cur->getNext());
+      return;
+    }
+  }
+
+  swift_unreachable("access not found in set");
+}
+
+#ifndef NDEBUG
+/// Only available with asserts. Intended to be used with
+/// swift_dumpTrackedAccess().
+void AccessSet::forEach(std::function<void(Access *)> action) {
+  for (auto *iter = Head; iter != nullptr; iter = iter->getNext()) {
+    action(iter);
+  }
+}
+#endif
 
 // Each of these cases should define a function with this prototype:
 //   AccessSets &getAllSets();
-
-#if SWIFT_TLS_HAS_RESERVED_PTHREAD_SPECIFIC
-// Use the reserved TSD key if possible.
-
-static AccessSet &getAccessSet() {
-  AccessSet *set = static_cast<AccessSet*>(
-    SWIFT_THREAD_GETSPECIFIC(SWIFT_EXCLUSIVITY_TLS_KEY));
-  if (set)
-    return *set;
-  
-  static OnceToken_t setupToken;
-  SWIFT_ONCE_F(setupToken, [](void *) {
-    pthread_key_init_np(SWIFT_EXCLUSIVITY_TLS_KEY, [](void *pointer) {
-      delete static_cast<AccessSet*>(pointer);
-    });
-  }, nullptr);
-  
-  set = new AccessSet();
-  SWIFT_THREAD_SETSPECIFIC(SWIFT_EXCLUSIVITY_TLS_KEY, set);
-  return *set;
-}
-
-#elif SWIFT_TLS_HAS_THREADLOCAL
-// Second choice is direct language support for thread-locals.
-
-static LLVM_THREAD_LOCAL AccessSet ExclusivityAccessSet;
-
-static AccessSet &getAccessSet() {
-  return ExclusivityAccessSet;
-}
-
-#else
-// Use the platform thread-local data API.
-
-static __swift_thread_key_t createAccessSetThreadKey() {
-  __swift_thread_key_t key;
-  int result = SWIFT_THREAD_KEY_CREATE(&key, [](void *pointer) {
-    delete static_cast<AccessSet*>(pointer);
-  });
-
-  if (result != 0) {
-    fatalError(0, "couldn't create thread key for exclusivity: %s\n",
-               strerror(result));
-  }
-  return key;
-}
-
-static AccessSet &getAccessSet() {
-  static __swift_thread_key_t key = createAccessSetThreadKey();
-
-  AccessSet *set = static_cast<AccessSet*>(SWIFT_THREAD_GETSPECIFIC(key));
-  if (!set) {
-    set = new AccessSet();
-    SWIFT_THREAD_SETSPECIFIC(key, set);
-  }
-  return *set;
-}
-
-#endif
 
 /// Begin tracking a dynamic access.
 ///
@@ -309,7 +264,7 @@ void swift::swift_beginAccess(void *pointer, ValueBuffer *buffer,
   if (!pc)
     pc = get_return_address();
 
-  if (!getAccessSet().insert(access, pc, pointer, flags))
+  if (!SwiftTLSContext::get().accessSet.insert(access, pc, pointer, flags))
     access->Pointer = nullptr;
 }
 
@@ -324,7 +279,7 @@ void swift::swift_endAccess(ValueBuffer *buffer) {
     return;
   }
 
-  getAccessSet().remove(access);
+  SwiftTLSContext::get().accessSet.remove(access);
 }
 
 #ifndef NDEBUG
@@ -333,10 +288,18 @@ void swift::swift_endAccess(ValueBuffer *buffer) {
 //
 // This is only intended to be used in the debugger.
 void swift::swift_dumpTrackedAccesses() {
-  getAccessSet().forEach([](Access *a) {
-      fprintf(stderr, "Access. Pointer: %p. PC: %p. AccessAction: %s\n",
-              a->Pointer, a->PC, getAccessName(a->getAccessAction()));
+  auto &accessSet = SwiftTLSContext::get().accessSet;
+  if (!accessSet) {
+    fprintf(stderr, "        No Accesses.\n");
+    return;
+  }
+  accessSet.forEach([](Access *a) {
+    fprintf(stderr, "        Access. Pointer: %p. PC: %p. AccessAction: %s\n",
+            a->Pointer, a->PC, getAccessName(a->getAccessAction()));
   });
 }
 
 #endif
+
+// Bring in the concurrency-specific exclusivity code.
+#include "ConcurrencyExclusivity.inc"

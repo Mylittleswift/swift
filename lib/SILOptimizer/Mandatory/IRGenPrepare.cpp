@@ -22,12 +22,13 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "sil-cleanup"
+#include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
-#include "swift/SILOptimizer/Utils/Local.h"
+#include "swift/SILOptimizer/Utils/InstructionDeleter.h"
 #include "swift/Strings.h"
 
 using namespace swift;
@@ -48,16 +49,28 @@ static bool cleanFunction(SILFunction &fn) {
         continue;
       }
 
-      const BuiltinInfo &bInfo = bi->getBuiltinInfo();
-      if (bInfo.ID != BuiltinValueKind::PoundAssert &&
-          bInfo.ID != BuiltinValueKind::StaticReport) {
-        continue;
+      switch (bi->getBuiltinInfo().ID) {
+        case BuiltinValueKind::CondFailMessage: {
+          SILBuilderWithScope Builder(bi);
+          Builder.createCondFail(bi->getLoc(), bi->getOperand(0),
+            "unknown program error");
+          LLVM_FALLTHROUGH;
+        }
+        case BuiltinValueKind::PoundAssert:
+        case BuiltinValueKind::StaticReport: {
+          // The call to the builtin should get removed before we reach
+          // IRGen.
+          InstructionDeleter deleter;
+          deleter.forceDelete(bi);
+          // StaticReport only takes trivial operands, and therefore doesn't
+          // require fixing the lifetime of its operands.
+          deleter.cleanupDeadInstructions();
+          madeChange = true;
+          break;
+        }
+        default:
+          break;
       }
-
-      // The call to the builtin should get removed before we reach
-      // IRGen.
-      recursivelyDeleteTriviallyDeadInstructions(bi, /* Force */ true);
-      madeChange = true;
     }
   }
 

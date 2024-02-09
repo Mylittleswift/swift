@@ -17,12 +17,19 @@
 #ifndef SWIFT_AST_STMT_H
 #define SWIFT_AST_STMT_H
 
+#include "swift/AST/ASTAllocated.h"
+#include "swift/AST/ASTNode.h"
 #include "swift/AST/Availability.h"
 #include "swift/AST/AvailabilitySpec.h"
-#include "swift/AST/ASTNode.h"
+#include "swift/AST/ConcreteDeclRef.h"
 #include "swift/AST/IfConfigClause.h"
 #include "swift/AST/TypeAlignments.h"
+#include "swift/AST/TypeLoc.h"
+#include "swift/AST/ThrownErrorDestination.h"
+#include "swift/Basic/Debug.h"
 #include "swift/Basic/NullablePtr.h"
+#include "llvm/ADT/None.h"
+#include "llvm/ADT/Optional.h"
 #include "llvm/Support/TrailingObjects.h"
 
 namespace swift {
@@ -31,12 +38,18 @@ class AnyPattern;
 class ASTContext;
 class ASTWalker;
 class Decl;
+class DeclContext;
+class Evaluator;
 class Expr;
 class FuncDecl;
+class AbstractFunctionDecl;
 class Pattern;
 class PatternBindingDecl;
 class VarDecl;
 class CaseStmt;
+class DoCatchStmt;
+class IsSingleValueStmtResult;
+class SwitchStmt;
 
 enum class StmtKind {
 #define STMT(ID, PARENT) ID,
@@ -49,11 +62,12 @@ enum : unsigned { NumStmtKindBits =
   countBitsUsed(static_cast<unsigned>(StmtKind::Last_Stmt)) };
 
 /// Stmt - Base class for all statements in swift.
-class alignas(8) Stmt {
+class alignas(8) Stmt : public ASTAllocated<Stmt> {
   Stmt(const Stmt&) = delete;
   Stmt& operator=(const Stmt&) = delete;
 
 protected:
+  // clang-format off
   union { uint64_t OpaqueBits;
 
   SWIFT_INLINE_BITFIELD_BASE(Stmt, bitmax(NumStmtKindBits,8) + 1,
@@ -85,6 +99,12 @@ protected:
     : NumPadBits,
     CaseCount : 32
   );
+    
+  SWIFT_INLINE_BITFIELD(ReturnStmt, Stmt, 1,
+    /// Whether the result is an implied return, e.g for an implicit single
+    /// expression return.
+    IsImplied : 1
+  );
 
   SWIFT_INLINE_BITFIELD_FULL(YieldStmt, Stmt, 32,
     : NumPadBits,
@@ -92,13 +112,15 @@ protected:
   );
 
   } Bits;
+  // clang-format on
 
   /// Return the given value for the 'implicit' flag if present, or if None,
   /// return true if the location is invalid.
-  static bool getDefaultImplicitFlag(Optional<bool> implicit, SourceLoc keyLoc){
-    return implicit.hasValue() ? *implicit : keyLoc.isInvalid();
+  static bool getDefaultImplicitFlag(llvm::Optional<bool> implicit,
+                                     SourceLoc keyLoc) {
+    return implicit.has_value() ? *implicit : keyLoc.isInvalid();
   }
-  
+
 public:
   Stmt(StmtKind kind, bool implicit) {
     Bits.OpaqueBits = 0;
@@ -115,6 +137,10 @@ public:
   /// to the user of the compiler in any way.
   static StringRef getKindName(StmtKind kind);
 
+  /// Retrieve the descriptive kind name for a given statement. This is suitable
+  /// for use in diagnostics.
+  static StringRef getDescriptiveKindName(StmtKind K);
+
   /// Return the location of the start of the statement.
   SourceLoc getStartLoc() const;
   
@@ -123,7 +149,11 @@ public:
   
   SourceRange getSourceRange() const;
   SourceLoc TrailingSemiLoc;
-  
+
+  /// Whether the statement can produce a single value, and as such may be
+  /// treated as an expression.
+  IsSingleValueStmtResult mayProduceSingleValue(ASTContext &ctx) const;
+
   /// isImplicit - Determines whether this statement was implicitly-generated,
   /// rather than explicitly written in the AST.
   bool isImplicit() const { return Bits.Stmt.Implicit; }
@@ -132,20 +162,8 @@ public:
   Stmt *walk(ASTWalker &walker);
   Stmt *walk(ASTWalker &&walker) { return walk(walker); }
 
-  LLVM_ATTRIBUTE_DEPRECATED(
-      void dump() const LLVM_ATTRIBUTE_USED,
-      "only for use within the debugger");
+  SWIFT_DEBUG_DUMP;
   void dump(raw_ostream &OS, const ASTContext *Ctx = nullptr, unsigned Indent = 0) const;
-
-  // Only allow allocation of Exprs using the allocator in ASTContext
-  // or by doing a placement new.
-  void *operator new(size_t Bytes, ASTContext &C,
-                     unsigned Alignment = alignof(Stmt));
-  
-  // Make vanilla new/delete illegal for Stmts.
-  void *operator new(size_t Bytes) throw() = delete;
-  void operator delete(void *Data) throw() = delete;
-  void *operator new(size_t Bytes, void *Mem) throw() = delete;
 };
 
 /// BraceStmt - A brace enclosed sequence of expressions, stmts, or decls, like
@@ -157,24 +175,41 @@ class BraceStmt final : public Stmt,
   SourceLoc LBLoc;
   SourceLoc RBLoc;
 
-  BraceStmt(SourceLoc lbloc, ArrayRef<ASTNode> elements,SourceLoc rbloc,
-            Optional<bool> implicit);
+  BraceStmt(SourceLoc lbloc, ArrayRef<ASTNode> elements, SourceLoc rbloc,
+            llvm::Optional<bool> implicit);
 
 public:
   static BraceStmt *create(ASTContext &ctx, SourceLoc lbloc,
-                           ArrayRef<ASTNode> elements,
-                           SourceLoc rbloc,
-                           Optional<bool> implicit = None);
+                           ArrayRef<ASTNode> elements, SourceLoc rbloc,
+                           llvm::Optional<bool> implicit = llvm::None);
+
+  static BraceStmt *createImplicit(ASTContext &ctx,
+                                   ArrayRef<ASTNode> elements) {
+    return create(ctx, /*lbloc=*/SourceLoc(), elements, /*rbloc=*/SourceLoc(),
+                  /*implicit=*/true);
+  }
 
   SourceLoc getLBraceLoc() const { return LBLoc; }
   SourceLoc getRBraceLoc() const { return RBLoc; }
-  
-  SourceRange getSourceRange() const { return SourceRange(LBLoc, RBLoc); }
 
+  SourceLoc getStartLoc() const;
+  SourceLoc getEndLoc() const;
+
+  SourceLoc getContentStartLoc() const;
+  SourceLoc getContentEndLoc() const;
+  /// The range of the brace statement without the braces.
+  SourceRange getContentRange() const {
+    return {getContentStartLoc(), getContentEndLoc()};
+  }
+
+  bool empty() const { return getNumElements() == 0; }
   unsigned getNumElements() const { return Bits.BraceStmt.NumElements; }
 
-  ASTNode getElement(unsigned i) const { return getElements()[i]; }
-  void setElement(unsigned i, ASTNode node) { getElements()[i] = node; }
+  ASTNode getFirstElement() const { return getElements().front(); }
+  ASTNode getLastElement() const { return getElements().back(); }
+
+  void setFirstElement(ASTNode node) { getElements().front() = node; }
+  void setLastElement(ASTNode node) { getElements().back() = node; }
 
   /// The elements contained within the BraceStmt.
   MutableArrayRef<ASTNode> getElements() {
@@ -185,7 +220,24 @@ public:
   ArrayRef<ASTNode> getElements() const {
     return {getTrailingObjects<ASTNode>(), Bits.BraceStmt.NumElements};
   }
-  
+
+  ASTNode findAsyncNode();
+
+  /// If this brace contains a single ASTNode, or a \c #if that has a single active
+  /// element, returns it. This will always be the last element of the brace.
+  /// Otherwise returns \c nullptr.
+  ASTNode getSingleActiveElement() const;
+
+  /// If this brace is wrapping a single active expression, returns it. This
+  /// includes both a single expression element, or a single expression in an
+  /// active \c #if. Otherwise returns \c nullptr.
+  Expr *getSingleActiveExpression() const;
+
+  /// If this brace is wrapping a single active statement, returns it. This
+  /// includes both a single statement element, or a single statement in an
+  /// active \c #if. Otherwise returns \c nullptr.
+  Stmt *getSingleActiveStatement() const;
+
   static bool classof(const Stmt *S) { return S->getKind() == StmtKind::Brace; }
 };
 
@@ -195,17 +247,46 @@ public:
 class ReturnStmt : public Stmt {
   SourceLoc ReturnLoc;
   Expr *Result;
-  
+
+  ReturnStmt(SourceLoc returnLoc, Expr *result, bool isImplicit)
+      : Stmt(StmtKind::Return, isImplicit), ReturnLoc(returnLoc),
+        Result(result) {
+    Bits.ReturnStmt.IsImplied = false;
+  }
+
 public:
-  ReturnStmt(SourceLoc ReturnLoc, Expr *Result,
-             Optional<bool> implicit = None)
-    : Stmt(StmtKind::Return, getDefaultImplicitFlag(implicit, ReturnLoc)),
-      ReturnLoc(ReturnLoc), Result(Result) {}
+  static ReturnStmt *createParsed(ASTContext &ctx, SourceLoc returnLoc,
+                                  Expr *result) {
+    return new (ctx) ReturnStmt(returnLoc, result, /*isImplicit*/ false);
+  }
+
+  static ReturnStmt *createImplicit(ASTContext &ctx, SourceLoc returnLoc,
+                                    Expr *result) {
+    return new (ctx) ReturnStmt(returnLoc, result, /*isImplicit*/ true);
+  }
+
+  static ReturnStmt *createImplicit(ASTContext &ctx, Expr *result) {
+    return createImplicit(ctx, SourceLoc(), result);
+  }
+
+  /// Create an implicit implied ReturnStmt for e.g a single expression body.
+  static ReturnStmt *createImplied(ASTContext &ctx, Expr *result) {
+    assert(result && "Result must be present to be implied");
+    auto *RS = createImplicit(ctx, result);
+    RS->Bits.ReturnStmt.IsImplied = true;
+    return RS;
+  }
 
   SourceLoc getReturnLoc() const { return ReturnLoc; }
 
   SourceLoc getStartLoc() const;
   SourceLoc getEndLoc() const;
+
+  /// Whether the result is an implied return, e.g for an implicit single
+  /// expression return.
+  bool isImplied() const {
+    return Bits.ReturnStmt.IsImplied;
+  }
 
   bool hasResult() const { return Result != 0; }
   Expr *getResult() const {
@@ -229,9 +310,9 @@ class YieldStmt final
   SourceLoc RPLoc;
 
   YieldStmt(SourceLoc yieldLoc, SourceLoc lpLoc, ArrayRef<Expr *> yields,
-            SourceLoc rpLoc, Optional<bool> implicit = None)
-    : Stmt(StmtKind::Yield, getDefaultImplicitFlag(implicit, yieldLoc)),
-      YieldLoc(yieldLoc), LPLoc(lpLoc), RPLoc(rpLoc) {
+            SourceLoc rpLoc, llvm::Optional<bool> implicit = llvm::None)
+      : Stmt(StmtKind::Yield, getDefaultImplicitFlag(implicit, yieldLoc)),
+        YieldLoc(yieldLoc), LPLoc(lpLoc), RPLoc(rpLoc) {
     Bits.YieldStmt.NumYields = yields.size();
     memcpy(getMutableYields().data(), yields.data(),
            yields.size() * sizeof(Expr*));
@@ -239,8 +320,8 @@ class YieldStmt final
 
 public:
   static YieldStmt *create(const ASTContext &ctx, SourceLoc yieldLoc,
-                           SourceLoc lp, ArrayRef<Expr*> yields, SourceLoc rp,
-                           Optional<bool> implicit = None);
+                           SourceLoc lp, ArrayRef<Expr *> yields, SourceLoc rp,
+                           llvm::Optional<bool> implicit = llvm::None);
 
   SourceLoc getYieldLoc() const { return YieldLoc; }
   SourceLoc getLParenLoc() const { return LPLoc; }
@@ -257,6 +338,38 @@ public:
   }
   
   static bool classof(const Stmt *S) { return S->getKind() == StmtKind::Yield; }
+};
+
+/// The statement `then <expr>`. This is used within if/switch expressions to
+/// indicate the value being produced by a given branch.
+class ThenStmt : public Stmt {
+  SourceLoc ThenLoc;
+  Expr *Result;
+
+  ThenStmt(SourceLoc thenLoc, Expr *result, bool isImplicit)
+      : Stmt(StmtKind::Then, isImplicit), ThenLoc(thenLoc), Result(result) {
+    assert(Result && "Must have non-null result");
+  }
+
+public:
+  /// Create a new parsed ThenStmt.
+  static ThenStmt *createParsed(ASTContext &ctx, SourceLoc thenLoc,
+                                Expr *result);
+
+  /// Create an implicit ThenStmt.
+  ///
+  /// Note that such statements will be elided during the result builder
+  /// transform.
+  static ThenStmt *createImplicit(ASTContext &ctx, Expr *result);
+
+  SourceLoc getThenLoc() const { return ThenLoc; }
+
+  SourceRange getSourceRange() const;
+
+  Expr *getResult() const { return Result; }
+  void setResult(Expr *e) { Result = e; }
+
+  static bool classof(const Stmt *S) { return S->getKind() == StmtKind::Then; }
 };
 
 /// DeferStmt - A 'defer' statement.  This runs the substatement it contains
@@ -285,14 +398,19 @@ class DeferStmt : public Stmt {
   /// This is the invocation of the closure, which is to be emitted on any error
   /// paths.
   Expr *callExpr;
-  
-public:
+
   DeferStmt(SourceLoc DeferLoc,
             FuncDecl *tempDecl, Expr *callExpr)
     : Stmt(StmtKind::Defer, /*implicit*/false),
       DeferLoc(DeferLoc), tempDecl(tempDecl),
       callExpr(callExpr) {}
-  
+
+public:
+  /// Create a 'defer' statement. This automatically creates the "temp decl" and
+  /// the call expression. It's the caller's responsibility to populate the
+  /// body of the func decl.
+  static DeferStmt *create(DeclContext *dc, SourceLoc deferLoc);
+
   SourceLoc getDeferLoc() const { return DeferLoc; }
   
   SourceLoc getStartLoc() const { return DeferLoc; }
@@ -308,7 +426,46 @@ public:
   static bool classof(const Stmt *S) { return S->getKind() == StmtKind::Defer; }
 };
 
-  
+/// Represent `let`/`var` optional binding, or `case` pattern matching in
+/// conditional statements (i.e. `if`, `guard`, `while`).
+class alignas(8) ConditionalPatternBindingInfo
+    : public ASTAllocated<ConditionalPatternBindingInfo> {
+  /// Location of the var/let/case keyword.
+  SourceLoc IntroducerLoc;
+
+  /// Pattern being matched. In the case of an "implicit optional" pattern, the
+  /// OptionalSome pattern is explicitly added to this as an 'implicit' pattern.
+  Pattern *ThePattern;
+
+  /// The value for matching.
+  Expr *Initializer;
+
+  ConditionalPatternBindingInfo(SourceLoc IntroducerLoc, Pattern *ThePattern,
+                                Expr *Initializer)
+      : IntroducerLoc(IntroducerLoc), ThePattern(ThePattern),
+        Initializer(Initializer) {}
+
+public:
+  static ConditionalPatternBindingInfo *create(ASTContext &ctx,
+                                               SourceLoc IntroducerLoc,
+                                               Pattern *ThePattern,
+                                               Expr *Initializer) {
+    return new (ctx)
+        ConditionalPatternBindingInfo(IntroducerLoc, ThePattern, Initializer);
+  }
+
+  SourceLoc getIntroducerLoc() const { return IntroducerLoc; }
+  void setIntroducerLoc(SourceLoc Loc) { IntroducerLoc = Loc; }
+  Pattern *getPattern() const { return ThePattern; }
+  void setPattern(Pattern *P) { ThePattern = P; }
+  Expr *getInitializer() const { return Initializer; }
+  void setInitializer(Expr *E) { Initializer = E; }
+
+  SourceRange getSourceRange() const;
+  SourceLoc getStartLoc() const { return getSourceRange().Start; };
+  SourceLoc getEndLoc() const { return getSourceRange().End; };
+};
+
 /// An expression that guards execution based on whether the run-time
 /// configuration supports a given API, e.g.,
 /// #available(OSX >= 10.9, iOS >= 7.0).
@@ -317,6 +474,7 @@ class alignas(8) PoundAvailableInfo final :
   friend TrailingObjects;
 
   SourceLoc PoundLoc;
+  SourceLoc LParenLoc;
   SourceLoc RParenLoc;
 
   // The number of queries tail allocated after this object.
@@ -325,25 +483,45 @@ class alignas(8) PoundAvailableInfo final :
   /// The version range when this query will return true. This value is
   /// filled in by Sema.
   VersionRange AvailableRange;
-  
-  PoundAvailableInfo(SourceLoc PoundLoc, ArrayRef<AvailabilitySpec *> queries,
-                     SourceLoc RParenLoc)
-   : PoundLoc(PoundLoc), RParenLoc(RParenLoc), NumQueries(queries.size()),
-     AvailableRange(VersionRange::empty()) {
+
+  /// For zippered builds, this is the version range for the target variant
+  /// that must hold for the query to return true. For example, when
+  /// compiling with target x86_64-macosx10.15 and target-variant
+  /// x86_64-ios13.0 a query of #available(macOS 10.22, iOS 20.0, *) will
+  /// have a variant range of [20.0, +inf).
+  /// This is filled in by Sema.
+  VersionRange VariantAvailableRange;
+
+  /// Indicates that the expression is checking if a version range 
+  /// is **not** available.
+  bool _isUnavailability;
+
+  PoundAvailableInfo(SourceLoc PoundLoc, SourceLoc LParenLoc,
+                     ArrayRef<AvailabilitySpec *> queries, SourceLoc RParenLoc,
+                     bool isUnavailability)
+   : PoundLoc(PoundLoc), LParenLoc(LParenLoc), RParenLoc(RParenLoc),
+     NumQueries(queries.size()), AvailableRange(VersionRange::empty()),
+     VariantAvailableRange(VersionRange::empty()), 
+     _isUnavailability(isUnavailability) {
     std::uninitialized_copy(queries.begin(), queries.end(),
                             getTrailingObjects<AvailabilitySpec *>());
   }
   
 public:
   static PoundAvailableInfo *create(ASTContext &ctx, SourceLoc PoundLoc,
+                                    SourceLoc LParenLoc,
                                     ArrayRef<AvailabilitySpec *> queries,
-                                    SourceLoc RParenLoc);
+                                    SourceLoc RParenLoc,
+                                    bool isUnavailability);
   
   ArrayRef<AvailabilitySpec *> getQueries() const {
     return llvm::makeArrayRef(getTrailingObjects<AvailabilitySpec *>(),
                               NumQueries);
   }
   
+  SourceLoc getLParenLoc() const { return LParenLoc; }
+  SourceLoc getRParenLoc() const { return RParenLoc; }
+
   SourceLoc getStartLoc() const { return PoundLoc; }
   SourceLoc getEndLoc() const;
   SourceLoc getLoc() const { return PoundLoc; }
@@ -352,109 +530,190 @@ public:
   
   const VersionRange &getAvailableRange() const { return AvailableRange; }
   void setAvailableRange(const VersionRange &Range) { AvailableRange = Range; }
+
+  const VersionRange &getVariantAvailableRange() const {
+    return VariantAvailableRange;
+  }
+  void setVariantAvailableRange(const VersionRange &Range) {
+    VariantAvailableRange = Range;
+  }
+
+  bool isUnavailability() const { return _isUnavailability; }
 };
 
-
-/// This represents an entry in an "if" or "while" condition.  Pattern bindings
-/// can bind any number of names in the pattern binding decl, and may have an
-/// associated where clause.  When "if let" is involved, an arbitrary number of
-/// pattern bindings and conditional expressions are permitted, e.g.:
+/// An expression that guards execution based on whether the symbols for the
+/// declaration identified by the given expression are non-null at run-time, e.g.
 ///
-///   if let x = ..., y = ... where x > y,
-///      let z = ...
-/// which would be represented as four StmtConditionElement entries, one for
-/// the "x" binding, one for the "y" binding, one for the where clause, one for
-/// "z"'s binding.  A simple "if" statement is represented as a single binding.
+///   if #_hasSymbol(foo(_:)) { foo(42) }
 ///
-class StmtConditionElement {
-  /// If this is a pattern binding, it may be the first one in a declaration, in
-  /// which case this is the location of the var/let/case keyword.  If this is
-  /// the second pattern (e.g. for 'y' in "var x = ..., y = ...") then this
-  /// location is invalid.
-  SourceLoc IntroducerLoc;
+class PoundHasSymbolInfo final : public ASTAllocated<PoundHasSymbolInfo> {
+  Expr *SymbolExpr;
+  ConcreteDeclRef ReferencedDecl;
+  bool Invalid;
 
-  /// In a pattern binding, this is pattern being matched.  In the case of an
-  /// "implicit optional" pattern, the OptionalSome pattern is explicitly added
-  /// to this as an 'implicit' pattern.
-  Pattern *ThePattern = nullptr;
+  SourceLoc PoundLoc;
+  SourceLoc LParenLoc;
+  SourceLoc RParenLoc;
 
-  /// This is either the boolean condition, the initializer for a pattern
-  /// binding, or the #available information.
-  llvm::PointerUnion<PoundAvailableInfo*, Expr *> CondInitOrAvailable;
+  PoundHasSymbolInfo(SourceLoc PoundLoc, SourceLoc LParenLoc, Expr *SymbolExpr,
+                     SourceLoc RParenLoc)
+      : SymbolExpr(SymbolExpr), ReferencedDecl(), Invalid(), PoundLoc(PoundLoc),
+        LParenLoc(LParenLoc), RParenLoc(RParenLoc){};
 
 public:
-  StmtConditionElement() {}
-  StmtConditionElement(SourceLoc IntroducerLoc, Pattern *ThePattern,
-                       Expr *Init)
-    : IntroducerLoc(IntroducerLoc), ThePattern(ThePattern),
-      CondInitOrAvailable(Init) {}
-  StmtConditionElement(Expr *cond) : CondInitOrAvailable(cond) {}
+  static PoundHasSymbolInfo *create(ASTContext &Ctx, SourceLoc PoundLoc,
+                                    SourceLoc LParenLoc, Expr *SymbolExpr,
+                                    SourceLoc RParenLoc);
 
-  StmtConditionElement(PoundAvailableInfo *Info) : CondInitOrAvailable(Info) {}
-  
-  SourceLoc getIntroducerLoc() const { return IntroducerLoc; }
-  void setIntroducerLoc(SourceLoc loc) { IntroducerLoc = loc; }
+  Expr *getSymbolExpr() const { return SymbolExpr; }
+  void setSymbolExpr(Expr *E) { SymbolExpr = E; }
+
+  ConcreteDeclRef getReferencedDecl() { return ReferencedDecl; }
+  void setReferencedDecl(ConcreteDeclRef CDR) { ReferencedDecl = CDR; }
+
+  /// Returns true if the referenced decl has been diagnosed as invalid.
+  bool isInvalid() const { return Invalid; }
+  void setInvalid() { Invalid = true; }
+
+  SourceLoc getLParenLoc() const { return LParenLoc; }
+  SourceLoc getRParenLoc() const { return RParenLoc; }
+  SourceLoc getStartLoc() const { return PoundLoc; }
+  SourceLoc getEndLoc() const { return RParenLoc; }
+  SourceRange getSourceRange() const {
+    return SourceRange(getStartLoc(), getEndLoc());
+  }
+};
+
+/// This represents an entry in an "if" or "while" condition.
+/// Either a boolean expression, optional binding, pattern matching,
+/// `#available`, or `#_hasSymbol`.
+///
+/// E.g. this 'if' statement has 5 'StmtConditionElement'.
+///   if
+///     list.count == 1,                          // CK_Boolean
+///     let firstElem = list.first,               // CK_PatternBinding
+///     case .foo(let value?, "int") = firstElem, // CK_PatternBinding
+///     #available(myOS 13),                      // CK_Availability
+///     #_hasSymbol(MyStruct.peform(operation:))  // CK_HasSymbol
+///   { ... }
+///
+class alignas(1 << PatternAlignInBits) StmtConditionElement {
+private:
+  llvm::PointerUnion<Expr *, ConditionalPatternBindingInfo *,
+                     PoundAvailableInfo *, PoundHasSymbolInfo *>
+      Condition;
+
+public:
+  StmtConditionElement() : Condition(nullptr) {}
+  StmtConditionElement(Expr *cond) : Condition(cond) {}
+  StmtConditionElement(ConditionalPatternBindingInfo *Info) : Condition(Info) {}
+  StmtConditionElement(PoundAvailableInfo *Info) : Condition(Info) {}
+  StmtConditionElement(PoundHasSymbolInfo *Info) : Condition(Info) {}
+
+  static StmtConditionElement fromOpaqueValue(void *opaque) {
+    StmtConditionElement val;
+    val.Condition = decltype(Condition)::getFromOpaqueValue(opaque);
+    return val;
+  }
+
+  void *getOpaqueValue() const { return Condition.getOpaqueValue(); }
 
   /// ConditionKind - This indicates the sort of condition this is.
   enum ConditionKind {
     CK_Boolean,
     CK_PatternBinding,
-    CK_Availability
+    CK_Availability,
+    CK_HasSymbol,
   };
 
   ConditionKind getKind() const {
-    if (ThePattern) return CK_PatternBinding;
-    return CondInitOrAvailable.is<Expr*>() ? CK_Boolean : CK_Availability;
+    if (Condition.is<Expr *>())
+      return CK_Boolean;
+    if (Condition.is<ConditionalPatternBindingInfo *>())
+      return CK_PatternBinding;
+    if (Condition.is<PoundAvailableInfo *>())
+      return CK_Availability;
+    if (Condition.is<PoundHasSymbolInfo *>())
+      return CK_HasSymbol;
+    return CK_Boolean;
   }
 
   /// Boolean Condition Accessors.
-  Expr *getBooleanOrNull() const {
-    return getKind() == CK_Boolean ? CondInitOrAvailable.get<Expr*>() : nullptr;
-  }
+  Expr *getBooleanOrNull() const { return Condition.dyn_cast<Expr *>(); }
 
   Expr *getBoolean() const {
     assert(getKind() == CK_Boolean && "Not a condition");
-    return CondInitOrAvailable.get<Expr*>();
+    return Condition.get<Expr *>();
   }
   void setBoolean(Expr *E) {
     assert(getKind() == CK_Boolean && "Not a condition");
-    CondInitOrAvailable = E;
+    Condition = E;
   }
 
   /// Pattern Binding Accessors.
+  ConditionalPatternBindingInfo *getPatternBindingOrNull() const {
+    return Condition.dyn_cast<ConditionalPatternBindingInfo *>();
+  }
+
+  ConditionalPatternBindingInfo *getPatternBinding() const {
+    assert(getKind() == CK_PatternBinding && "Not a pattern binding condition");
+    return Condition.get<ConditionalPatternBindingInfo *>();
+  }
+
+  SourceLoc getIntroducerLoc() const {
+    return getPatternBinding()->getIntroducerLoc();
+  }
+
+  void setIntroducerLoc(SourceLoc loc) {
+    getPatternBinding()->setIntroducerLoc(loc);
+  }
+
   Pattern *getPatternOrNull() const {
-    return ThePattern;
+    if (auto *binding = getPatternBindingOrNull())
+      return binding->getPattern();
+    return nullptr;
   }
 
-  Pattern *getPattern() const {
-    assert(getKind() == CK_PatternBinding && "Not a pattern binding condition");
-    return ThePattern;
+  Pattern *getPattern() const { return getPatternBinding()->getPattern(); }
+
+  void setPattern(Pattern *P) { getPatternBinding()->setPattern(P); }
+
+  Expr *getInitializerOrNull() const {
+    if (auto *binding = getPatternBindingOrNull())
+      return binding->getInitializer();
+    return nullptr;
   }
 
-  void setPattern(Pattern *P) {
-    assert(getKind() == CK_PatternBinding && "Not a pattern binding condition");
-    ThePattern = P;
-  }
+  Expr *getInitializer() const { return getPatternBinding()->getInitializer(); }
 
-  Expr *getInitializer() const {
-    assert(getKind() == CK_PatternBinding && "Not a pattern binding condition");
-    return CondInitOrAvailable.get<Expr*>();
-  }
-  void setInitializer(Expr *E) {
-    assert(getKind() == CK_PatternBinding && "Not a pattern binding condition");
-    CondInitOrAvailable = E;
-  }
-  
+  void setInitializer(Expr *E) { getPatternBinding()->setInitializer(E); }
+
   // Availability Accessors
   PoundAvailableInfo *getAvailability() const {
     assert(getKind() == CK_Availability && "Not an #available condition");
-    return CondInitOrAvailable.get<PoundAvailableInfo*>();
+    return Condition.get<PoundAvailableInfo *>();
   }
 
   void setAvailability(PoundAvailableInfo *Info) {
     assert(getKind() == CK_Availability && "Not an #available condition");
-    CondInitOrAvailable = Info;
+    Condition = Info;
   }
+
+  // #_hasSymbol Accessors
+  PoundHasSymbolInfo *getHasSymbolInfo() const {
+    assert(getKind() == CK_HasSymbol && "Not a #_hasSymbol condition");
+    return Condition.get<PoundHasSymbolInfo *>();
+  }
+
+  void setHasSymbolInfo(PoundHasSymbolInfo *Info) {
+    assert(getKind() == CK_HasSymbol && "Not a #_hasSymbol condition");
+    Condition = Info;
+  }
+
+  /// Whether or not this conditional stmt rebinds self with a `let self`
+  /// or `let self = self` condition. If `requireLoadExpr` is `true`,
+  /// additionally requires that the RHS of the self condition is a `LoadExpr`.
+  bool rebindsSelf(ASTContext &Ctx, bool requireLoadExpr = false) const;
 
   SourceLoc getStartLoc() const;
   SourceLoc getEndLoc() const;
@@ -514,127 +773,31 @@ public:
 /// DoStmt - do statement, without any trailing clauses.
 class DoStmt : public LabeledStmt {
   SourceLoc DoLoc;
-  Stmt *Body;
+  BraceStmt *Body;
   
 public:
-  DoStmt(LabeledStmtInfo labelInfo, SourceLoc doLoc,
-         Stmt *body, Optional<bool> implicit = None)
-    : LabeledStmt(StmtKind::Do, getDefaultImplicitFlag(implicit, doLoc),
-                  labelInfo),
-      DoLoc(doLoc), Body(body) {}
+  DoStmt(LabeledStmtInfo labelInfo, SourceLoc doLoc, BraceStmt *body,
+         llvm::Optional<bool> implicit = llvm::None)
+      : LabeledStmt(StmtKind::Do, getDefaultImplicitFlag(implicit, doLoc),
+                    labelInfo),
+        DoLoc(doLoc), Body(body) {}
+
+  static DoStmt *createImplicit(ASTContext &C, LabeledStmtInfo labelInfo,
+                                ArrayRef<ASTNode> body);
 
   SourceLoc getDoLoc() const { return DoLoc; }
   
-  SourceLoc getStartLoc() const { return getLabelLocOrKeywordLoc(DoLoc); }
-  SourceLoc getEndLoc() const { return Body->getEndLoc(); }
+  SourceLoc getStartLoc() const;
+  SourceLoc getEndLoc() const;
   
-  Stmt *getBody() const { return Body; }
-  void setBody(Stmt *s) { Body = s; }
+  BraceStmt *getBody() const { return Body; }
+  void setBody(BraceStmt *s) { Body = s; }
 
   static bool classof(const Stmt *S) { return S->getKind() == StmtKind::Do; }
 };
 
-/// An individual 'catch' clause.
-/// 
-/// This isn't really an independent statement any more than CaseStmt
-/// is; it's just a structural part of a DoCatchStmt.
-class CatchStmt : public Stmt {
-  SourceLoc CatchLoc;
-  SourceLoc WhereLoc;
-  Pattern *ErrorPattern;
-  Expr *GuardExpr;
-  Stmt *CatchBody;
-
-public:
-  CatchStmt(SourceLoc catchLoc, Pattern *errorPattern,
-            SourceLoc whereLoc, Expr *guardExpr, Stmt *body,
-            Optional<bool> implicit = None)
-    : Stmt(StmtKind::Catch, getDefaultImplicitFlag(implicit, catchLoc)),
-      CatchLoc(catchLoc), WhereLoc(whereLoc),
-      ErrorPattern(nullptr), GuardExpr(guardExpr), CatchBody(body) {
-    setErrorPattern(errorPattern);
-  }
-
-  SourceLoc getCatchLoc() const { return CatchLoc; }
-
-  /// The location of the 'where' keyword if there's a guard expression.
-  SourceLoc getWhereLoc() const { return WhereLoc; }
-
-  SourceLoc getStartLoc() const { return CatchLoc; }
-  SourceLoc getEndLoc() const { return CatchBody->getEndLoc(); }
-
-  Stmt *getBody() const { return CatchBody; }
-  void setBody(Stmt *body) { CatchBody = body; }
-
-  Pattern *getErrorPattern() { return ErrorPattern; }
-  const Pattern *getErrorPattern() const { return ErrorPattern; }
-  void setErrorPattern(Pattern *pattern);
-
-  /// Is this catch clause "syntactically exhaustive"?
-  bool isSyntacticallyExhaustive() const;
-
-  /// Return the guard expression if present, or null if the catch has
-  /// no guard.
-  Expr *getGuardExpr() const { return GuardExpr; }
-  void setGuardExpr(Expr *guard) { GuardExpr = guard; }
-
-  static bool classof(const Stmt *S) { return S->getKind() == StmtKind::Catch; }
-};
-
-/// DoCatchStmt - do statement with trailing 'catch' clauses.
-class DoCatchStmt final : public LabeledStmt,
-    private llvm::TrailingObjects<DoCatchStmt, CatchStmt *> {
-  friend TrailingObjects;
-
-  SourceLoc DoLoc;
-  Stmt *Body;
-
-  DoCatchStmt(LabeledStmtInfo labelInfo, SourceLoc doLoc,
-              Stmt *body, ArrayRef<CatchStmt*> catches,
-              Optional<bool> implicit)
-    : LabeledStmt(StmtKind::DoCatch, getDefaultImplicitFlag(implicit, doLoc),
-                  labelInfo), DoLoc(doLoc), Body(body) {
-    Bits.DoCatchStmt.NumCatches = catches.size();
-    std::uninitialized_copy(catches.begin(), catches.end(),
-                            getTrailingObjects<CatchStmt *>());
-  }
-
-public:
-  static DoCatchStmt *create(ASTContext &ctx, LabeledStmtInfo labelInfo,
-                             SourceLoc doLoc, Stmt *body,
-                             ArrayRef<CatchStmt*> catches,
-                             Optional<bool> implicit = None);
-
-  SourceLoc getDoLoc() const { return DoLoc; }
-
-  SourceLoc getStartLoc() const { return getLabelLocOrKeywordLoc(DoLoc); }
-  SourceLoc getEndLoc() const { return getCatches().back()->getEndLoc(); }
-
-  Stmt *getBody() const { return Body; }
-  void setBody(Stmt *s) { Body = s; }
-
-  ArrayRef<CatchStmt*> getCatches() const {
-    return {getTrailingObjects<CatchStmt*>(), Bits.DoCatchStmt.NumCatches};
-  }
-  MutableArrayRef<CatchStmt*> getMutableCatches() {
-    return {getTrailingObjects<CatchStmt*>(), Bits.DoCatchStmt.NumCatches};
-  }
-
-  /// Does this statement contain a syntactically exhaustive catch
-  /// clause?
-  ///
-  /// Note that an exhaustive do/catch statement can still throw
-  /// errors out of its catch block(s).
-  bool isSyntacticallyExhaustive() const;
-
-  static bool classof(const Stmt *S) {
-    return S->getKind() == StmtKind::DoCatch;
-  }
-};
-
-
 /// Either an "if let" case or a simple boolean expression can appear as the
-/// condition of an 'if' or 'while' statement.
+/// condition of an 'if', 'guard', or 'while' statement.
 using StmtCondition = MutableArrayRef<StmtConditionElement>;
 
 /// This is the common base class between statements that can have labels, and
@@ -651,6 +814,15 @@ public:
   StmtCondition getCond() const { return Cond; }
   void setCond(StmtCondition e);
 
+  /// FIXME: Find a better way to implement this. Allows conditions to be
+  ///        stored in \c ASTNode.
+  StmtCondition *getCondPointer() { return &Cond; }
+
+  /// Whether or not this conditional stmt rebinds self with a `let self`
+  /// or `let self = self` condition. If `requireLoadExpr` is `true`,
+  /// additionally requires that the RHS of the self condition is a `LoadExpr`.
+  bool rebindsSelf(ASTContext &Ctx, bool requireLoadExpr = false) const;
+
   static bool classof(const Stmt *S) {
     return S->getKind() >= StmtKind::First_LabeledConditionalStmt &&
            S->getKind() <= StmtKind::Last_LabeledConditionalStmt;
@@ -664,20 +836,25 @@ public:
 class IfStmt : public LabeledConditionalStmt {
   SourceLoc IfLoc;
   SourceLoc ElseLoc;
-  Stmt *Then;
+  BraceStmt *Then;
   Stmt *Else;
   
 public:
   IfStmt(LabeledStmtInfo LabelInfo, SourceLoc IfLoc, StmtCondition Cond,
-         Stmt *Then, SourceLoc ElseLoc, Stmt *Else,
-         Optional<bool> implicit = None)
-  : LabeledConditionalStmt(StmtKind::If,
-                           getDefaultImplicitFlag(implicit, IfLoc),
-                           LabelInfo, Cond),
-    IfLoc(IfLoc), ElseLoc(ElseLoc), Then(Then), Else(Else) {}
+         BraceStmt *Then, SourceLoc ElseLoc, Stmt *Else,
+         llvm::Optional<bool> implicit = llvm::None)
+      : LabeledConditionalStmt(StmtKind::If,
+                               getDefaultImplicitFlag(implicit, IfLoc),
+                               LabelInfo, Cond),
+        IfLoc(IfLoc), ElseLoc(ElseLoc), Then(Then), Else(Else) {
+    assert(Then && "Must have non-null 'then' statement");
+    assert(!Else || isa<BraceStmt>(Else) ||
+           isa<IfStmt>(Else) &&
+               "Else statement must either be BraceStmt or IfStmt");
+  }
 
-  IfStmt(SourceLoc IfLoc, Expr *Cond, Stmt *Then, SourceLoc ElseLoc,
-         Stmt *Else, Optional<bool> implicit, ASTContext &Ctx);
+  IfStmt(SourceLoc IfLoc, Expr *Cond, BraceStmt *Then, SourceLoc ElseLoc,
+         Stmt *Else, llvm::Optional<bool> implicit, ASTContext &Ctx);
 
   SourceLoc getIfLoc() const { return IfLoc; }
   SourceLoc getElseLoc() const { return ElseLoc; }
@@ -689,12 +866,19 @@ public:
     return (Else ? Else->getEndLoc() : Then->getEndLoc());
   }
 
-  Stmt *getThenStmt() const { return Then; }
-  void setThenStmt(Stmt *s) { Then = s; }
+  BraceStmt *getThenStmt() const { return Then; }
+  void setThenStmt(BraceStmt *s) { Then = s; }
 
   Stmt *getElseStmt() const { return Else; }
   void setElseStmt(Stmt *s) { Else = s; }
-  
+
+  /// Retrieve the complete set of branches for this if statement, including
+  /// else if statements.
+  ArrayRef<Stmt *> getBranches(SmallVectorImpl<Stmt *> &scratch) const;
+
+  /// Whether the if statement has an unconditional \c else.
+  bool isSyntacticallyExhaustive() const;
+
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Stmt *S) { return S->getKind() == StmtKind::If; }
 };
@@ -705,19 +889,19 @@ public:
 ///
 class GuardStmt : public LabeledConditionalStmt {
   SourceLoc GuardLoc;
-  Stmt *Body;
+  BraceStmt *Body;
   
 public:
-  GuardStmt(SourceLoc GuardLoc, StmtCondition Cond,
-            Stmt *Body, Optional<bool> implicit = None)
-  : LabeledConditionalStmt(StmtKind::Guard,
-                           getDefaultImplicitFlag(implicit, GuardLoc),
-                           LabeledStmtInfo(), Cond),
-    GuardLoc(GuardLoc), Body(Body) {}
-  
-  GuardStmt(SourceLoc GuardLoc, Expr *Cond, Stmt *Body,
-            Optional<bool> implicit, ASTContext &Ctx);
-  
+  GuardStmt(SourceLoc GuardLoc, StmtCondition Cond, BraceStmt *Body,
+            llvm::Optional<bool> implicit = llvm::None)
+      : LabeledConditionalStmt(StmtKind::Guard,
+                               getDefaultImplicitFlag(implicit, GuardLoc),
+                               LabeledStmtInfo(), Cond),
+        GuardLoc(GuardLoc), Body(Body) {}
+
+  GuardStmt(SourceLoc GuardLoc, Expr *Cond, BraceStmt *Body,
+            llvm::Optional<bool> implicit, ASTContext &Ctx);
+
   SourceLoc getGuardLoc() const { return GuardLoc; }
   
   SourceLoc getStartLoc() const {
@@ -727,8 +911,8 @@ public:
     return Body->getEndLoc();
   }
   
-  Stmt *getBody() const { return Body; }
-  void setBody(Stmt *s) { Body = s; }
+  BraceStmt *getBody() const { return Body; }
+  void setBody(BraceStmt *s) { Body = s; }
   
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Stmt *S) { return S->getKind() == StmtKind::Guard; }
@@ -743,14 +927,15 @@ class WhileStmt : public LabeledConditionalStmt {
   
 public:
   WhileStmt(LabeledStmtInfo LabelInfo, SourceLoc WhileLoc, StmtCondition Cond,
-            Stmt *Body, Optional<bool> implicit = None)
-  : LabeledConditionalStmt(StmtKind::While,
-                           getDefaultImplicitFlag(implicit, WhileLoc),
-                           LabelInfo, Cond),
-    WhileLoc(WhileLoc), Body(Body) {}
+            Stmt *Body, llvm::Optional<bool> implicit = llvm::None)
+      : LabeledConditionalStmt(StmtKind::While,
+                               getDefaultImplicitFlag(implicit, WhileLoc),
+                               LabelInfo, Cond),
+        WhileLoc(WhileLoc), Body(Body) {}
 
   SourceLoc getStartLoc() const { return getLabelLocOrKeywordLoc(WhileLoc); }
   SourceLoc getEndLoc() const { return Body->getEndLoc(); }
+  SourceLoc getWhileLoc() const { return WhileLoc; }
 
   Stmt *getBody() const { return Body; }
   void setBody(Stmt *s) { Body = s; }
@@ -767,14 +952,15 @@ class RepeatWhileStmt : public LabeledStmt {
   
 public:
   RepeatWhileStmt(LabeledStmtInfo LabelInfo, SourceLoc RepeatLoc, Expr *Cond,
-              SourceLoc WhileLoc, Stmt *Body, Optional<bool> implicit = None)
-    : LabeledStmt(StmtKind::RepeatWhile,
-                  getDefaultImplicitFlag(implicit, RepeatLoc),
-                  LabelInfo),
-      RepeatLoc(RepeatLoc), WhileLoc(WhileLoc), Body(Body), Cond(Cond) {}
-  
+                  SourceLoc WhileLoc, Stmt *Body,
+                  llvm::Optional<bool> implicit = llvm::None)
+      : LabeledStmt(StmtKind::RepeatWhile,
+                    getDefaultImplicitFlag(implicit, RepeatLoc), LabelInfo),
+        RepeatLoc(RepeatLoc), WhileLoc(WhileLoc), Body(Body), Cond(Cond) {}
+
   SourceLoc getStartLoc() const { return getLabelLocOrKeywordLoc(RepeatLoc); }
   SourceLoc getEndLoc() const;
+  SourceLoc getRepeatLoc() const { return RepeatLoc; }
   
   Stmt *getBody() const { return Body; }
   void setBody(Stmt *s) { Body = s; }
@@ -796,34 +982,69 @@ public:
 /// \endcode
 class ForEachStmt : public LabeledStmt {
   SourceLoc ForLoc;
+  SourceLoc TryLoc;
+  SourceLoc AwaitLoc;
   Pattern *Pat;
   SourceLoc InLoc;
   Expr *Sequence;
+  SourceLoc WhereLoc;
   Expr *WhereExpr = nullptr;
   BraceStmt *Body;
-  
-  /// The iterator variable along with its initializer.
-  PatternBindingDecl *Iterator = nullptr;
-  /// The expression that advances the iterator and returns an Optional with
-  /// the next value or None to signal end-of-stream.
-  Expr *IteratorNext = nullptr;
+
+  // Set by Sema:
+  ProtocolConformanceRef sequenceConformance = ProtocolConformanceRef();
+  Type sequenceType;
+  PatternBindingDecl *iteratorVar = nullptr;
+  Expr *nextCall = nullptr;
+  OpaqueValueExpr *elementExpr = nullptr;
+  Expr *convertElementExpr = nullptr;
 
 public:
-  ForEachStmt(LabeledStmtInfo LabelInfo, SourceLoc ForLoc, Pattern *Pat,
-              SourceLoc InLoc, Expr *Sequence, Expr *WhereExpr, BraceStmt *Body,
-              Optional<bool> implicit = None)
-    : LabeledStmt(StmtKind::ForEach, getDefaultImplicitFlag(implicit, ForLoc),
-                  LabelInfo),
-      ForLoc(ForLoc), Pat(nullptr), InLoc(InLoc), Sequence(Sequence),
-      WhereExpr(WhereExpr), Body(Body) {
+  ForEachStmt(LabeledStmtInfo LabelInfo, SourceLoc ForLoc, SourceLoc TryLoc,
+              SourceLoc AwaitLoc, Pattern *Pat, SourceLoc InLoc, Expr *Sequence,
+              SourceLoc WhereLoc, Expr *WhereExpr, BraceStmt *Body,
+              llvm::Optional<bool> implicit = llvm::None)
+      : LabeledStmt(StmtKind::ForEach, getDefaultImplicitFlag(implicit, ForLoc),
+                    LabelInfo),
+        ForLoc(ForLoc), TryLoc(TryLoc), AwaitLoc(AwaitLoc), Pat(nullptr),
+        InLoc(InLoc), Sequence(Sequence), WhereLoc(WhereLoc),
+        WhereExpr(WhereExpr), Body(Body) {
     setPattern(Pat);
   }
-  
+
+  void setIteratorVar(PatternBindingDecl *var) { iteratorVar = var; }
+  PatternBindingDecl *getIteratorVar() const { return iteratorVar; }
+
+  void setNextCall(Expr *next) { nextCall = next; }
+  Expr *getNextCall() const { return nextCall; }
+
+  void setElementExpr(OpaqueValueExpr *expr) { elementExpr = expr; }
+  OpaqueValueExpr *getElementExpr() const { return elementExpr; }
+
+  void setConvertElementExpr(Expr *expr) { convertElementExpr = expr; }
+  Expr *getConvertElementExpr() const { return convertElementExpr; }
+
+  void setSequenceConformance(Type type,
+                              ProtocolConformanceRef conformance) {
+    sequenceType = type;
+    sequenceConformance = conformance;
+  }
+  Type getSequenceType() const { return sequenceType; }
+  ProtocolConformanceRef getSequenceConformance() const {
+    return sequenceConformance;
+  }
+
   /// getForLoc - Retrieve the location of the 'for' keyword.
   SourceLoc getForLoc() const { return ForLoc; }
 
   /// getInLoc - Retrieve the location of the 'in' keyword.
   SourceLoc getInLoc() const { return InLoc; }
+
+  /// getWhereLoc - Retrieve the location of the 'where' keyword.
+  SourceLoc getWhereLoc() const { return WhereLoc; }
+
+  SourceLoc getAwaitLoc() const { return AwaitLoc; }
+  SourceLoc getTryLoc() const { return TryLoc; }
   
   /// getPattern - Retrieve the pattern describing the iteration variables.
   /// These variables will only be visible within the body of the loop.
@@ -837,17 +1058,12 @@ public:
   /// by this foreach loop, as it was written in the source code and
   /// subsequently type-checked. To determine the semantic behavior of this
   /// expression to extract a range, use \c getRangeInit().
-  Expr *getSequence() const { return Sequence; }
-  void setSequence(Expr *S) { Sequence = S; }
-  
-  /// Retrieve the pattern binding that contains the (implicit) iterator
-  /// variable and its initialization from the container.
-  PatternBindingDecl *getIterator() const { return Iterator; }
-  void setIterator(PatternBindingDecl *It) { Iterator = It; }
-  
-  /// Retrieve the expression that advances the iterator.
-  Expr *getIteratorNext() const { return IteratorNext; }
-  void setIteratorNext(Expr *E) { IteratorNext = E; }
+  Expr *getParsedSequence() const { return Sequence; }
+  void setParsedSequence(Expr *S) { Sequence = S; }
+
+  /// Type-checked version of the sequence or nullptr if this statement
+  /// yet to be type-checked.
+  Expr *getTypeCheckedSequence() const;
 
   /// getBody - Retrieve the body of the loop.
   BraceStmt *getBody() const { return Body; }
@@ -862,7 +1078,7 @@ public:
 };
 
 /// A pattern and an optional guard expression used in a 'case' statement.
-class CaseLabelItem {
+class alignas(1 << PatternAlignInBits) CaseLabelItem {
   enum class Kind {
     /// A normal pattern
     Normal = 0,
@@ -870,13 +1086,13 @@ class CaseLabelItem {
     Default,
   };
 
-  Pattern *CasePattern;
+  llvm::PointerIntPair<Pattern *, 1, bool> CasePatternAndResolved;
   SourceLoc WhereLoc;
   llvm::PointerIntPair<Expr *, 1, Kind> GuardExprAndKind;
 
   CaseLabelItem(Kind kind, Pattern *casePattern, SourceLoc whereLoc,
                 Expr *guardExpr)
-    : CasePattern(casePattern), WhereLoc(whereLoc),
+    : CasePatternAndResolved(casePattern, false), WhereLoc(whereLoc),
       GuardExprAndKind(guardExpr, kind) {}
 
 public:
@@ -904,9 +1120,19 @@ public:
   SourceLoc getEndLoc() const;
   SourceRange getSourceRange() const;
 
-  Pattern *getPattern() { return CasePattern; }
-  const Pattern *getPattern() const { return CasePattern; }
-  void setPattern(Pattern *CasePattern) { this->CasePattern = CasePattern; }
+  Pattern *getPattern() {
+    return CasePatternAndResolved.getPointer();
+  }
+  const Pattern *getPattern() const {
+    return CasePatternAndResolved.getPointer();
+  }
+  bool isPatternResolved() const {
+    return CasePatternAndResolved.getInt();
+  }
+  void setPattern(Pattern *CasePattern, bool resolved) {
+    this->CasePatternAndResolved.setPointer(CasePattern);
+    this->CasePatternAndResolved.setInt(resolved);
+  }
 
   /// Return the guard expression if present, or null if the case label has
   /// no guard.
@@ -920,6 +1146,8 @@ public:
   bool isDefault() const {
     return GuardExprAndKind.getInt() == Kind::Default;
   }
+
+  bool isSyntacticallyExhaustive() const;
 };
 
 /// FallthroughStmt - The keyword "fallthrough".
@@ -929,7 +1157,7 @@ class FallthroughStmt : public Stmt {
   CaseStmt *FallthroughDest;
 
 public:
-  FallthroughStmt(SourceLoc Loc, Optional<bool> implicit = None)
+  FallthroughStmt(SourceLoc Loc, llvm::Optional<bool> implicit = llvm::None)
       : Stmt(StmtKind::Fallthrough, getDefaultImplicitFlag(implicit, Loc)),
         Loc(Loc), FallthroughSource(nullptr), FallthroughDest(nullptr) {}
 
@@ -961,9 +1189,12 @@ public:
   }
 };
 
-/// A 'case' or 'default' block of a switch statement.  Only valid as the
-/// substatement of a SwitchStmt.  A case block begins either with one or more
-/// CaseLabelItems or a single 'default' label.
+enum CaseParentKind { Switch, DoCatch };
+
+/// A 'case' or 'default' block of a switch statement, or a 'catch' clause of a
+/// do-catch statement.  Only valid as the substatement of a SwitchStmt or
+/// DoCatchStmt.  A case block begins either with one or more CaseLabelItems or
+/// a single 'default' label.
 ///
 /// Some examples:
 /// \code
@@ -980,30 +1211,53 @@ class CaseStmt final
                                     CaseLabelItem> {
   friend TrailingObjects;
 
+  Stmt *ParentStmt = nullptr;
   SourceLoc UnknownAttrLoc;
-  SourceLoc CaseLoc;
-  SourceLoc ColonLoc;
+  SourceLoc ItemIntroducerLoc;
+  SourceLoc ItemTerminatorLoc;
+  CaseParentKind ParentKind;
 
-  llvm::PointerIntPair<Stmt *, 1, bool> BodyAndHasBoundDecls;
+  llvm::PointerIntPair<BraceStmt *, 1, bool> BodyAndHasFallthrough;
 
-  /// Set to true if we have a fallthrough.
-  ///
-  /// TODO: Once we have CaseBodyVarDecls, use the bit in BodyAndHasBoundDecls
-  /// for this instead. This is separate now for staging reasons.
-  bool hasFallthrough;
+  llvm::Optional<MutableArrayRef<VarDecl *>> CaseBodyVariables;
 
-  CaseStmt(SourceLoc CaseLoc, ArrayRef<CaseLabelItem> CaseLabelItems,
-           bool HasBoundDecls, SourceLoc UnknownAttrLoc, SourceLoc ColonLoc,
-           Stmt *Body, Optional<bool> Implicit,
+  CaseStmt(CaseParentKind ParentKind, SourceLoc ItemIntroducerLoc,
+           ArrayRef<CaseLabelItem> CaseLabelItems, SourceLoc UnknownAttrLoc,
+           SourceLoc ItemTerminatorLoc, BraceStmt *Body,
+           llvm::Optional<MutableArrayRef<VarDecl *>> CaseBodyVariables,
+           llvm::Optional<bool> Implicit,
            NullablePtr<FallthroughStmt> fallthroughStmt);
 
 public:
+  /// Create a parsed 'case'/'default' for 'switch' statement.
   static CaseStmt *
-  create(ASTContext &C, SourceLoc CaseLoc,
-         ArrayRef<CaseLabelItem> CaseLabelItems, bool HasBoundDecls,
-         SourceLoc UnknownAttrLoc, SourceLoc ColonLoc, Stmt *Body,
-         Optional<bool> Implicit = None,
+  createParsedSwitchCase(ASTContext &C, SourceLoc ItemIntroducerLoc,
+                         ArrayRef<CaseLabelItem> CaseLabelItems,
+                         SourceLoc UnknownAttrLoc, SourceLoc ColonLoc,
+                         BraceStmt *Body);
+
+  /// Create a parsed 'catch' for 'do' statement.
+  static CaseStmt *createParsedDoCatch(ASTContext &C, SourceLoc CatchLoc,
+                                       ArrayRef<CaseLabelItem> CaseLabelItems,
+                                       BraceStmt *Body);
+
+  static CaseStmt *
+  create(ASTContext &C, CaseParentKind ParentKind, SourceLoc ItemIntroducerLoc,
+         ArrayRef<CaseLabelItem> CaseLabelItems, SourceLoc UnknownAttrLoc,
+         SourceLoc ItemTerminatorLoc, BraceStmt *Body,
+         llvm::Optional<MutableArrayRef<VarDecl *>> CaseBodyVariables,
+         llvm::Optional<bool> Implicit = llvm::None,
          NullablePtr<FallthroughStmt> fallthroughStmt = nullptr);
+
+  CaseParentKind getParentKind() const { return ParentKind; }
+
+  Stmt *getParentStmt() const { return ParentStmt; }
+  void setParentStmt(Stmt *S) {
+    assert(S && "Parent statement must be SwitchStmt or DoCatchStmt");
+    assert((ParentKind == CaseParentKind::Switch && isa<SwitchStmt>(S)) ||
+           (ParentKind == CaseParentKind::DoCatch && isa<DoCatchStmt>(S)));
+    ParentStmt = S;
+  }
 
   ArrayRef<CaseLabelItem> getCaseLabelItems() const {
     return {getTrailingObjects<CaseLabelItem>(), Bits.CaseStmt.NumPatterns};
@@ -1015,26 +1269,32 @@ public:
 
   unsigned getNumCaseLabelItems() const { return Bits.CaseStmt.NumPatterns; }
 
+  FallthroughStmt *getFallthroughStmt() const {
+    return hasFallthroughDest() ? *getTrailingObjects<FallthroughStmt *>()
+                                : nullptr;
+  }
+
   NullablePtr<CaseStmt> getFallthroughDest() const {
     return const_cast<CaseStmt &>(*this).getFallthroughDest();
   }
 
   NullablePtr<CaseStmt> getFallthroughDest() {
-    if (!hasFallthrough)
+    if (!hasFallthroughDest())
       return nullptr;
     return (*getTrailingObjects<FallthroughStmt *>())->getFallthroughDest();
   }
 
-  bool hasFallthroughDest() const { return hasFallthrough; }
+  bool hasFallthroughDest() const { return BodyAndHasFallthrough.getInt(); }
 
-  Stmt *getBody() const { return BodyAndHasBoundDecls.getPointer(); }
-  void setBody(Stmt *body) { BodyAndHasBoundDecls.setPointer(body); }
+  BraceStmt *getBody() const { return BodyAndHasFallthrough.getPointer(); }
+  void setBody(BraceStmt *body) { BodyAndHasFallthrough.setPointer(body); }
 
   /// True if the case block declares any patterns with local variable bindings.
-  bool hasBoundDecls() const { return BodyAndHasBoundDecls.getInt(); }
+  bool hasBoundDecls() const { return CaseBodyVariables.has_value(); }
 
-  /// Get the source location of the 'case' or 'default' of the first label.
-  SourceLoc getLoc() const { return CaseLoc; }
+  /// Get the source location of the 'case', 'default', or 'catch' of the first
+  /// label.
+  SourceLoc getLoc() const { return ItemIntroducerLoc; }
 
   SourceLoc getStartLoc() const {
     if (UnknownAttrLoc.isValid())
@@ -1042,8 +1302,31 @@ public:
     return getLoc();
   }
   SourceLoc getEndLoc() const { return getBody()->getEndLoc(); }
+
+  SourceLoc getItemTerminatorLoc() const { return ItemTerminatorLoc; }
+
   SourceRange getLabelItemsRange() const {
-    return ColonLoc.isValid() ? SourceRange(getLoc(), ColonLoc) : getSourceRange();
+    switch (ParentKind) {
+    case CaseParentKind::Switch:
+      // The range extends from 'case' to the colon at the end.
+      return ItemTerminatorLoc.isValid()
+                 ? SourceRange(getLoc(), ItemTerminatorLoc)
+                 : getSourceRange();
+    case CaseParentKind::DoCatch: {
+      // The range extends from 'catch' to the end of the last non-implicit
+      // item.
+      auto items = getCaseLabelItems();
+      for (auto item = items.rbegin(), end = items.rend(); item != end;
+           ++item) {
+        auto itemEndLoc = item->getEndLoc();
+        if (itemEndLoc.isValid())
+          return SourceRange(getLoc(), itemEndLoc);
+      }
+      // Handle the 'catch {' case.
+      return SourceRange(getLoc(), getLoc());
+    }
+    }
+    llvm_unreachable("invalid parent kind");
   }
 
   bool isDefault() { return getCaseLabelItems()[0].isDefault(); }
@@ -1056,6 +1339,45 @@ public:
     return UnknownAttrLoc.isValid();
   }
 
+  /// Return an ArrayRef containing the case body variables of this CaseStmt.
+  ///
+  /// Asserts if case body variables was not explicitly initialized. In contexts
+  /// where one wants a non-asserting version, \see
+  /// getCaseBodyVariablesOrEmptyArray.
+  ArrayRef<VarDecl *> getCaseBodyVariables() const {
+    ArrayRef<VarDecl *> a = *CaseBodyVariables;
+    return a;
+  }
+
+  bool hasCaseBodyVariables() const { return CaseBodyVariables.has_value(); }
+
+  /// Return an MutableArrayRef containing the case body variables of this
+  /// CaseStmt.
+  ///
+  /// Asserts if case body variables was not explicitly initialized. In contexts
+  /// where one wants a non-asserting version, \see
+  /// getCaseBodyVariablesOrEmptyArray.
+  MutableArrayRef<VarDecl *> getCaseBodyVariables() {
+    return *CaseBodyVariables;
+  }
+
+  ArrayRef<VarDecl *> getCaseBodyVariablesOrEmptyArray() const {
+    if (!CaseBodyVariables)
+      return ArrayRef<VarDecl *>();
+    ArrayRef<VarDecl *> a = *CaseBodyVariables;
+    return a;
+  }
+
+  MutableArrayRef<VarDecl *> getCaseBodyVariablesOrEmptyArray() {
+    if (!CaseBodyVariables)
+      return MutableArrayRef<VarDecl *>();
+    return *CaseBodyVariables;
+  }
+
+  /// Find the next case statement within the same 'switch' or 'do-catch',
+  /// if there is one.
+  CaseStmt *findNextCaseStmt() const;
+
   static bool classof(const Stmt *S) { return S->getKind() == StmtKind::Case; }
 
   size_t numTrailingObjects(OverloadToken<CaseLabelItem>) const {
@@ -1063,7 +1385,7 @@ public:
   }
 
   size_t numTrailingObjects(OverloadToken<FallthroughStmt *>) const {
-    return hasFallthrough ? 1 : 0;
+    return hasFallthroughDest() ? 1 : 0;
   }
 };
 
@@ -1073,15 +1395,19 @@ class SwitchStmt final : public LabeledStmt,
   friend TrailingObjects;
 
   SourceLoc SwitchLoc, LBraceLoc, RBraceLoc;
+  /// The location of the last token in the 'switch' statement. For valid
+  /// 'switch' statements this is the same as \c RBraceLoc. If the '}' is
+  /// missing this points to the last token before the '}' was expected.
+  SourceLoc EndLoc;
   Expr *SubjectExpr;
 
   SwitchStmt(LabeledStmtInfo LabelInfo, SourceLoc SwitchLoc, Expr *SubjectExpr,
              SourceLoc LBraceLoc, unsigned CaseCount, SourceLoc RBraceLoc,
-             Optional<bool> implicit = None)
-    : LabeledStmt(StmtKind::Switch, getDefaultImplicitFlag(implicit, SwitchLoc),
-                  LabelInfo),
-      SwitchLoc(SwitchLoc), LBraceLoc(LBraceLoc), RBraceLoc(RBraceLoc),
-      SubjectExpr(SubjectExpr) {
+             SourceLoc EndLoc, llvm::Optional<bool> implicit = llvm::None)
+      : LabeledStmt(StmtKind::Switch,
+                    getDefaultImplicitFlag(implicit, SwitchLoc), LabelInfo),
+        SwitchLoc(SwitchLoc), LBraceLoc(LBraceLoc), RBraceLoc(RBraceLoc),
+        EndLoc(EndLoc), SubjectExpr(SubjectExpr) {
     Bits.SwitchStmt.CaseCount = CaseCount;
   }
 
@@ -1092,8 +1418,18 @@ public:
                             SourceLoc LBraceLoc,
                             ArrayRef<ASTNode> Cases,
                             SourceLoc RBraceLoc,
+                            SourceLoc EndLoc,
                             ASTContext &C);
-  
+
+  static SwitchStmt *createImplicit(LabeledStmtInfo LabelInfo,
+                                    Expr *SubjectExpr, ArrayRef<ASTNode> Cases,
+                                    ASTContext &C) {
+    return SwitchStmt::create(LabelInfo, /*SwitchLoc=*/SourceLoc(), SubjectExpr,
+                              /*LBraceLoc=*/SourceLoc(), Cases,
+                              /*RBraceLoc=*/SourceLoc(), /*EndLoc=*/SourceLoc(),
+                              C);
+  }
+
   /// Get the source location of the 'switch' keyword.
   SourceLoc getSwitchLoc() const { return SwitchLoc; }
   /// Get the source location of the opening brace.
@@ -1104,8 +1440,8 @@ public:
   SourceLoc getLoc() const { return SwitchLoc; }
 
   SourceLoc getStartLoc() const { return getLabelLocOrKeywordLoc(SwitchLoc); }
-  SourceLoc getEndLoc() const { return RBraceLoc; }
-  
+  SourceLoc getEndLoc() const { return EndLoc; }
+
   /// Get the subject expression of the switch.
   Expr *getSubjectExpr() const { return SubjectExpr; }
   void setSubjectExpr(Expr *e) { SubjectExpr = e; }
@@ -1117,10 +1453,10 @@ public:
 private:
   struct AsCaseStmtWithSkippingNonCaseStmts {
     AsCaseStmtWithSkippingNonCaseStmts() {}
-    Optional<CaseStmt*> operator()(const ASTNode &N) const {
+    llvm::Optional<CaseStmt *> operator()(const ASTNode &N) const {
       if (auto *CS = llvm::dyn_cast_or_null<CaseStmt>(N.dyn_cast<Stmt*>()))
         return CS;
-      return None;
+      return llvm::None;
     }
   };
 
@@ -1132,9 +1468,113 @@ public:
   AsCaseStmtRange getCases() const {
     return AsCaseStmtRange(getRawCases(), AsCaseStmtWithSkippingNonCaseStmts());
   }
-  
+
+  /// Retrieve the complete set of branches for this switch statement.
+  ArrayRef<Stmt *> getBranches(SmallVectorImpl<Stmt *> &scratch) const;
+
   static bool classof(const Stmt *S) {
     return S->getKind() == StmtKind::Switch;
+  }
+};
+
+/// DoCatchStmt - do statement with trailing 'catch' clauses.
+class DoCatchStmt final
+    : public LabeledStmt,
+      private llvm::TrailingObjects<DoCatchStmt, CaseStmt *> {
+  friend TrailingObjects;
+  friend class ExplicitCaughtTypeRequest;
+
+  DeclContext *DC;
+
+  SourceLoc DoLoc;
+
+  /// Location of the 'throws' token.
+  SourceLoc ThrowsLoc;
+
+  /// The error type that is being thrown.
+  TypeLoc ThrownType;
+
+  Stmt *Body;
+  ThrownErrorDestination RethrowDest;
+
+  DoCatchStmt(DeclContext *dc,LabeledStmtInfo labelInfo, SourceLoc doLoc,
+              SourceLoc throwsLoc, TypeLoc thrownType, Stmt *body,
+              ArrayRef<CaseStmt *> catches, llvm::Optional<bool> implicit)
+      : LabeledStmt(StmtKind::DoCatch, getDefaultImplicitFlag(implicit, doLoc),
+                    labelInfo),
+        DC(dc), DoLoc(doLoc), ThrowsLoc(throwsLoc), ThrownType(thrownType),
+        Body(body) {
+    Bits.DoCatchStmt.NumCatches = catches.size();
+    std::uninitialized_copy(catches.begin(), catches.end(),
+                            getTrailingObjects<CaseStmt *>());
+    for (auto *catchStmt : getCatches())
+      catchStmt->setParentStmt(this);
+  }
+
+public:
+  static DoCatchStmt *create(DeclContext *dc,
+                             LabeledStmtInfo labelInfo,
+                             SourceLoc doLoc,
+                             SourceLoc throwsLoc, TypeLoc thrownType,
+                             Stmt *body,
+                             ArrayRef<CaseStmt *> catches,
+                             llvm::Optional<bool> implicit = llvm::None);
+
+  DeclContext *getDeclContext() const { return DC; }
+
+  SourceLoc getDoLoc() const { return DoLoc; }
+
+  /// Retrieve the location of the 'throws' keyword, if present.
+  SourceLoc getThrowsLoc() const { return ThrowsLoc; }
+
+  SourceLoc getStartLoc() const { return getLabelLocOrKeywordLoc(DoLoc); }
+  SourceLoc getEndLoc() const { return getCatches().back()->getEndLoc(); }
+
+  /// Retrieves the type representation for the caught type.
+  TypeRepr *getCaughtTypeRepr() const {
+    return ThrownType.getTypeRepr();
+  }
+
+  // Get the explicitly-specified caught error type.
+  Type getExplicitCaughtType() const;
+
+  Stmt *getBody() const { return Body; }
+  void setBody(Stmt *s) { Body = s; }
+
+  ArrayRef<CaseStmt *> getCatches() const {
+    return {getTrailingObjects<CaseStmt *>(), Bits.DoCatchStmt.NumCatches};
+  }
+  MutableArrayRef<CaseStmt *> getMutableCatches() {
+    return {getTrailingObjects<CaseStmt *>(), Bits.DoCatchStmt.NumCatches};
+  }
+
+  /// Retrieve the complete set of branches for this do-catch statement.
+  ArrayRef<Stmt *> getBranches(SmallVectorImpl<Stmt *> &scratch) const;
+
+  /// Does this statement contain a syntactically exhaustive catch
+  /// clause?
+  ///
+  /// Note that an exhaustive do/catch statement can still throw
+  /// errors out of its catch block(s).
+  bool isSyntacticallyExhaustive() const;
+
+  // Determines the type of the error that is thrown out of the 'do' block
+  // and caught by the various 'catch' clauses. If this the catch clauses
+  // aren't exhausive, this is also the type of the error that is implicitly
+  // rethrown.
+  Type getCaughtErrorType() const;
+
+  /// Retrieves the rethrown error and its conversion to the error type
+  /// expected by the enclosing context.
+  ThrownErrorDestination rethrows() const { return RethrowDest; }
+
+  void setRethrows(ThrownErrorDestination rethrows) {
+    assert(!RethrowDest);
+    RethrowDest = rethrows;
+  }
+
+  static bool classof(const Stmt *S) {
+    return S->getKind() == StmtKind::DoCatch;
   }
 };
 
@@ -1143,13 +1583,13 @@ class BreakStmt : public Stmt {
   SourceLoc Loc;
   Identifier TargetName; // Named target statement, if specified in the source.
   SourceLoc TargetLoc;
-  LabeledStmt *Target = nullptr;  // Target stmt, wired up by Sema.
+  DeclContext *DC;
+
 public:
   BreakStmt(SourceLoc Loc, Identifier TargetName, SourceLoc TargetLoc,
-            Optional<bool> implicit = None)
-    : Stmt(StmtKind::Break, getDefaultImplicitFlag(implicit, Loc)), Loc(Loc),
-      TargetName(TargetName), TargetLoc(TargetLoc) {
-  }
+            DeclContext *DC, llvm::Optional<bool> implicit = llvm::None)
+      : Stmt(StmtKind::Break, getDefaultImplicitFlag(implicit, Loc)), Loc(Loc),
+        TargetName(TargetName), TargetLoc(TargetLoc), DC(DC) {}
 
   SourceLoc getLoc() const { return Loc; }
 
@@ -1158,15 +1598,15 @@ public:
   SourceLoc getTargetLoc() const { return TargetLoc; }
   void setTargetLoc(SourceLoc L) { TargetLoc = L; }
 
-  // Manipulate the target loop/switch that is bring broken out of.  This is set
-  // by sema during type checking.
-  void setTarget(LabeledStmt *LS) { Target = LS; }
-  LabeledStmt *getTarget() const { return Target; }
+  /// Retrieve the target statement being jumped out of.
+  LabeledStmt *getTarget() const;
 
   SourceLoc getStartLoc() const { return Loc; }
   SourceLoc getEndLoc() const {
     return (TargetLoc.isValid() ? TargetLoc : Loc);
   }
+
+  DeclContext *getDeclContext() const { return DC; }
 
   static bool classof(const Stmt *S) {
     return S->getKind() == StmtKind::Break;
@@ -1178,24 +1618,21 @@ class ContinueStmt : public Stmt {
   SourceLoc Loc;
   Identifier TargetName; // Named target statement, if specified in the source.
   SourceLoc TargetLoc;
-  LabeledStmt *Target = nullptr;
+  DeclContext *DC;
 
 public:
   ContinueStmt(SourceLoc Loc, Identifier TargetName, SourceLoc TargetLoc,
-               Optional<bool> implicit = None)
-    : Stmt(StmtKind::Continue, getDefaultImplicitFlag(implicit, Loc)), Loc(Loc),
-      TargetName(TargetName), TargetLoc(TargetLoc) {
-  }
+               DeclContext *DC, llvm::Optional<bool> implicit = llvm::None)
+      : Stmt(StmtKind::Continue, getDefaultImplicitFlag(implicit, Loc)),
+        Loc(Loc), TargetName(TargetName), TargetLoc(TargetLoc), DC(DC) {}
 
   Identifier getTargetName() const { return TargetName; }
   void setTargetName(Identifier N) { TargetName = N; }
   SourceLoc getTargetLoc() const { return TargetLoc; }
   void setTargetLoc(SourceLoc L) { TargetLoc = L; }
 
-  // Manipulate the target loop that is bring continued.  This is set by sema
-  // during type checking.
-  void setTarget(LabeledStmt *LS) { Target = LS; }
-  LabeledStmt *getTarget() const { return Target; }
+  /// Retrieve the target statement being jumped to.
+  LabeledStmt *getTarget() const;
   
   SourceLoc getLoc() const { return Loc; }
   
@@ -1203,6 +1640,8 @@ public:
   SourceLoc getEndLoc() const {
     return (TargetLoc.isValid() ? TargetLoc : Loc);
   }
+
+  DeclContext *getDeclContext() const { return DC; }
 
   static bool classof(const Stmt *S) {
     return S->getKind() == StmtKind::Continue;
@@ -1217,15 +1656,14 @@ class FailStmt : public Stmt {
 
 public:
   FailStmt(SourceLoc returnLoc, SourceLoc nilLoc,
-           Optional<bool> implicit = None)
-    : Stmt(StmtKind::Fail, getDefaultImplicitFlag(implicit, returnLoc)),
-      ReturnLoc(returnLoc), NilLoc(nilLoc)
-  {}
-  
-  SourceLoc getLoc() const { return ReturnLoc; }
-  
-  SourceRange getSourceRange() const { return SourceRange(ReturnLoc, NilLoc); }
-  
+           llvm::Optional<bool> implicit = llvm::None)
+      : Stmt(StmtKind::Fail, getDefaultImplicitFlag(implicit, returnLoc)),
+        ReturnLoc(returnLoc), NilLoc(nilLoc) {}
+
+  SourceRange getSourceRange() const {
+    return SourceRange::combine(ReturnLoc, NilLoc);
+  }
+
   static bool classof(const Stmt *S) {
     return S->getKind() == StmtKind::Fail;
   }
@@ -1257,6 +1695,45 @@ public:
   }
 };
 
+/// DiscardStmt - Consumes a noncopyable value and performs memberwise
+/// destruction of unconsumed fields, without invoking its deinit. Only
+/// supported form is "discard self".
+class DiscardStmt : public Stmt {
+  Expr *SubExpr;
+  SourceLoc DiscardLoc;
+  AbstractFunctionDecl *InnermostMethod;
+
+public:
+  explicit DiscardStmt(SourceLoc discardLoc, Expr *subExpr)
+      : Stmt(StmtKind::Discard, /*Implicit=*/false),
+        SubExpr(subExpr), DiscardLoc(discardLoc), InnermostMethod(nullptr) {}
+
+  /// Location of the 'discard' keyword.
+  SourceLoc getDiscardLoc() const { return DiscardLoc; }
+
+  SourceLoc getStartLoc() const { return DiscardLoc; }
+  SourceLoc getEndLoc() const;
+  SourceRange getSourceRange() const {
+    return SourceRange(DiscardLoc, getEndLoc());
+  }
+
+  Expr *getSubExpr() const { return SubExpr; }
+  void setSubExpr(Expr *subExpr) { SubExpr = subExpr; }
+
+  /// Retrieves the saved innermost method / accessor decl in which this Stmt
+  /// resides. Corresponds to \c DeclContext::getInnermostMethodContext.
+  /// Must be saved with \c setInnermostMethodContext during typechecking.
+  AbstractFunctionDecl *getInnermostMethodContext() { return InnermostMethod; }
+  void setInnermostMethodContext(AbstractFunctionDecl *afd) {
+    assert(afd); // shouldn't be clearing this
+    InnermostMethod = afd;
+  }
+
+  static bool classof(const Stmt *S) {
+    return S->getKind() == StmtKind::Discard;
+  }
+};
+
 /// PoundAssertStmt - Asserts that a condition is true, at compile time.
 class PoundAssertStmt : public Stmt {
   SourceRange Range;
@@ -1281,6 +1758,15 @@ class PoundAssertStmt : public Stmt {
     return S->getKind() == StmtKind::PoundAssert;
   }
 };
+
+SourceLoc extractNearestSourceLoc(const Stmt *stmt);
+
+inline void simple_display(llvm::raw_ostream &out, const Stmt *S) {
+  if (S)
+    out << Stmt::getKindName(S->getKind());
+  else
+    out << "(null)";
+}
 
 } // end namespace swift
 

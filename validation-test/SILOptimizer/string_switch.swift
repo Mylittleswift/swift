@@ -1,9 +1,11 @@
 // RUN: %target-build-swift -O %s -module-name=test -Xllvm -sil-disable-pass=FunctionSignatureOpts -o %t.out
 // RUN: %target-build-swift -O %s -module-name=test -Xllvm -sil-disable-pass=FunctionSignatureOpts -emit-sil | %FileCheck %s
+// RUN: %target-codesign %t.out
 // RUN: %target-run %t.out
 // REQUIRES: swift_stdlib_no_asserts,optimized_stdlib
 // REQUIRES: stress_test
-// UNSUPPORTED: nonatomic_rc
+// REQUIRES: executable_test
+// UNSUPPORTED: threading_none
 
 import StdlibUnittest
 

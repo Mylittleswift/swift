@@ -8,14 +8,14 @@ private class A {
 }
 
 // CHECK-LABEL: deinit_in_vtable.(A in {{.*}}).__deallocating_deinit
-// CHECK: sil private @[[A:.*]] :
+// CHECK: sil private {{.*}}@[[A:.*]] :
 
 private class B : A {
 	override func foo() -> Int { return 1 }
 }
 
 // CHECK-LABEL: deinit_in_vtable.(B in {{.*}}).__deallocating_deinit
-// CHECK: sil private @[[B:.*]] :
+// CHECK: sil private {{.*}}@[[B:.*]] :
 
 @inline(never)
 private func testfunc(_ a: A) -> Int {
@@ -31,9 +31,9 @@ public func testmain() {
 // function elimination
 
 // CHECK-LABEL: sil_vtable A
-// CHECK: A.deinit!deallocator.1: @[[A]]
+// CHECK: A.deinit!deallocator: @[[A]]
 
 // CHECK-LABEL: sil_vtable B
 // CHECK-NOT: A.deinit
-// CHECK: B.deinit!deallocator.1: @[[B]]
+// CHECK: B.deinit!deallocator: @[[B]]
 

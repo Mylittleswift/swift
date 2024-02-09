@@ -19,8 +19,7 @@
 
 #include "swift/Basic/ArrayRefView.h"
 #include "swift/AST/ASTContext.h"
-#include "swift/AST/Type.h"
-#include "llvm/ADT/SmallVector.h"
+#include "swift/AST/Types.h"
 
 namespace swift {
   class ProtocolDecl;
@@ -32,12 +31,15 @@ struct ExistentialLayout {
 
   ExistentialLayout() {
     hasExplicitAnyObject = false;
-    containsNonObjCProtocol = false;
-    singleProtocol = nullptr;
+    containsObjCProtocol = false;
+    containsSwiftProtocol = false;
+    containsParameterized = false;
+    representsAnyObject = false;
   }
 
-  ExistentialLayout(ProtocolType *type);
-  ExistentialLayout(ProtocolCompositionType *type);
+  ExistentialLayout(CanProtocolType type);
+  ExistentialLayout(CanProtocolCompositionType type);
+  ExistentialLayout(CanParameterizedProtocolType type);
 
   /// The explicit superclass constraint, if any.
   Type explicitSuperclass;
@@ -45,8 +47,17 @@ struct ExistentialLayout {
   /// Whether the existential contains an explicit '& AnyObject' constraint.
   bool hasExplicitAnyObject : 1;
 
-  /// Whether any protocol members are non-@objc.
-  bool containsNonObjCProtocol : 1;
+  /// Whether any protocol members are @objc.
+  bool containsObjCProtocol : 1;
+
+  /// Whether any protocol members require a witness table.
+  bool containsSwiftProtocol : 1;
+
+  /// Whether any protocol members are parameterized.s
+  bool containsParameterized : 1;
+
+  /// Whether this layout is the canonical layout for plain-old 'AnyObject'.
+  bool representsAnyObject : 1;
 
   /// Return the kind of this existential (class/error/opaque).
   Kind getKind() {
@@ -61,14 +72,14 @@ struct ExistentialLayout {
     return Kind::Opaque;
   }
 
-  bool isAnyObject() const;
+  bool isAnyObject() const { return representsAnyObject; }
 
   bool isObjC() const {
     // FIXME: Does the superclass have to be @objc?
     return ((explicitSuperclass ||
              hasExplicitAnyObject ||
-             !getProtocols().empty()) &&
-            !containsNonObjCProtocol);
+             containsObjCProtocol) &&
+            !containsSwiftProtocol);
   }
 
   /// Whether the existential requires a class, either via an explicit
@@ -87,28 +98,21 @@ struct ExistentialLayout {
   /// constraints?
   bool isErrorExistential() const;
 
-  static inline ProtocolType *getProtocolType(const Type &Ty) {
-    return cast<ProtocolType>(Ty.getPointer());
-  }
-  typedef ArrayRefView<Type,ProtocolType*,getProtocolType> ProtocolTypeArrayRef;
-
-  ProtocolTypeArrayRef getProtocols() const & {
-    if (singleProtocol)
-      return llvm::makeArrayRef(&singleProtocol, 1);
+  ArrayRef<ProtocolDecl*> getProtocols() const & {
     return protocols;
   }
-  /// The returned ArrayRef may point directly to \c this->singleProtocol, so
+  /// The returned ArrayRef points to internal storage, so
   /// calling this on a temporary is likely to be incorrect.
-  ProtocolTypeArrayRef getProtocols() const && = delete;
+  ArrayRef<ProtocolDecl*> getProtocols() const && = delete;
 
   LayoutConstraint getLayoutConstraint() const;
 
 private:
-  // The protocol from a ProtocolType
-  Type singleProtocol;
+  SmallVector<ProtocolDecl *, 4> protocols;
 
-  /// Zero or more protocol constraints from a ProtocolCompositionType
-  ArrayRef<Type> protocols;
+  /// Zero or more primary associated type requirements from a
+  /// ParameterizedProtocolType
+  ArrayRef<Type> sameTypeRequirements;
 };
 
 }

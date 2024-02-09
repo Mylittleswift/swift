@@ -14,16 +14,21 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/ABI/MetadataValues.h"
-#include "swift/Demangling/Demangle.h"
 #include "swift/Basic/LLVMInitialize.h"
-#include "swift/Reflection/ReflectionContext.h"
-#include "swift/Reflection/TypeRef.h"
-#include "swift/Reflection/TypeRefBuilder.h"
+#include "swift/Demangling/Demangle.h"
+#include "swift/RemoteInspection/ReflectionContext.h"
+#include "swift/RemoteInspection/TypeRef.h"
+#include "swift/RemoteInspection/TypeRefBuilder.h"
+#include "swift/StaticMirror/ObjectFileContext.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Object/Archive.h"
-#include "llvm/Object/MachOUniversal.h"
+#include "llvm/Object/COFF.h"
 #include "llvm/Object/ELF.h"
 #include "llvm/Object/ELFObjectFile.h"
+#include "llvm/Object/MachOUniversal.h"
+#include "llvm/Object/RelocationResolver.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Error.h"
 
 #if defined(_WIN32)
 #include <io.h>
@@ -31,201 +36,149 @@
 #include <unistd.h>
 #endif
 
-#include <algorithm>
-#include <iostream>
-#include <csignal>
+#if defined(__APPLE__) && defined(__MACH__)
+#include <TargetConditionals.h>
+#endif
 
+#include <algorithm>
+#include <csignal>
+#include <iostream>
+
+using llvm::ArrayRef;
 using llvm::dyn_cast;
 using llvm::StringRef;
-using llvm::ArrayRef;
 using namespace llvm::object;
 
 using namespace swift;
 using namespace swift::reflection;
+using namespace swift::static_mirror;
 using namespace swift::remote;
 using namespace Demangle;
 
-enum class ActionType {
-  DumpReflectionSections,
-  DumpTypeLowering
-};
+enum class ActionType { DumpReflectionSections, DumpTypeLowering };
 
 namespace options {
-static llvm::cl::opt<ActionType>
-Action(llvm::cl::desc("Mode:"),
-       llvm::cl::values(
-         clEnumValN(ActionType::DumpReflectionSections,
-                    "dump-reflection-sections",
-                    "Dump the field reflection section"),
-         clEnumValN(ActionType::DumpTypeLowering,
-                    "dump-type-lowering",
-                    "Dump the field layout for typeref strings read from stdin")),
-       llvm::cl::init(ActionType::DumpReflectionSections));
+static llvm::cl::opt<ActionType> Action(
+    llvm::cl::desc("Mode:"),
+    llvm::cl::values(
+        clEnumValN(ActionType::DumpReflectionSections,
+                   "dump-reflection-sections",
+                   "Dump the field reflection section"),
+        clEnumValN(
+            ActionType::DumpTypeLowering, "dump-type-lowering",
+            "Dump the field layout for typeref strings read from stdin")),
+    llvm::cl::init(ActionType::DumpReflectionSections));
 
 static llvm::cl::list<std::string>
-BinaryFilename("binary-filename", llvm::cl::desc("Filenames of the binary files"),
-               llvm::cl::OneOrMore);
+BinaryFilename(llvm::cl::Positional,
+                   llvm::cl::desc("Filenames of the binary files"),
+                   llvm::cl::OneOrMore);
 
 static llvm::cl::opt<std::string>
-Architecture("arch", llvm::cl::desc("Architecture to inspect in the binary"),
-             llvm::cl::Required);
+    Architecture("arch",
+                 llvm::cl::desc("Architecture to inspect in the binary"),
+                 llvm::cl::Required);
+
+#if SWIFT_OBJC_INTEROP
+static llvm::cl::opt<bool> DisableObjCInterop(
+    "no-objc-interop",
+    llvm::cl::desc("Disable Objective-C interoperability support"));
+#endif
 } // end namespace options
 
-template<typename T>
-static T unwrap(llvm::Expected<T> value) {
-  if (value)
-    return std::move(value.get());
-  std::cerr << "swift-reflection-test error: " << toString(value.takeError()) << "\n";
-  exit(EXIT_FAILURE);
-}
-
-using NativeReflectionContext
-    = swift::reflection::ReflectionContext<External<RuntimeTarget<sizeof(uintptr_t)>>>;
-
-class ObjectMemoryReader : public MemoryReader {
-  const std::vector<const ObjectFile *> &ObjectFiles;
-public:
-  ObjectMemoryReader(const std::vector<const ObjectFile *> &ObjectFiles)
-    : ObjectFiles(ObjectFiles)
-  {
-  }
-
-  bool queryDataLayout(DataLayoutQueryType type, void *inBuffer,
-                       void *outBuffer) override {
-    switch (type) {
-      case DLQ_GetPointerSize: {
-        auto result = static_cast<uint8_t *>(outBuffer);
-        *result = sizeof(void *);
-        return true;
-      }
-      case DLQ_GetSizeSize: {
-        auto result = static_cast<uint8_t *>(outBuffer);
-        *result = sizeof(size_t);
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  RemoteAddress getSymbolAddress(const std::string &name) override {
-    for (auto &object : ObjectFiles) {
-      for (auto &symbol : object->symbols()) {
-        if (unwrap(symbol.getName()).equals(name)) {
-          // TODO: Account for offset in ELF binaries
-          return RemoteAddress(unwrap(symbol.getAddress()));
-        }
-      }
-    }
-    return RemoteAddress(nullptr);
-  }
-  
-  bool isAddressValid(RemoteAddress addr, uint64_t size) const {
-    // TODO: Account for offset in ELF binaries
-
-    auto src = addr.getAddressData();
-    
-    // Check that the source is in bounds of one of the object files.
-    for (auto &object : ObjectFiles) {
-      if ((uint64_t)object->getData().bytes_begin() <= src
-          && src + size <= (uint64_t)object->getData().bytes_end()) {
-        return true;
-      }
-    }
-    return false;
-  }
-  
-  ReadBytesResult readBytes(RemoteAddress address, uint64_t size) override {
-    if (!isAddressValid(address, size))
-      return ReadBytesResult(nullptr, [](const void *){});
-
-    // TODO: Account for offset in ELF binaries
-    return ReadBytesResult((const void *)address.getAddressData(), [](const void *) {});
-  }
-  
-  bool readString(RemoteAddress address, std::string &dest) override {
-    if (!isAddressValid(address, 1))
-      return false;
-    // TODO: Account for running off the edge of an object, offset in ELF
-    // binaries
-    auto cString = StringRef((const char*)address.getAddressData());
-    dest.append(cString.begin(), cString.end());
-    return true;
-  }
-};
-
-static int doDumpReflectionSections(ArrayRef<std::string> binaryFilenames,
-                                    StringRef arch,
-                                    ActionType action,
-                                    std::ostream &OS) {
+static int doDumpReflectionSections(ArrayRef<std::string> BinaryFilenames,
+                                    StringRef Arch, ActionType Action,
+                                    std::ostream &stream) {
   // Note: binaryOrError and objectOrError own the memory for our ObjectFile;
   // once they go out of scope, we can no longer do anything.
-  std::vector<OwningBinary<Binary>> binaryOwners;
-  std::vector<std::unique_ptr<ObjectFile>> objectOwners;
-  std::vector<const ObjectFile *> objectFiles;
+  std::vector<OwningBinary<Binary>> BinaryOwners;
+  std::vector<std::unique_ptr<ObjectFile>> ObjectOwners;
+  std::vector<const ObjectFile *> ObjectFiles;
 
-  // Construct the ReflectionContext.
-  // FIXME: Should pick a Runtime template based on the bitwidth of the target
-  // architecture.
-  auto reader = std::make_shared<ObjectMemoryReader>(objectFiles);
-  NativeReflectionContext context(std::move(reader));
-
-  for (auto binaryFilename : binaryFilenames) {
-    auto binaryOwner = unwrap(createBinary(binaryFilename));
-    Binary *binaryFile = binaryOwner.getBinary();
+  for (const std::string &BinaryFilename : BinaryFilenames) {
+    auto BinaryOwner = unwrap(createBinary(BinaryFilename));
+    Binary *BinaryFile = BinaryOwner.getBinary();
 
     // The object file we are doing lookups in -- either the binary itself, or
     // a particular slice of a universal binary.
-    std::unique_ptr<ObjectFile> objectOwner;
-    const ObjectFile *objectFile;
-
-    if (auto o = dyn_cast<ObjectFile>(binaryFile)) {
-      objectFile = o;
-    } else {
-      auto universal = cast<MachOUniversalBinary>(binaryFile);
-      objectOwner = unwrap(universal->getObjectForArch(arch));
-      objectFile = objectOwner.get();
+    std::unique_ptr<ObjectFile> ObjectOwner;
+    const ObjectFile *O = dyn_cast<ObjectFile>(BinaryFile);
+    if (!O) {
+      auto Universal = cast<MachOUniversalBinary>(BinaryFile);
+      ObjectOwner = unwrap(Universal->getMachOObjectForArch(Arch));
+      O = ObjectOwner.get();
     }
 
     // Retain the objects that own section memory
-    binaryOwners.push_back(std::move(binaryOwner));
-    objectOwners.push_back(std::move(objectOwner));
-    objectFiles.push_back(objectFile);
-
-    auto startAddress = (uintptr_t)objectFile->getData().begin();
-    context.addImage(RemoteAddress(startAddress));
+    BinaryOwners.push_back(std::move(BinaryOwner));
+    ObjectOwners.push_back(std::move(ObjectOwner));
+    ObjectFiles.push_back(O);
   }
 
-  switch (action) {
+#if SWIFT_OBJC_INTEROP
+  bool ObjCInterop = !options::DisableObjCInterop;
+#else
+  bool ObjCInterop = false;
+#endif
+  auto context = makeReflectionContextForObjectFiles(ObjectFiles, ObjCInterop);
+  auto &builder = context->Builder;
+
+  switch (Action) {
   case ActionType::DumpReflectionSections:
     // Dump everything
-    context.getBuilder().dumpAllSections(OS);
+    switch (context->PointerSize) {
+    case 4:
+#if SWIFT_OBJC_INTEROP
+      if (!options::DisableObjCInterop)
+        builder.dumpAllSections<WithObjCInterop, 4>(stream);
+      else
+        builder.dumpAllSections<NoObjCInterop, 4>(stream);
+#else
+      builder.dumpAllSections<NoObjCInterop, 4>(stream);
+#endif
+      break;
+    case 8:
+#if SWIFT_OBJC_INTEROP
+      if (!options::DisableObjCInterop)
+        builder.dumpAllSections<WithObjCInterop, 8>(stream);
+      else
+        builder.dumpAllSections<NoObjCInterop, 8>(stream);
+#else
+      builder.dumpAllSections<NoObjCInterop, 8>(stream);
+#endif
+      break;
+    default:
+      fputs("unsupported word size in object file\n", stderr);
+      abort();
+    }
     break;
   case ActionType::DumpTypeLowering: {
-    for (std::string line; std::getline(std::cin, line); ) {
-      if (line.empty())
+    for (std::string Line; std::getline(std::cin, Line);) {
+      if (Line.empty())
         continue;
 
-      if (StringRef(line).startswith("//"))
+      if (StringRef(Line).startswith("//"))
         continue;
 
       Demangle::Demangler Dem;
-      auto demangled = Dem.demangleType(line);
-      auto *typeRef = swift::Demangle::decodeMangledType(context.getBuilder(),
-                                                         demangled);
-      if (typeRef == nullptr) {
-        OS << "Invalid typeref: " << line << "\n";
+      auto Demangled = Dem.demangleType(Line);
+      auto Result = swift::Demangle::decodeMangledType(builder, Demangled);
+      if (Result.isError()) {
+        auto *error = Result.getError();
+        char *str = error->copyErrorString();
+        stream << "Invalid typeref:" << Line << " - " << str << "\n";
+        error->freeErrorString(str);
         continue;
       }
+      auto TypeRef = Result.getType();
 
-      typeRef->dump(OS);
-      auto *typeInfo =
-        context.getBuilder().getTypeConverter().getTypeInfo(typeRef);
-      if (typeInfo == nullptr) {
-        OS << "Invalid lowering\n";
+      TypeRef->dump(stream);
+      auto *TypeInfo = builder.getTypeConverter().getTypeInfo(TypeRef, nullptr);
+      if (TypeInfo == nullptr) {
+        stream << "Invalid lowering\n";
         continue;
       }
-      typeInfo->dump(OS);
+      TypeInfo->dump(stream);
     }
     break;
   }
@@ -238,8 +191,6 @@ int main(int argc, char *argv[]) {
   PROGRAM_START(argc, argv);
   llvm::cl::ParseCommandLineOptions(argc, argv, "Swift Reflection Dump\n");
   return doDumpReflectionSections(options::BinaryFilename,
-                                  options::Architecture,
-                                  options::Action,
+                                  options::Architecture, options::Action,
                                   std::cout);
 }
-

@@ -16,8 +16,8 @@
 
 #include "Outlining.h"
 
-#include "swift/AST/GenericEnvironment.h"
 #include "Explosion.h"
+#include "GenOpaque.h"
 #include "GenProto.h"
 #include "IRGenFunction.h"
 #include "IRGenMangler.h"
@@ -25,6 +25,9 @@
 #include "LoadableTypeInfo.h"
 #include "LocalTypeDataKind.h"
 #include "MetadataRequest.h"
+#include "swift/AST/GenericEnvironment.h"
+#include "swift/AST/IRGenOptions.h"
+#include "swift/SIL/SILModule.h"
 
 using namespace swift;
 using namespace irgen;
@@ -34,6 +37,10 @@ void OutliningMetadataCollector::collectTypeMetadataForLayout(SILType type) {
   if (!type.hasArchetype()) {
     return;
   }
+
+  // Substitute opaque types if allowed.
+  type =
+      IGF.IGM.substOpaqueTypesWithUnderlyingTypes(type, CanGenericSignature());
 
   auto formalType = type.getASTType();
   auto &ti = IGF.IGM.getTypeInfoForLowered(formalType);
@@ -106,34 +113,59 @@ void OutliningMetadataCollector::bindMetadataParameters(IRGenFunction &IGF,
 std::pair<CanType, CanGenericSignature>
 irgen::getTypeAndGenericSignatureForManglingOutlineFunction(SILType type) {
   auto loweredType = type.getASTType();
-  if (loweredType->hasArchetype()) {
-    GenericEnvironment *env = nullptr;
-    loweredType.findIf([&env](Type t) -> bool {
-        if (auto arch = t->getAs<ArchetypeType>()) {
-          auto root = arch->getRoot();
-          if (!isa<PrimaryArchetypeType>(root))
-            return false;
-          env = root->getGenericEnvironment();
-          return true;
-        }
-        return false;
-      });
-    assert(env && "has archetype but no archetype?!");
-    return {loweredType->mapTypeOutOfContext()->getCanonicalType(),
-            env->getGenericSignature()->getCanonicalSignature()};
-  }
-  return {loweredType, nullptr};
+  if (!loweredType->hasArchetype()) return {loweredType, nullptr};
+
+  // Find a non-local, non-opaque archetype in the type and pull out
+  // its generic environment.
+  // TODO: we ought to be able to usefully minimize this
+
+  GenericEnvironment *env = nullptr;
+  loweredType.findIf([&env](CanType t) -> bool {
+      if (auto arch = dyn_cast<ArchetypeType>(t)) {
+        if (!isa<PrimaryArchetypeType>(arch) &&
+            !isa<PackArchetypeType>(arch))
+          return false;
+        env = arch->getGenericEnvironment();
+        return true;
+      }
+      return false;
+    });
+  assert(env && "has archetype but no archetype?!");
+  return {loweredType->mapTypeOutOfContext()->getCanonicalType(),
+          env->getGenericSignature().getCanonicalSignature()};
 }
 
-void TypeInfo::callOutlinedCopy(IRGenFunction &IGF,
-                                Address dest, Address src, SILType T,
-                                IsInitialization_t isInit,
+void TypeInfo::callOutlinedCopy(IRGenFunction &IGF, Address dest, Address src,
+                                SILType T, IsInitialization_t isInit,
                                 IsTake_t isTake) const {
-  OutliningMetadataCollector collector(IGF);
-  if (T.hasArchetype()) {
-    collectMetadataForOutlining(collector, T);
+  if (!T.hasLocalArchetype() &&
+      !IGF.outliningCanCallValueWitnesses()) {
+    OutliningMetadataCollector collector(IGF);
+    if (T.hasArchetype()) {
+      collectMetadataForOutlining(collector, T);
+    }
+    collector.emitCallToOutlinedCopy(dest, src, T, *this, isInit, isTake);
+    return;
   }
-  collector.emitCallToOutlinedCopy(dest, src, T, *this, isInit, isTake);
+
+  if (!T.hasArchetype()) {
+    // Call the outlined copy function (the implementation will call vwt in this
+    // case).
+    OutliningMetadataCollector collector(IGF);
+    collector.emitCallToOutlinedCopy(dest, src, T, *this, isInit, isTake);
+    return;
+  }
+
+  if (isInit == IsInitialization && isTake == IsTake) {
+    return emitInitializeWithTakeCall(IGF, T, dest, src);
+  } else if (isInit == IsInitialization && isTake == IsNotTake) {
+    return emitInitializeWithCopyCall(IGF, T, dest, src);
+  } else if (isInit == IsNotInitialization && isTake == IsTake) {
+    return emitAssignWithTakeCall(IGF, T, dest, src);
+  } else if (isInit == IsNotInitialization && isTake == IsNotTake) {
+    return emitAssignWithCopyCall(IGF, T, dest, src);
+  }
+  llvm_unreachable("unknown case");
 }
 
 void OutliningMetadataCollector::emitCallToOutlinedCopy(
@@ -162,8 +194,39 @@ void OutliningMetadataCollector::emitCallToOutlinedCopy(
       IGF.IGM.getOrCreateOutlinedAssignWithCopyFunction(T, ti, *this);
   }
 
-  llvm::CallInst *call = IGF.Builder.CreateCall(outlinedFn, args);
+  llvm::CallInst *call = IGF.Builder.CreateCall(
+      cast<llvm::Function>(outlinedFn)->getFunctionType(), outlinedFn, args);
   call->setCallingConv(IGF.IGM.DefaultCC);
+}
+
+static bool needsSpecialOwnershipHandling(SILType t) {
+  auto astType = t.getASTType();
+  auto ref = dyn_cast<ReferenceStorageType>(astType);
+  if (!ref) {
+    return false;
+  }
+  return ref->getOwnership() != ReferenceOwnership::Strong;
+}
+
+static bool canUseValueWitnessForValueOp(IRGenModule &IGM, SILType T) {
+  if (!IGM.getSILModule().isTypeMetadataForLayoutAccessible(T))
+    return false;
+
+  // No value witness tables in embedded Swift.
+  if (IGM.Context.LangOpts.hasFeature(Feature::Embedded))
+    return false;
+
+  // It is not a good code size trade-off to instantiate a metatype for
+  // existentials, and also does not back-deploy gracefully in the case of
+  // constrained protocols.
+  if (T.getASTType()->isExistentialType())
+    return false;
+
+  if (needsSpecialOwnershipHandling(T))
+    return false;
+  if (T.getASTType()->hasDynamicSelfType())
+    return false;
+  return true;
 }
 
 llvm::Constant *IRGenModule::getOrCreateOutlinedInitializeWithTakeFunction(
@@ -172,12 +235,18 @@ llvm::Constant *IRGenModule::getOrCreateOutlinedInitializeWithTakeFunction(
   auto manglingBits = getTypeAndGenericSignatureForManglingOutlineFunction(T);
   auto funcName =
     IRGenMangler().mangleOutlinedInitializeWithTakeFunction(manglingBits.first,
-                                                           manglingBits.second);
+        manglingBits.second, collector.IGF.isPerformanceConstraint);
 
-  return getOrCreateOutlinedCopyAddrHelperFunction(T, ti, collector, funcName,
-      [](IRGenFunction &IGF, Address dest, Address src,
-         SILType T, const TypeInfo &ti) {
-        ti.initializeWithTake(IGF, dest, src, T, true);
+  return getOrCreateOutlinedCopyAddrHelperFunction(
+      T, ti, collector, funcName,
+      [this](IRGenFunction &IGF, Address dest, Address src, SILType T,
+         const TypeInfo &ti) {
+        if (!IGF.outliningCanCallValueWitnesses() ||
+            T.hasArchetype() || !canUseValueWitnessForValueOp(*this, T)) {
+          ti.initializeWithTake(IGF, dest, src, T, true);
+        } else {
+          emitInitializeWithTakeCall(IGF, T, dest, src);
+        }
       });
 }
 
@@ -187,12 +256,18 @@ llvm::Constant *IRGenModule::getOrCreateOutlinedInitializeWithCopyFunction(
   auto manglingBits = getTypeAndGenericSignatureForManglingOutlineFunction(T);
   auto funcName =
     IRGenMangler().mangleOutlinedInitializeWithCopyFunction(manglingBits.first,
-                                                           manglingBits.second);
+        manglingBits.second, collector.IGF.isPerformanceConstraint);
 
-  return getOrCreateOutlinedCopyAddrHelperFunction(T, ti, collector, funcName,
-      [](IRGenFunction &IGF, Address dest, Address src,
-         SILType T, const TypeInfo &ti) {
-        ti.initializeWithCopy(IGF, dest, src, T, true);
+  return getOrCreateOutlinedCopyAddrHelperFunction(
+      T, ti, collector, funcName,
+      [this](IRGenFunction &IGF, Address dest, Address src, SILType T,
+         const TypeInfo &ti) {
+        if (!IGF.outliningCanCallValueWitnesses() ||
+            T.hasArchetype() || !canUseValueWitnessForValueOp(*this, T)) {
+          ti.initializeWithCopy(IGF, dest, src, T, true);
+        } else {
+          emitInitializeWithCopyCall(IGF, T, dest, src);
+        }
       });
 }
 
@@ -202,12 +277,18 @@ llvm::Constant *IRGenModule::getOrCreateOutlinedAssignWithTakeFunction(
   auto manglingBits = getTypeAndGenericSignatureForManglingOutlineFunction(T);
   auto funcName =
     IRGenMangler().mangleOutlinedAssignWithTakeFunction(manglingBits.first,
-                                                        manglingBits.second);
+        manglingBits.second, collector.IGF.isPerformanceConstraint);
 
-  return getOrCreateOutlinedCopyAddrHelperFunction(T, ti, collector, funcName,
-      [](IRGenFunction &IGF, Address dest, Address src,
-         SILType T, const TypeInfo &ti) {
-        ti.assignWithTake(IGF, dest, src, T, true);
+  return getOrCreateOutlinedCopyAddrHelperFunction(
+      T, ti, collector, funcName,
+      [this](IRGenFunction &IGF, Address dest, Address src, SILType T,
+         const TypeInfo &ti) {
+        if (!IGF.outliningCanCallValueWitnesses() ||
+            T.hasArchetype() || !canUseValueWitnessForValueOp(*this, T)) {
+          ti.assignWithTake(IGF, dest, src, T, true);
+        } else {
+          emitAssignWithTakeCall(IGF, T, dest, src);
+        }
       });
 }
 
@@ -217,12 +298,18 @@ llvm::Constant *IRGenModule::getOrCreateOutlinedAssignWithCopyFunction(
   auto manglingBits = getTypeAndGenericSignatureForManglingOutlineFunction(T);
   auto funcName =
     IRGenMangler().mangleOutlinedAssignWithCopyFunction(manglingBits.first,
-                                                        manglingBits.second);
+        manglingBits.second, collector.IGF.isPerformanceConstraint);
 
-  return getOrCreateOutlinedCopyAddrHelperFunction(T, ti, collector, funcName,
-      [](IRGenFunction &IGF, Address dest, Address src,
-         SILType T, const TypeInfo &ti) {
-        ti.assignWithCopy(IGF, dest, src, T, true);
+  return getOrCreateOutlinedCopyAddrHelperFunction(
+      T, ti, collector, funcName,
+      [this](IRGenFunction &IGF, Address dest, Address src, SILType T,
+             const TypeInfo &ti) {
+        if (!IGF.outliningCanCallValueWitnesses() ||
+            T.hasArchetype() || !canUseValueWitnessForValueOp(*this, T)) {
+          ti.assignWithCopy(IGF, dest, src, T, true);
+        } else {
+          emitAssignWithCopyCall(IGF, T, dest, src);
+        }
       });
 }
 
@@ -247,16 +334,36 @@ llvm::Constant *IRGenModule::getOrCreateOutlinedCopyAddrHelperFunction(
         generator(IGF, dest, src, T, ti);
         IGF.Builder.CreateRet(dest.getAddress());
       },
-      true /*setIsNoInline*/);
+      true /*setIsNoInline*/,
+      false /*forPrologue*/,
+      collector.IGF.isPerformanceConstraint);
 }
 
 void TypeInfo::callOutlinedDestroy(IRGenFunction &IGF,
                                    Address addr, SILType T) const {
-  OutliningMetadataCollector collector(IGF);
-  if (T.hasArchetype()) {
-    collectMetadataForOutlining(collector, T);
+  // Short-cut destruction of trivial values.
+  if (IGF.IGM.getTypeLowering(T).isTrivial())
+    return;
+
+  if (!T.hasLocalArchetype() &&
+      !IGF.outliningCanCallValueWitnesses()) {
+    OutliningMetadataCollector collector(IGF);
+    if (T.hasArchetype()) {
+      collectMetadataForOutlining(collector, T);
+    }
+    collector.emitCallToOutlinedDestroy(addr, T, *this);
+    return;
   }
-  collector.emitCallToOutlinedDestroy(addr, T, *this);
+
+  if (!T.hasArchetype()) {
+    // Call the outlined copy function (the implementation will call vwt in this
+    // case).
+    OutliningMetadataCollector collector(IGF);
+    collector.emitCallToOutlinedDestroy(addr, T, *this);
+    return;
+  }
+
+  return emitDestroyCall(IGF, T, addr);
 }
 
 void OutliningMetadataCollector::emitCallToOutlinedDestroy(
@@ -269,7 +376,8 @@ void OutliningMetadataCollector::emitCallToOutlinedDestroy(
   auto outlinedFn =
     IGF.IGM.getOrCreateOutlinedDestroyFunction(T, ti, *this);
 
-  llvm::CallInst *call = IGF.Builder.CreateCall(outlinedFn, args);
+  llvm::CallInst *call = IGF.Builder.CreateCall(
+      cast<llvm::Function>(outlinedFn)->getFunctionType(), outlinedFn, args);
   call->setCallingConv(IGF.IGM.DefaultCC);
 }
 
@@ -279,7 +387,7 @@ llvm::Constant *IRGenModule::getOrCreateOutlinedDestroyFunction(
   IRGenMangler mangler;
   auto manglingBits = getTypeAndGenericSignatureForManglingOutlineFunction(T);
   auto funcName = mangler.mangleOutlinedDestroyFunction(manglingBits.first,
-                                                        manglingBits.second);
+                     manglingBits.second, collector.IGF.isPerformanceConstraint);
 
   auto ptrTy = ti.getStorageType()->getPointerTo();
   llvm::SmallVector<llvm::Type *, 4> paramTys;
@@ -291,17 +399,24 @@ llvm::Constant *IRGenModule::getOrCreateOutlinedDestroyFunction(
         Explosion params = IGF.collectParameters();
         Address addr = ti.getAddressForPointer(params.claimNext());
         collector.bindMetadataParameters(IGF, params);
+        if (!IGF.outliningCanCallValueWitnesses() ||
+            T.hasArchetype() || !canUseValueWitnessForValueOp(*this, T)) {
+          ti.destroy(IGF, addr, T, true);
+        } else {
+          emitDestroyCall(IGF, T, addr);
+        }
 
-        ti.destroy(IGF, addr, T, true);
-        
         IGF.Builder.CreateRet(addr.getAddress());
       },
-      true /*setIsNoInline*/);
+      true /*setIsNoInline*/,
+      false /*forPrologue*/,
+      collector.IGF.isPerformanceConstraint);
 }
 
 llvm::Constant *IRGenModule::getOrCreateRetainFunction(const TypeInfo &ti,
                                                        SILType t,
-                                                       llvm::Type *llvmType) {
+                                                       llvm::Type *llvmType,
+                                                       Atomicity atomicity) {
   auto *loadableTI = cast<LoadableTypeInfo>(&ti);
   IRGenMangler mangler;
   auto manglingBits =
@@ -313,11 +428,12 @@ llvm::Constant *IRGenModule::getOrCreateRetainFunction(const TypeInfo &ti,
       funcName, llvmType, argTys,
       [&](IRGenFunction &IGF) {
         auto it = IGF.CurFn->arg_begin();
-        Address addr(&*it++, loadableTI->getFixedAlignment());
+        Address addr(&*it++, loadableTI->getStorageType(),
+                     loadableTI->getFixedAlignment());
         Explosion loaded;
         loadableTI->loadAsTake(IGF, addr, loaded);
         Explosion out;
-        loadableTI->copy(IGF, loaded, out, irgen::Atomicity::Atomic);
+        loadableTI->copy(IGF, loaded, out, atomicity);
         (void)out.claimAll();
         IGF.Builder.CreateRet(addr.getAddress());
       },
@@ -327,7 +443,8 @@ llvm::Constant *IRGenModule::getOrCreateRetainFunction(const TypeInfo &ti,
 llvm::Constant *
 IRGenModule::getOrCreateReleaseFunction(const TypeInfo &ti,
                                         SILType t,
-                                        llvm::Type *llvmType) {
+                                        llvm::Type *llvmType,
+                                        Atomicity atomicity) {
   auto *loadableTI = cast<LoadableTypeInfo>(&ti);
   IRGenMangler mangler;
   auto manglingBits =
@@ -339,10 +456,11 @@ IRGenModule::getOrCreateReleaseFunction(const TypeInfo &ti,
       funcName, llvmType, argTys,
       [&](IRGenFunction &IGF) {
         auto it = IGF.CurFn->arg_begin();
-        Address addr(&*it++, loadableTI->getFixedAlignment());
+        Address addr(&*it++, loadableTI->getStorageType(),
+                     loadableTI->getFixedAlignment());
         Explosion loaded;
         loadableTI->loadAsTake(IGF, addr, loaded);
-        loadableTI->consume(IGF, loaded, irgen::Atomicity::Atomic);
+        loadableTI->consume(IGF, loaded, atomicity, t);
         IGF.Builder.CreateRet(addr.getAddress());
       },
       true /*setIsNoInline*/);

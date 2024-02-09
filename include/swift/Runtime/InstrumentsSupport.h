@@ -18,23 +18,29 @@
 #ifndef SWIFT_RUNTIME_INSTRUMENTS_SUPPORT_H
 #define SWIFT_RUNTIME_INSTRUMENTS_SUPPORT_H
 
+#define SWIFT_RT_DECLARE_ENTRY \
+  __ptrauth_swift_runtime_function_entry
+
 namespace swift {
+
+#ifdef SWIFT_STDLIB_OVERRIDABLE_RETAIN_RELEASE
 
 // liboainject patches the function pointers and calls the functions below.
 SWIFT_RUNTIME_EXPORT
-HeapObject *(*_swift_allocObject)(HeapMetadata const *metadata,
+HeapObject *(*SWIFT_RT_DECLARE_ENTRY _swift_allocObject)(
+                                  HeapMetadata const *metadata,
                                   size_t requiredSize,
                                   size_t requiredAlignmentMask);
 SWIFT_RUNTIME_EXPORT
-HeapObject *(*_swift_retain)(HeapObject *object);
+HeapObject *(*SWIFT_RT_DECLARE_ENTRY _swift_retain)(HeapObject *object);
 SWIFT_RUNTIME_EXPORT
-HeapObject *(*_swift_retain_n)(HeapObject *object, uint32_t n);
+HeapObject *(*SWIFT_RT_DECLARE_ENTRY _swift_retain_n)(HeapObject *object, uint32_t n);
 SWIFT_RUNTIME_EXPORT
-HeapObject *(*_swift_tryRetain)(HeapObject *object);
+HeapObject *(*SWIFT_RT_DECLARE_ENTRY _swift_tryRetain)(HeapObject *object);
 SWIFT_RUNTIME_EXPORT
-void (*_swift_release)(HeapObject *object);
+void (*SWIFT_RT_DECLARE_ENTRY _swift_release)(HeapObject *object);
 SWIFT_RUNTIME_EXPORT
-void (*_swift_release_n)(HeapObject *object, uint32_t n);
+void (*SWIFT_RT_DECLARE_ENTRY _swift_release_n)(HeapObject *object, uint32_t n);
 SWIFT_RUNTIME_EXPORT
 size_t swift_retainCount(HeapObject *object);
 
@@ -56,6 +62,8 @@ size_t _swift_indexToSize(size_t idx);
 SWIFT_RUNTIME_EXPORT
 void _swift_zone_init(void);
 
-};
+#endif // SWIFT_STDLIB_OVERRIDABLE_RETAIN_RELEASE
+
+}
 
 #endif

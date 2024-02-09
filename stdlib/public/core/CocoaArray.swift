@@ -25,8 +25,8 @@ import SwiftShims
 /// `Collection` conformance.  Why not make `_NSArrayCore` conform directly?
 /// It's a class, and I don't want to pay for the dynamic dispatch overhead.
 @usableFromInline
-@_fixed_layout
-internal struct _CocoaArrayWrapper : RandomAccessCollection {
+@frozen
+internal struct _CocoaArrayWrapper: RandomAccessCollection {
   @usableFromInline
   typealias Indices = Range<Int>
 
@@ -83,12 +83,13 @@ internal struct _CocoaArrayWrapper : RandomAccessCollection {
     let result = _ContiguousArrayBuffer<AnyObject>(
       _uninitializedCount: boundsCount,
       minimumCapacity: 0)
-
-    // Tell Cocoa to copy the objects into our storage
-    core.getObjects(
-      UnsafeMutableRawPointer(result.firstElementAddress)
-      .assumingMemoryBound(to: AnyObject.self),
-      range: _SwiftNSRange(location: bounds.lowerBound, length: boundsCount))
+    
+    let base = UnsafeMutableRawPointer(result.firstElementAddress)
+      .assumingMemoryBound(to: AnyObject.self)
+      
+    for idx in 0..<boundsCount {
+      (base + idx).initialize(to: core.objectAt(idx + bounds.lowerBound))
+    }
 
     return _SliceBuffer(_buffer: result, shiftedToStartIndex: bounds.lowerBound)
   }
@@ -130,20 +131,33 @@ internal struct _CocoaArrayWrapper : RandomAccessCollection {
     subRange bounds: Range<Int>,
     initializing target: UnsafeMutablePointer<AnyObject>
   ) -> UnsafeMutablePointer<AnyObject> {
-    let nsSubRange = SwiftShims._SwiftNSRange(
-      location: bounds.lowerBound,
-      length: bounds.upperBound - bounds.lowerBound)
+    return withExtendedLifetime(buffer) {
+      let nsSubRange = SwiftShims._SwiftNSRange(
+        location: bounds.lowerBound,
+        length: bounds.upperBound - bounds.lowerBound)
 
-    // Copies the references out of the NSArray without retaining them
-    core.getObjects(target, range: nsSubRange)
+      // Copies the references out of the NSArray without retaining them
+      core.getObjects(target, range: nsSubRange)
 
-    // Make another pass to retain the copied objects
-    var result = target
-    for _ in bounds {
-      result.initialize(to: result.pointee)
-      result += 1
+      // Make another pass to retain the copied objects
+      var result = target
+      for _ in bounds {
+        result.initialize(to: result.pointee)
+        result += 1
+      }
+      return result
     }
-    return result
+  }
+
+  @_alwaysEmitIntoClient
+  internal __consuming func _copyContents(
+    initializing buffer: UnsafeMutableBufferPointer<Element>
+  ) -> (Iterator, UnsafeMutableBufferPointer<Element>.Index) {
+    guard buffer.count > 0 else { return (makeIterator(), 0) }
+    let start = buffer.baseAddress!
+    let c = Swift.min(self.count, buffer.count)
+    _ = _copyContents(subRange: 0 ..< c, initializing: start)
+    return (IndexingIterator(_elements: self, _position: c), c)
   }
 }
 #endif

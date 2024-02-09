@@ -28,6 +28,13 @@
 #include <objc/message.h>
 #include <TargetConditionals.h>
 
+#if __has_include(<mach-o/dyld_priv.h>)
+#include <mach-o/dyld_priv.h>
+#define APPLE_OS_SYSTEM 1
+#else
+#define APPLE_OS_SYSTEM 0
+#endif
+
 // Note: There are more #includes below under "Function patching machinery".
 // Those are only relevant to the function patching machinery.
 
@@ -69,11 +76,17 @@ getImageNameFromSwiftClass(Class _Nullable objcClass,
     const void *descriptor = classAsMetadata->getDescription();
     assert(descriptor &&
            "all non-artificial Swift classes should have a descriptor");
+#if APPLE_OS_SYSTEM
+    // Use a more efficient internal API when building the system libraries
+    // for Apple OSes.
+    *outImageName = dyld_image_path_containing_address(descriptor);
+#else
     Dl_info imageInfo = {};
     if (!dladdr(descriptor, &imageInfo))
       return NO;
     *outImageName = imageInfo.dli_fname;
-    return imageInfo.dli_fname != nullptr;
+#endif
+    return *outImageName != nullptr;
   }
   
   return NO;
@@ -136,7 +149,7 @@ namespace {
 /// Swift at all.
 ///
 /// Also, if the symbol being patched has references within the image where it
-/// was originaly defined, those references will \e not be patched.
+/// was originally defined, those references will \e not be patched.
 static void patchLazyPointers(const mach_header *mh, const char *symbolName,
                               const void *newValue) {
   // Get linkEditBase
@@ -256,7 +269,7 @@ static BOOL callUnpatchedGetImageNameFromClass(
 /// implementation.
 ///
 /// The Swift implementation is always set up to chain to another
-/// implementation, so on older OSs we just have to make sure that that chained
+/// implementation, so on older OSs we just have to make sure that chained
 /// implementation is the original system version. See
 /// callUnpatchedGetImageNameFromClass.
 static const char *patchedGetImageNameFromClassForOldOSs(Class _Nullable cls) {

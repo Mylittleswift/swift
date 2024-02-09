@@ -7,6 +7,12 @@
 
 import StdlibUnittest
 
+#if os(WASI)
+let enableCrashTests = false
+#else
+let enableCrashTests = true
+#endif
+
 var CStringTests = TestSuite("CStringTests")
 
 func getNullUTF8() -> UnsafeMutablePointer<UInt8>? {
@@ -101,20 +107,20 @@ func expectEqualCString(_ lhs: UnsafePointer<UInt8>,
   }
 }
 
-CStringTests.test("String.init(validatingUTF8:)") {
+CStringTests.test("String.init(validatingCString:)") {
   do {
     let (s, dealloc) = getASCIIUTF8()
-    expectEqual("ab", String(validatingUTF8: bindAsCChar(s)))
+    expectEqual("ab", String(validatingCString: bindAsCChar(s)))
     dealloc()
   }
   do {
     let (s, dealloc) = getNonASCIIUTF8()
-    expectEqual("аб", String(validatingUTF8: bindAsCChar(s)))
+    expectEqual("аб", String(validatingCString: bindAsCChar(s)))
     dealloc()
   }
   do {
     let (s, dealloc) = getIllFormedUTF8String1()
-    expectNil(String(validatingUTF8: bindAsCChar(s)))
+    expectNil(String(validatingCString: bindAsCChar(s)))
     dealloc()
   }
 }
@@ -223,6 +229,277 @@ CStringTests.test("Substring.withCString") {
       expectEqual(str, String(cString: $0))
     }
   }
+}
+
+CStringTests.test("String.cString.with.Array.UInt8.input") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  do {
+    let (u8p, dealloc) = getASCIIUTF8()
+    defer { dealloc() }
+    let cstr = UnsafePointer(u8p)
+    let buffer = UnsafeBufferPointer(start: cstr, count: getUTF8Length(u8p)+1)
+    let str = String(cString: Array(buffer))
+    str.withCString {
+      $0.withMemoryRebound(to: UInt8.self, capacity: buffer.count) {
+        expectEqualCString(u8p, $0)
+      }
+    }
+  }
+  guard enableCrashTests else { return }
+  // no need to test every case; that is covered in other tests
+  expectCrashLater(
+    // Workaround for https://github.com/apple/swift/issues/58362 (rdar://91365967)
+    // withMessage: "input of String.init(cString:) must be null-terminated"
+  )
+  _ = String(cString: [] as [UInt8])
+  expectUnreachable()
+}
+
+CStringTests.test("String.cString.with.Array.CChar.input") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  do {
+    let (u8p, dealloc) = getASCIIUTF8()
+    defer { dealloc() }
+    let buffer = UnsafeBufferPointer(start: u8p, count: getUTF8Length(u8p)+1)
+    let str = buffer.withMemoryRebound(to: CChar.self) {
+      String(cString: Array($0))
+    }
+    str.withCString {
+      $0.withMemoryRebound(to: UInt8.self, capacity: buffer.count) {
+        expectEqualCString(u8p, $0)
+      }
+    }
+  }
+  guard enableCrashTests else { return }
+  // no need to test every case; that is covered in other tests
+  expectCrashLater(
+    // Workaround for https://github.com/apple/swift/issues/58362 (rdar://91365967)
+    // withMessage: "input of String.init(cString:) must be null-terminated"
+  )
+  _ = String(cString: [] as [CChar])
+  expectUnreachable()
+}
+
+CStringTests.test("String.cString.with.String.input") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  let (u8p, dealloc) = getASCIIUTF8()
+  defer { dealloc() }
+  var str = String(cString: "ab")
+  str.withCString {
+    $0.withMemoryRebound(to: UInt8.self, capacity: getUTF8Length(u8p)+1) {
+      expectEqualCString(u8p, $0)
+    }
+  }
+  str = String(cString: "")
+  expectTrue(str.isEmpty)
+}
+
+CStringTests.test("String.cString.with.inout.UInt8.conversion") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  var c = UInt8.zero
+  var str = String(cString: &c)
+  expectTrue(str.isEmpty)
+  c = 100
+  guard enableCrashTests else { return }
+  expectCrashLater(
+    // Workaround for https://github.com/apple/swift/issues/58362 (rdar://91365967)
+    // withMessage: "input of String.init(cString:) must be null-terminated"
+  )
+  str = String(cString: &c)
+  expectUnreachable()
+}
+
+CStringTests.test("String.cString.with.inout.CChar.conversion") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  var c = CChar.zero
+  var str = String(cString: &c)
+  expectTrue(str.isEmpty)
+  c = 100
+  guard enableCrashTests else { return }
+  expectCrashLater(
+    // Workaround for https://github.com/apple/swift/issues/58362 (rdar://91365967)
+    // withMessage: "input of String.init(cString:) must be null-terminated"
+  )
+  str = String(cString: &c)
+  expectUnreachable()
+}
+
+CStringTests.test("String.validatingCString.with.Array.input") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  do {
+    let (u8p, dealloc) = getASCIIUTF8()
+    defer { dealloc() }
+    let buffer = UnsafeBufferPointer(start: u8p, count: getUTF8Length(u8p)+1)
+    let str = buffer.withMemoryRebound(to: CChar.self) {
+      String(validatingCString: Array($0))
+    }
+    expectNotNil(str)
+    str?.withCString {
+      $0.withMemoryRebound(to: UInt8.self, capacity: buffer.count) {
+        expectEqualCString(u8p, $0)
+      }
+    }
+  }
+  guard enableCrashTests else { return }
+  // no need to test every case; that is covered in other tests
+  expectCrashLater(
+    // Workaround for https://github.com/apple/swift/issues/58362 (rdar://91365967)
+    // withMessage: "input of String.init(validatingCString:) must be null-terminated"
+  )
+  _ = String(validatingCString: [])
+  expectUnreachable()
+}
+
+CStringTests.test("String.validatingCString.with.String.input") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  let (u8p, dealloc) = getASCIIUTF8()
+  defer { dealloc() }
+  var str = String(validatingCString: "ab")
+  expectNotNil(str)
+  str?.withCString {
+    $0.withMemoryRebound(to: UInt8.self, capacity: getUTF8Length(u8p)+1) {
+      expectEqualCString(u8p, $0)
+    }
+  }
+  str = String(validatingCString: "")
+  expectNotNil(str)
+  expectEqual(str?.isEmpty, true)
+}
+
+CStringTests.test("String.validatingCString.with.inout.conversion") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  var c = CChar.zero
+  var str = String(validatingCString: &c)
+  expectNotNil(str)
+  expectEqual(str?.isEmpty, true)
+  c = 100
+  guard enableCrashTests else { return }
+  expectCrashLater(
+    // Workaround for https://github.com/apple/swift/issues/58362 (rdar://91365967)
+    // withMessage: "input of String.init(validatingCString:) must be null-terminated"
+  )
+  str = String(validatingCString: &c)
+  expectUnreachable()
+}
+
+CStringTests.test("String.decodeCString.with.Array.input") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  do {
+    let (u8p, dealloc) = getASCIIUTF8()
+    defer { dealloc() }
+    let buffer = UnsafeBufferPointer(start: u8p, count: getUTF8Length(u8p)+1)
+    let result = buffer.withMemoryRebound(to: Unicode.UTF8.CodeUnit.self) {
+      String.decodeCString(Array($0), as: Unicode.UTF8.self)
+    }
+    expectNotNil(result)
+    expectEqual(result?.repairsMade, false)
+    result?.result.withCString {
+      $0.withMemoryRebound(to: UInt8.self, capacity: buffer.count) {
+        expectEqualCString(u8p, $0)
+      }
+    }
+  }
+  guard enableCrashTests else { return }
+  // no need to test every case; that is covered in other tests
+  expectCrashLater(
+    // Workaround for https://github.com/apple/swift/issues/58362 (rdar://91365967)
+    // withMessage: "input of decodeCString(_:as:repairingInvalidCodeUnits:) must be null-terminated"
+  )
+  _ = String.decodeCString([], as: Unicode.UTF8.self)
+  expectUnreachable()
+}
+
+CStringTests.test("String.decodeCString.with.String.input") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  let (u8p, dealloc) = getASCIIUTF8()
+  defer { dealloc() }
+  var result = String.decodeCString(
+    "ab", as: Unicode.UTF8.self, repairingInvalidCodeUnits: true
+  )
+  expectNotNil(result)
+  expectEqual(result?.repairsMade, false)
+  result?.result.withCString {
+    $0.withMemoryRebound(to: UInt8.self, capacity: getUTF8Length(u8p)+1) {
+      expectEqualCString(u8p, $0)
+    }
+  }
+  result = String.decodeCString("", as: Unicode.UTF8.self)
+  expectNotNil(result)
+  expectEqual(result?.repairsMade, false)
+  expectEqual(result?.result.isEmpty, true)
+}
+
+CStringTests.test("String.decodeCString.with.inout.conversion") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  var c = Unicode.UTF8.CodeUnit.zero
+  var result = String.decodeCString(
+    &c, as: Unicode.UTF8.self, repairingInvalidCodeUnits: true
+  )
+  expectNotNil(result)
+  expectEqual(result?.result.isEmpty, true)
+  expectEqual(result?.repairsMade, false)
+  c = 100
+  guard enableCrashTests else { return }
+  expectCrashLater(
+    // Workaround for https://github.com/apple/swift/issues/58362 (rdar://91365967)
+    // withMessage: "input of decodeCString(_:as:repairingInvalidCodeUnits:) must be null-terminated"
+  )
+  result = String.decodeCString(&c, as: Unicode.UTF8.self)
+  expectUnreachable()
+}
+
+CStringTests.test("String.init.decodingCString.with.Array.input") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  do {
+    let (u8p, dealloc) = getASCIIUTF8()
+    defer { dealloc() }
+    let buffer = UnsafeBufferPointer(start: u8p, count: getUTF8Length(u8p)+1)
+    let str = buffer.withMemoryRebound(to: Unicode.UTF8.CodeUnit.self) {
+      String(decodingCString: Array($0), as: Unicode.UTF8.self)
+    }
+    str.withCString {
+      $0.withMemoryRebound(to: UInt8.self, capacity: buffer.count) {
+        expectEqualCString(u8p, $0)
+      }
+    }
+  }
+  guard enableCrashTests else { return }
+  // no need to test every case; that is covered in other tests
+  expectCrashLater(
+    // Workaround for https://github.com/apple/swift/issues/58362 (rdar://91365967)
+    // withMessage: "input of decodeCString(_:as:repairingInvalidCodeUnits:) must be null-terminated"
+  )
+  _ = String(decodingCString: [], as: Unicode.UTF8.self)
+  expectUnreachable()
+}
+
+CStringTests.test("String.init.decodingCString.with.String.input") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  let (u8p, dealloc) = getASCIIUTF8()
+  defer { dealloc() }
+  var str = String(decodingCString: "ab", as: Unicode.UTF8.self)
+  str.withCString {
+    $0.withMemoryRebound(to: UInt8.self, capacity: getUTF8Length(u8p)+1) {
+      expectEqualCString(u8p, $0)
+    }
+  }
+  str = String(decodingCString: "", as: Unicode.UTF8.self)
+  expectTrue(str.isEmpty)
+}
+
+CStringTests.test("String.init.decodingCString.with.inout.conversion") {
+  guard #available(SwiftStdlib 5.7, *) else { return }
+  var c = Unicode.UTF8.CodeUnit.zero
+  var str = String(decodingCString: &c, as: Unicode.UTF8.self)
+  expectEqual(str.isEmpty, true)
+  c = 100
+  guard enableCrashTests else { return }
+  expectCrashLater(
+    // Workaround for https://github.com/apple/swift/issues/58362 (rdar://91365967)
+    // withMessage: "input of String.init(decodingCString:as:) must be null-terminated"
+  )
+  str = String(decodingCString: &c, as: Unicode.UTF8.self)
+  expectUnreachable()
 }
 
 runAllTests()

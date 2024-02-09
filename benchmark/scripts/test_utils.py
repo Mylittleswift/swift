@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 # ===--- test_utils.py ---------------------------------------------------===//
@@ -24,9 +24,8 @@ common unit testing patterns that is used in this project.
 
 import logging
 import sys
-
-from StringIO import StringIO
 from contextlib import contextmanager
+from io import StringIO
 
 
 @contextmanager
@@ -70,7 +69,7 @@ class Mock(object):
     def expect(self, call_args, response):
         """Expect invocation of tested method with given arguments.
 
-        Stores the canned reponse in the `respond` dictionary.
+        Stores the canned response in the `respond` dictionary.
         """
         call_args = tuple(call_args)
         self.expected.append(call_args)
@@ -79,14 +78,15 @@ class Mock(object):
     def assert_called_with(self, expected_args):
         """Verify that the tested method was called with provided arguments."""
         expected_args = tuple(expected_args)
-        assert expected_args in self.calls, (
-            'Expected: {0} in Called: {1}'.format(expected_args, self.calls))
+        assert expected_args in self.calls, "Expected: {0} in Called: {1}".format(
+            expected_args, self.calls
+        )
 
     def assert_called_all_expected(self):
-        """Verify that all expeced invocations of tested method were called."""
-        assert self.calls == self.expected, (
-            '\nExpected: {0}, \n  Called: {1}'.format(
-                self.expected, self.calls))
+        """Verify that all expected invocations of tested method were called."""
+        assert self.calls == self.expected, "\nExpected: {0}, \n  Called: {1}".format(
+            self.expected, self.calls
+        )
 
 
 class MockLoggingHandler(logging.Handler):
@@ -104,5 +104,9 @@ class MockLoggingHandler(logging.Handler):
     def reset(self):
         """Clear all log messages."""
         self.messages = {
-            'debug': [], 'info': [], 'warning': [], 'error': [], 'critical': []
+            "debug": [],
+            "info": [],
+            "warning": [],
+            "error": [],
+            "critical": [],
         }

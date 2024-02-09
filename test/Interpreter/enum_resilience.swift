@@ -11,6 +11,8 @@
 
 // RUN: %target-run %t/main %t/%target-library-name(resilient_struct) %t/%target-library-name(resilient_enum)
 
+// Test against libraries built with -whole-module-optimization.
+
 // RUN: %target-build-swift-dylib(%t/%target-library-name(resilient_struct_wmo)) -enable-library-evolution %S/../Inputs/resilient_struct.swift -emit-module -emit-module-path %t/resilient_struct.swiftmodule -module-name resilient_struct -whole-module-optimization
 // RUN: %target-codesign %t/%target-library-name(resilient_struct_wmo)
 
@@ -21,6 +23,20 @@
 // RUN: %target-codesign %t/main2
 
 // RUN: %target-run %t/main2 %t/%target-library-name(resilient_struct_wmo) %t/%target-library-name(resilient_enum_wmo)
+
+// Test with -unavailable-decl-optimization=complete.
+
+// RUN: %target-build-swift-dylib(%t/%target-library-name(resilient_struct_udoc)) -enable-library-evolution %S/../Inputs/resilient_struct.swift -emit-module -emit-module-path %t/resilient_struct.swiftmodule -module-name resilient_struct -unavailable-decl-optimization=complete
+// RUN: %target-codesign %t/%target-library-name(resilient_struct_udoc)
+
+// RUN: %target-build-swift-dylib(%t/%target-library-name(resilient_enum_udoc)) -enable-library-evolution %S/../Inputs/resilient_enum.swift -emit-module -emit-module-path %t/resilient_enum.swiftmodule -module-name resilient_enum -I%t -L%t -lresilient_struct_udoc -unavailable-decl-optimization=complete
+// RUN: %target-codesign %t/%target-library-name(resilient_enum_udoc)
+
+// RUN: %target-build-swift %s -L %t -I %t -lresilient_struct_udoc -lresilient_enum_udoc -o %t/main3 %target-rpath(%t)
+// RUN: %target-codesign %t/main3
+
+// RUN: %target-run %t/main3 %t/%target-library-name(resilient_struct_udoc) %t/%target-library-name(resilient_enum_udoc)
+
 
 // REQUIRES: executable_test
 
@@ -460,6 +476,62 @@ public class Container {
 
 ResilientEnumTestSuite.test("ResilientPrivateEnumMember") {
   _ = Container()
+}
+
+struct Nested {
+  var str: String
+  var r: ResilientInt
+}
+
+enum SingleCase {
+  case only(nested: Nested)
+}
+
+struct Status {
+  let fst: SingleCase
+  let snd: Bool
+}
+
+func getOptional<T>(_ t: T) -> T? {
+  return t
+}
+
+func test<T>(_ t: T) {
+  let o = getOptional(t)
+  if let c = o {
+    print("success")
+  }
+}
+
+ResilientEnumTestSuite.test("ResilientEnumSingleCase") {
+  // This used to crash.
+  test(Status(fst: .only(nested: Nested(str: "foobar", r: ResilientInt(i: 1))), snd: false))
+}
+
+ResilientEnumTestSuite.test("ResilientEnumWithUnavailableCase") {
+  let a: [ResilientEnumWithUnavailableCase] = [.available]
+
+  let b: [Int] = a.map {
+    switch $0 {
+    case .available:
+      return 0
+    case .unavailable:
+      return 1
+    default:
+      return -1
+    }
+  }
+
+  expectEqual(b, [0])
+}
+
+ResilientEnumTestSuite.test("ResilientEnumWithUnavailableCaseAndPayload") {
+  let a: [ResilientEnumWithUnavailableCaseAndPayload] =
+      [.double(ResilientDouble(d: 42.0))]
+
+  let b: [Int] = a.map { return $0.intValue }
+
+  expectEqual(b, [42])
 }
 
 runAllTests()

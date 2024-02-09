@@ -41,9 +41,12 @@ private:
 protected:
   const Impl &asImpl() const { return static_cast<const Impl &>(*this); }
 
-  WitnessSizedTypeInfo(llvm::Type *type, Alignment align, IsPOD_t pod,
-                       IsBitwiseTakable_t bt, IsABIAccessible_t abi)
-    : super(type, align, pod, bt, IsNotFixedSize, abi,
+  WitnessSizedTypeInfo(llvm::Type *type, Alignment align, IsTriviallyDestroyable_t pod,
+                       IsBitwiseTakable_t bt,
+                       IsCopyable_t cp,
+                       IsABIAccessible_t abi)
+    : super(type, align, pod, bt, cp,
+            IsNotFixedSize, abi,
             SpecialTypeInfoKind::None) {}
 
 private:
@@ -66,6 +69,12 @@ public:
     IGF.Builder.CreateLifetimeStart(alloca.getAddressPointer());
     return alloca.withAddress(
              getAsBitCastAddress(IGF, alloca.getAddressPointer()));
+  }
+
+  StackAddress allocateVector(IRGenFunction &IGF, SILType T,
+                              llvm::Value *capacity,
+                              const Twine &name) const override {
+    llvm_unreachable("not implemented, yet");
   }
 
   void deallocateStack(IRGenFunction &IGF, StackAddress stackAddress,
@@ -96,8 +105,8 @@ public:
     return emitLoadOfStride(IGF, T);
   }
 
-  llvm::Value *getIsPOD(IRGenFunction &IGF, SILType T) const override {
-    return emitLoadOfIsPOD(IGF, T);
+  llvm::Value *getIsTriviallyDestroyable(IRGenFunction &IGF, SILType T) const override {
+    return emitLoadOfIsTriviallyDestroyable(IGF, T);
   }
 
   llvm::Value *getIsBitwiseTakable(IRGenFunction &IGF, SILType T) const override {

@@ -3,14 +3,32 @@
 
 import Swift
 
-#if _runtime(_ObjC)
+// FIXME: https://github.com/apple/swift/issues/57444
+// Work around the inability for static-library based Swift runtime builds to
+// directly link against Darwin.swiftmodule by using a benign dependency on
+// StdlibUnittest.
+import StdlibUnittest
+runAllTests()
+
+#if canImport(Darwin)
   import Darwin
-  import CoreGraphics
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
+  #if _runtime(_ObjC)
+    import CoreGraphics
+  #else
+    #if arch(x86_64) || arch(arm64)
+      typealias CGFloat = Double
+    #else
+      typealias CGFloat = Float
+    #endif
+  #endif
+#elseif canImport(Glibc)
   import Glibc
   typealias CGFloat = Double
+#elseif os(WASI)
+  import WASILibc
+  typealias CGFloat = Double
 #elseif os(Windows)
-  import MSVCRT
+  import CRT
   #if arch(x86_64) || arch(arm64)
     typealias CGFloat = Double
   #else
@@ -116,7 +134,7 @@ func test_varArgs5() {
   // the GP register-save area after the SSE register-save area was
   // exhausted, rather than spilling into the overflow argument area.
   //
-  // This is not caught by test_varArgs1 above, because it exhauses the
+  // This is not caught by test_varArgs1 above, because it exhausts the
   // GP register-save area before the SSE area.
 
   var format = "rdar-32547102: "
@@ -153,4 +171,4 @@ test_varArgs6()
 
 
 // CHECK: done.
-print("done.")
+my_printf("done.")

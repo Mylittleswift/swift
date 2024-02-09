@@ -5,8 +5,10 @@ var_redecl1 = 0
 var var_redecl1: UInt // expected-error {{invalid redeclaration of 'var_redecl1'}}
 
 var var_redecl2: Int // expected-note {{previously declared here}}
-var_redecl2 = 0
+// expected-note@-1 {{found this candidate}}
+var_redecl2 = 0 // expected-error {{ambiguous use of 'var_redecl2'}}
 var var_redecl2: Int // expected-error {{invalid redeclaration of 'var_redecl2'}}
+// expected-note@-1 {{found this candidate}}
 
 var var_redecl3: (Int) -> () { get {} } // expected-note {{previously declared here}}
 var var_redecl3: () -> () { get {} } // expected-error {{invalid redeclaration of 'var_redecl3'}}
@@ -76,6 +78,7 @@ class mixed_redecl3 {} // expected-note {{previously declared here}}
 enum mixed_redecl3 {} // expected-error {{invalid redeclaration}}
 // expected-note @-1 2{{found this candidate}}
 enum mixed_redecl3a : mixed_redecl3 {} // expected-error {{'mixed_redecl3' is ambiguous for type lookup in this context}}
+// expected-error@-1 {{an enum with no cases cannot declare a raw type}}
 class mixed_redecl3b : mixed_redecl3 {} // expected-error {{'mixed_redecl3' is ambiguous for type lookup in this context}}
 
 class mixed_redecl4 {} // expected-note {{previously declared here}}
@@ -201,9 +204,9 @@ struct X5<t, u, v> {
   static func u() {}
   typealias v = String
 
-  func foo<t>(_ t: t) {
-    let t = t
-    _ = t
+  func foo<w>(_ w: w) {
+    let w = w
+    _ = w
   }
 }
 
@@ -220,7 +223,6 @@ extension X6 {
   var k: Int { return 0 } // expected-note{{previously declared here}}
   func k()
   // expected-error@-1{{invalid redeclaration of 'k()'}}
-  // expected-error@-2{{expected '{' in body of function declaration}}
 }
 
 // Subscripting
@@ -256,6 +258,16 @@ struct Subscript3 {
 
   func `subscript`(x: Int) -> String { return "" }
   subscript(x x: Int) -> String { return "" }
+}
+
+struct Subscript4 {
+    subscript(f: @escaping (Int) -> Int) -> Int { // expected-note{{previously declared here}}
+        get { return f(0) }
+    }
+
+    subscript(f: (Int) -> Int) -> Int { // expected-error{{invalid redeclaration of 'subscript(_:)'}}
+        get { return f(0) }
+    }
 }
 
 struct GenericSubscripts {
@@ -356,23 +368,35 @@ struct Escaping {
 func autoclosure(f: () -> Int) { }
 func autoclosure(f: @autoclosure () -> Int) { }
 
+// @_nonEphemeral
+func nonEphemeral(x: UnsafeMutableRawPointer) {} // expected-note {{'nonEphemeral(x:)' previously declared here}}
+func nonEphemeral(@_nonEphemeral x: UnsafeMutableRawPointer) {} // expected-error {{invalid redeclaration of 'nonEphemeral(x:)'}}
+
 // inout
 func inout2(x: Int) { }
 func inout2(x: inout Int) { }
 
 // optionals
 func optional(x: Int?) { } // expected-note{{previously declared}}
-func optional(x: Int!) { } // expected-error{{invalid redeclaration of 'optional(x:)'}}
+func optional(x: Int!) { } 
+// expected-error@-1{{invalid redeclaration of 'optional(x:)'}}
+// expected-note@-2 {{implicitly unwrapped optional parameter is of same type as optional parameter}}
 
 func optionalInOut(x: inout Int?) { } // expected-note{{previously declared}}
-func optionalInOut(x: inout Int!) { } // expected-error{{invalid redeclaration of 'optionalInOut(x:)}}
+func optionalInOut(x: inout Int!) { } 
+// expected-error@-1{{invalid redeclaration of 'optionalInOut(x:)'}}
+// expected-note@-2 {{implicitly unwrapped optional parameter is of same type as optional parameter}}
 
 class optionalOverloads {
   class func optionalInOut(x: inout Int?) { } // expected-note{{previously declared}}
-  class func optionalInOut(x: inout Int!) { } // expected-error{{invalid redeclaration of 'optionalInOut(x:)'}}
+  class func optionalInOut(x: inout Int!) { } 
+  // expected-error@-1{{invalid redeclaration of 'optionalInOut(x:)'}}
+  // expected-note@-2 {{implicitly unwrapped optional parameter is of same type as optional parameter}}
 
   func optionalInOut(x: inout Int?) { } // expected-note{{previously declared}}
-  func optionalInOut(x: inout Int!) { } // expected-error{{invalid redeclaration of 'optionalInOut(x:)}}
+  func optionalInOut(x: inout Int!) { } 
+  // expected-error@-1{{invalid redeclaration of 'optionalInOut(x:)'}}
+  // expected-note@-2 {{implicitly unwrapped optional parameter is of same type as optional parameter}}
 }
 
 func optional_3() -> Int? { } // expected-note{{previously declared}}
@@ -440,24 +464,28 @@ protocol r21783216b {
   associatedtype `Protocol` // ok
 }
 
-struct SR7249<T> {
-  var x: T { fatalError() } // expected-note {{previously declared}}
+// https://github.com/apple/swift/issues/49797
+
+struct S_49797<T> {
+  var x: T { get {} } // expected-note {{previously declared}}
   var y: Int // expected-note {{previously declared}}
   var z: Int // expected-note {{previously declared}}
 }
 
-extension SR7249 {
-  var x: Int { fatalError() } // expected-warning{{redeclaration of 'x' is deprecated and will be an error in Swift 5}}
-  var y: T { fatalError() } // expected-warning{{redeclaration of 'y' is deprecated and will be an error in Swift 5}}
-  var z: Int { fatalError() } // expected-error{{invalid redeclaration of 'z'}}
+extension S_49797 {
+  var x: Int { get {} } // expected-warning{{redeclaration of 'x' is deprecated and will be an error in Swift 5}}
+  var y: T { get {} } // expected-warning{{redeclaration of 'y' is deprecated and will be an error in Swift 5}}
+  var z: Int { get {} } // expected-error{{invalid redeclaration of 'z'}}
 }
 
 // A constrained extension is okay.
-extension SR7249 where T : P1 {
-  var x: Int { fatalError() }
-  var y: T { fatalError() }
-  var z: Int { fatalError() }
+extension S_49797 where T : P1 {
+  var x: Int { get {} }
+  var y: T { get {} }
+  var z: Int { get {} }
 }
+
+// https://github.com/apple/swift/issues/49798
 
 protocol P3 {
   var i: Int { get }
@@ -469,129 +497,127 @@ extension P3 {
   subscript(i: Int) -> String { return "" }
 }
 
-struct SR7250<T> : P3 {}
+struct S_49798<T> : P3 {}
 
-extension SR7250 where T : P3 {
-  var i: Int { return 0 }
-  subscript(i: Int) -> String { return "" }
+extension S_49798 where T : P3 {
+  var i: Int { get {} }
+  subscript(i: Int) -> String { get {} }
 }
 
-// SR-10084
+// https://github.com/apple/swift/issues/52486
 
-struct SR_10084_S {
+struct S_52486 {
   let name: String
 }
 
-enum SR_10084_E {
-  case foo(SR_10084_S) // expected-note {{'foo' previously declared here}}
+enum E_52486 {
+  case foo(S_52486) // expected-note {{'foo' previously declared here}}
     
-  static func foo(_ name: String) -> SR_10084_E { // Okay
-    return .foo(SR_10084_S(name: name))
+  static func foo(_ name: String) -> E_52486 { // Okay
+    return .foo(S_52486(name: name))
   }
 
-  func foo(_ name: Bool) -> SR_10084_E { // Okay
-    return .foo(SR_10084_S(name: "Test"))
+  func foo(_ name: Bool) -> E_52486 { // Okay
+    return .foo(S_52486(name: "Test"))
   }
 
-  static func foo(_ value: SR_10084_S) -> SR_10084_E { // expected-error {{invalid redeclaration of 'foo'}}
+  static func foo(_ value: S_52486) -> E_52486 { // expected-error {{invalid redeclaration of 'foo'}}
     return .foo(value)
   }
 }
 
-enum SR_10084_E_1 {
-  static func foo(_ name: String) -> SR_10084_E_1 { // Okay
-    return .foo(SR_10084_S(name: name))
+enum E1_52486 {
+  static func foo(_ name: String) -> E1_52486 { // Okay
+    return .foo(S_52486(name: name))
   }
 
-  static func foo(_ value: SR_10084_S) -> SR_10084_E_1 { // expected-note {{'foo' previously declared here}}
+  static func foo(_ value: S_52486) -> E1_52486 { // expected-note {{'foo' previously declared here}}
     return .foo(value)
   }
 
-  case foo(SR_10084_S) // expected-error {{invalid redeclaration of 'foo'}}
+  case foo(S_52486) // expected-error {{invalid redeclaration of 'foo'}}
 }
 
-enum SR_10084_E_2 {
+enum E2_52486 {
   case fn(() -> Void) // expected-note {{'fn' previously declared here}}
 
-  static func fn(_ x: @escaping () -> Void) -> SR_10084_E_2 { // expected-error {{invalid redeclaration of 'fn'}}
-    fatalError()
-  }
+  static func fn(_ x: @escaping () -> Void) -> E2_52486 {} // expected-error {{invalid redeclaration of 'fn'}}
 
-  static func fn(_ x: @escaping () -> Int) -> SR_10084_E_2 { // Okay
-    fatalError()
-  }
+  static func fn(_ x: @escaping () -> Int) -> E2_52486 {} // Okay
 
-  static func fn(_ x: @escaping () -> Bool) -> SR_10084_E_2 { // Okay
-    fatalError()
-  }
+  static func fn(_ x: @escaping () -> Bool) -> E2_52486 {} // Okay
 }
 
-enum SR_10084_E_3 {
-  protocol A {} //expected-error {{protocol 'A' cannot be nested inside another declaration}} // expected-note {{'A' previously declared here}}
+enum E3_52486 {
+  protocol A {} // expected-note {{'A' previously declared here}}
   case A // expected-error {{invalid redeclaration of 'A'}}
 }
 
-enum SR_10084_E_4 {
+enum E4_52486 {
   class B {} // expected-note {{'B' previously declared here}}
   case B // expected-error {{invalid redeclaration of 'B'}}
 }
 
-enum SR_10084_E_5 {
+enum E5_52486 {
   struct C {} // expected-note {{'C' previously declared here}}
   case C // expected-error {{invalid redeclaration of 'C'}}
 }
 
-enum SR_10084_E_6 {
+enum E6_52486 {
   case D // expected-note {{'D' previously declared here}}
-  protocol D {} //expected-error {{protocol 'D' cannot be nested inside another declaration}} // expected-error {{invalid redeclaration of 'D'}}
+  protocol D {} // expected-error {{invalid redeclaration of 'D'}}
 }
 
-enum SR_10084_E_7 {
+enum E7_52486 {
   case E // expected-note {{'E' previously declared here}}
   class E {} // expected-error {{invalid redeclaration of 'E'}} 
 }
 
-enum SR_10084_E_8 {
+enum E8_52486 {
   case F // expected-note {{'F' previously declared here}}
   struct F {} // expected-error {{invalid redeclaration of 'F'}} 
 }
 
-enum SR_10084_E_9 {
-  case A // expected-note {{found this candidate}} // expected-note {{'A' previously declared here}}
-  static let A: SR_10084_E_9 = .A // expected-note {{found this candidate}} // expected-error {{invalid redeclaration of 'A'}} // expected-error {{ambiguous use of 'A'}}
+enum E9_52486 {
+  case A // expected-note {{'A' previously declared here}} expected-note {{found this candidate}}
+  static let A: E9_52486 = .A // expected-error {{invalid redeclaration of 'A'}}
+  // expected-error@-1 {{ambiguous use of 'A'}} expected-note@-1 {{found this candidate}}
 }
 
-enum SR_10084_E_10 {
-  static let A: SR_10084_E_10 = .A // expected-note {{found this candidate}} // expected-note {{'A' previously declared here}} // expected-error {{ambiguous use of 'A'}}
-  case A // expected-note {{found this candidate}} // expected-error {{invalid redeclaration of 'A'}}
+enum E10_52486 {
+  static let A: E10_52486 = .A // expected-note {{'A' previously declared here}}
+  // expected-error@-1 {{ambiguous use of 'A'}} expected-note@-1 {{found this candidate}}
+  case A // expected-error {{invalid redeclaration of 'A'}} expected-note {{found this candidate}}
 }
 
-enum SR_10084_E_11 {
-  case A // expected-note {{found this candidate}} // expected-note {{'A' previously declared here}}
-  static var A: SR_10084_E_11 = .A // expected-note {{found this candidate}} // expected-error {{invalid redeclaration of 'A'}} // expected-error {{ambiguous use of 'A'}}
+enum E11_52486 {
+  case A // expected-note {{'A' previously declared here}} expected-note {{found this candidate}}
+  static var A: E11_52486 = .A // expected-error {{invalid redeclaration of 'A'}}
+  // expected-error@-1 {{ambiguous use of 'A'}} expected-note@-1 {{found this candidate}}
 }
 
-enum SR_10084_E_12 {
-  static var A: SR_10084_E_12 = .A // expected-note {{found this candidate}} // expected-note {{'A' previously declared here}} // expected-error {{ambiguous use of 'A'}}
-  case A // expected-note {{found this candidate}} // expected-error {{invalid redeclaration of 'A'}}
+enum E12_52486 {
+  static var A: E12_52486 = .A // expected-note {{'A' previously declared here}}
+  // expected-error@-1 {{ambiguous use of 'A'}} expected-note@-1 {{found this candidate}}
+  case A // expected-error {{invalid redeclaration of 'A'}} expected-note {{found this candidate}}
 }
 
-enum SR_10084_E_13 {
+enum E13_52486 {
   case X // expected-note {{'X' previously declared here}}
   struct X<T> {} // expected-error {{invalid redeclaration of 'X'}}
 }
 
-enum SR_10084_E_14 {
+enum E14_52486 {
   struct X<T> {} // expected-note {{'X' previously declared here}}
   case X // expected-error {{invalid redeclaration of 'X'}}
 }
 
-enum SR_10084_E_15 {
+enum E15_52486 {
   case Y // expected-note {{'Y' previously declared here}}
   typealias Y = Int // expected-error {{invalid redeclaration of 'Y'}}
 }
 
-enum SR_10084_E_16 {
+enum E16_52486 {
   typealias Z = Int // expected-note {{'Z' previously declared here}}
   case Z // expected-error {{invalid redeclaration of 'Z'}}
 }

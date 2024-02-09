@@ -42,21 +42,21 @@ func test_switch_two_trivial_unions(x: Foo, y: Foo) {
   // CHECK:   function_ref @$s6switch1ayyF
     a()
 
-  // CHECK: [[IS_NOT_CASE1]](
+  // CHECK: [[IS_NOT_CASE1]]:
   // CHECK:   switch_enum [[X]] : $Foo, case #Foo.B!enumelt: [[IS_CASE2:bb[0-9]+]], default [[IS_NOT_CASE2:bb[0-9]+]]
   // CHECK: [[IS_CASE2]]:
   case (Foo.B, _):
   // CHECK:   function_ref @$s6switch1byyF
     b()
 
-  // CHECK: [[IS_NOT_CASE2]](
+  // CHECK: [[IS_NOT_CASE2]]:
   // CHECK:   switch_enum [[Y]] : $Foo, case #Foo.B!enumelt: [[IS_CASE3:bb[0-9]+]], default [[UNREACHABLE:bb[0-9]+]]
   // CHECK: [[IS_CASE3]]:
   case (_, Foo.B):
   // CHECK:   function_ref @$s6switch1cyyF
     c()
 
-  // CHECK: [[UNREACHABLE]](
+  // CHECK: [[UNREACHABLE]]:
   // CHECK:   unreachable
   }
 }
@@ -69,7 +69,7 @@ func test_switch_two_nontrivial_unions(x: NonTrivialFoo, y: NonTrivialFoo) {
   // CHECK:   [[T0:%.*]] = tuple ([[ARG0_COPY]] : $NonTrivialFoo, [[ARG1_COPY]] : $NonTrivialFoo)
   // CHECK:   ([[X:%.*]], [[Y:%.*]]) = destructure_tuple [[T0]]
   // CHECK:   [[BORROWED_Y:%.*]] = begin_borrow [[Y]]
-  // CHECK:   switch_enum [[BORROWED_Y]] : $NonTrivialFoo, case #NonTrivialFoo.A!enumelt.1: [[IS_CASE1:bb[0-9]+]], default [[IS_NOT_CASE1:bb[0-9]+]]
+  // CHECK:   switch_enum [[BORROWED_Y]] : $NonTrivialFoo, case #NonTrivialFoo.A!enumelt: [[IS_CASE1:bb[0-9]+]], default [[IS_NOT_CASE1:bb[0-9]+]]
 
   switch (x, y) {
   // CHECK: [[IS_CASE1]]({{%.*}} : @guaranteed $Klass)
@@ -77,22 +77,22 @@ func test_switch_two_nontrivial_unions(x: NonTrivialFoo, y: NonTrivialFoo) {
   // CHECK:   function_ref @$s6switch1ayyF
     a()
 
-  // CHECK: [[IS_NOT_CASE1]]({{%.*}} : @guaranteed $NonTrivialFoo):
+  // CHECK: [[IS_NOT_CASE1]]({{%.*}} : @guaranteed $Klass):
   // CHECK:   [[BORROWED_X:%.*]] = begin_borrow [[X]]
-  // CHECK:   switch_enum [[BORROWED_X]] : $NonTrivialFoo, case #NonTrivialFoo.B!enumelt.1: [[IS_CASE2:bb[0-9]+]], default [[IS_NOT_CASE2:bb[0-9]+]]
+  // CHECK:   switch_enum [[BORROWED_X]] : $NonTrivialFoo, case #NonTrivialFoo.B!enumelt: [[IS_CASE2:bb[0-9]+]], default [[IS_NOT_CASE2:bb[0-9]+]]
   // CHECK: [[IS_CASE2]]({{%.*}} : @guaranteed $Klass)
   case (NonTrivialFoo.B, _):
   // CHECK:   function_ref @$s6switch1byyF
     b()
 
-  // CHECK: [[IS_NOT_CASE2]]({{%.*}} : @guaranteed $NonTrivialFoo)
-  // CHECK:   switch_enum [[Y]] : $NonTrivialFoo, case #NonTrivialFoo.B!enumelt.1: [[IS_CASE3:bb[0-9]+]], default [[UNREACHABLE:bb[0-9]+]]
+  // CHECK: [[IS_NOT_CASE2]]({{%.*}} : @guaranteed $Klass)
+  // CHECK:   switch_enum [[Y]] : $NonTrivialFoo, case #NonTrivialFoo.B!enumelt: [[IS_CASE3:bb[0-9]+]], default [[UNREACHABLE:bb[0-9]+]]
   // CHECK: [[IS_CASE3]]({{%.*}} : @owned $Klass):
   case (_, NonTrivialFoo.B):
   // CHECK:   function_ref @$s6switch1cyyF
     c()
 
-  // CHECK: [[UNREACHABLE]]({{%.*}} : @owned $NonTrivialFoo):
+  // CHECK: [[UNREACHABLE]]({{%.*}} : @owned $Klass):
   // CHECK:   unreachable
   }
 }

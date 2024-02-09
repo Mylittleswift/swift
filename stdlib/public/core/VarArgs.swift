@@ -53,15 +53,26 @@ public protocol CVarArg {
 /// Floating point types need to be passed differently on x86_64
 /// systems.  CoreGraphics uses this to make CGFloat work properly.
 public // SPI(CoreGraphics)
-protocol _CVarArgPassedAsDouble : CVarArg {}
+protocol _CVarArgPassedAsDouble: CVarArg {}
 
 /// Some types require alignment greater than Int on some architectures.
 public // SPI(CoreGraphics)
-protocol _CVarArgAligned : CVarArg {
+protocol _CVarArgAligned: CVarArg {
   /// Returns the required alignment in bytes of
   /// the value returned by `_cVarArgEncoding`.
   var _cVarArgAlignment: Int { get }
 }
+
+#if !_runtime(_ObjC)
+/// Some pointers require an alternate object to be retained.  The object
+/// that is returned will be used with _cVarArgEncoding and held until
+/// the closure is complete.  This is required since autoreleased storage
+/// is not available on all platforms.
+public protocol _CVarArgObject: CVarArg {
+  /// Returns the alternate object that should be encoded.
+  var _cVarArgObject: CVarArg { get }
+}
+#endif
 
 #if arch(x86_64)
 @usableFromInline
@@ -201,12 +212,14 @@ public func _encodeBitsAsWords<T>(_ x: T) -> [Int] {
   let result = [Int](
     repeating: 0,
     count: (MemoryLayout<T>.size + MemoryLayout<Int>.size - 1) / MemoryLayout<Int>.size)
-  _internalInvariant(result.count > 0)
+  _internalInvariant(!result.isEmpty)
   var tmp = x
   // FIXME: use UnsafeMutablePointer.assign(from:) instead of memcpy.
-  _memcpy(dest: UnsafeMutablePointer(result._baseAddressIfContiguous!),
-          src: UnsafeMutablePointer(Builtin.addressof(&tmp)),
-          size: UInt(MemoryLayout<T>.size))
+  _withUnprotectedUnsafeMutablePointer(to: &tmp) {
+    _memcpy(dest: UnsafeMutablePointer(result._baseAddressIfContiguous!),
+            src: $0,
+            size: UInt(MemoryLayout<T>.size))
+  }
   return result
 }
 
@@ -215,7 +228,7 @@ public func _encodeBitsAsWords<T>(_ x: T) -> [Int] {
 // encoding.
 
 // Signed types
-extension Int : CVarArg {
+extension Int: CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -224,13 +237,13 @@ extension Int : CVarArg {
   }
 }
 
-extension Bool : CVarArg {
+extension Bool: CVarArg {
   public var _cVarArgEncoding: [Int] {
     return _encodeBitsAsWords(_VAInt(self ? 1:0))
   }
 }
 
-extension Int64 : CVarArg, _CVarArgAligned {
+extension Int64: CVarArg, _CVarArgAligned {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -247,7 +260,7 @@ extension Int64 : CVarArg, _CVarArgAligned {
   }
 }
 
-extension Int32 : CVarArg {
+extension Int32: CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -256,7 +269,7 @@ extension Int32 : CVarArg {
   }
 }
 
-extension Int16 : CVarArg {
+extension Int16: CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -265,7 +278,7 @@ extension Int16 : CVarArg {
   }
 }
 
-extension Int8 : CVarArg {
+extension Int8: CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -275,7 +288,7 @@ extension Int8 : CVarArg {
 }
 
 // Unsigned types
-extension UInt : CVarArg {
+extension UInt: CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -284,7 +297,7 @@ extension UInt : CVarArg {
   }
 }
 
-extension UInt64 : CVarArg, _CVarArgAligned {
+extension UInt64: CVarArg, _CVarArgAligned {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -301,7 +314,7 @@ extension UInt64 : CVarArg, _CVarArgAligned {
   }
 }
 
-extension UInt32 : CVarArg {
+extension UInt32: CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -310,7 +323,7 @@ extension UInt32 : CVarArg {
   }
 }
 
-extension UInt16 : CVarArg {
+extension UInt16: CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -319,7 +332,7 @@ extension UInt16 : CVarArg {
   }
 }
 
-extension UInt8 : CVarArg {
+extension UInt8: CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -328,7 +341,7 @@ extension UInt8 : CVarArg {
   }
 }
 
-extension OpaquePointer : CVarArg {
+extension OpaquePointer: CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -337,7 +350,7 @@ extension OpaquePointer : CVarArg {
   }
 }
 
-extension UnsafePointer : CVarArg {
+extension UnsafePointer: CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -346,7 +359,7 @@ extension UnsafePointer : CVarArg {
   }
 }
 
-extension UnsafeMutablePointer : CVarArg {
+extension UnsafeMutablePointer: CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -356,7 +369,7 @@ extension UnsafeMutablePointer : CVarArg {
 }
 
 #if _runtime(_ObjC)
-extension AutoreleasingUnsafeMutablePointer : CVarArg {
+extension AutoreleasingUnsafeMutablePointer: CVarArg {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable
@@ -366,7 +379,7 @@ extension AutoreleasingUnsafeMutablePointer : CVarArg {
 }
 #endif
 
-extension Float : _CVarArgPassedAsDouble, _CVarArgAligned {
+extension Float: _CVarArgPassedAsDouble, _CVarArgAligned {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -383,7 +396,7 @@ extension Float : _CVarArgPassedAsDouble, _CVarArgAligned {
   }
 }
 
-extension Double : _CVarArgPassedAsDouble, _CVarArgAligned {
+extension Double: _CVarArgPassedAsDouble, _CVarArgAligned {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // c-abi
@@ -400,8 +413,8 @@ extension Double : _CVarArgPassedAsDouble, _CVarArgAligned {
   }
 }
 
-#if !os(Windows) && (arch(i386) || arch(x86_64))
-extension Float80 : CVarArg, _CVarArgAligned {
+#if !(os(Windows) || os(Android) || ($Embedded && !os(Linux) && !(os(macOS) || os(iOS) || os(watchOS) || os(tvOS)))) && (arch(i386) || arch(x86_64))
+extension Float80: CVarArg, _CVarArgAligned {
   /// Transform `self` into a series of machine words that can be
   /// appropriately interpreted by C varargs.
   @inlinable // FIXME(sil-serialize-all)
@@ -430,12 +443,9 @@ extension Float80 : CVarArg, _CVarArgAligned {
 @usableFromInline // c-abi
 final internal class __VaListBuilder {
   #if arch(x86_64) || arch(s390x)
-  @_fixed_layout // c-abi
+  @frozen // c-abi
   @usableFromInline
   internal struct Header {
-    @inlinable // c-abi
-    internal init() {}
-
     @usableFromInline // c-abi
     internal var gp_offset = CUnsignedInt(0)
     @usableFromInline // c-abi
@@ -445,6 +455,9 @@ final internal class __VaListBuilder {
     internal var overflow_arg_area: UnsafeMutablePointer<Int>?
     @usableFromInline // c-abi
     internal var reg_save_area: UnsafeMutablePointer<Int>?
+
+    @inlinable // c-abi
+    internal init() {}
   }
   #endif
 
@@ -462,6 +475,11 @@ final internal class __VaListBuilder {
   @usableFromInline // c-abi
   internal var storage: ContiguousArray<Int>
 
+#if !_runtime(_ObjC)
+  @usableFromInline // c-abi
+  internal var retainer = [CVarArg]()
+#endif
+
   @inlinable // c-abi
   internal init() {
     // prepare the register save area
@@ -473,6 +491,16 @@ final internal class __VaListBuilder {
 
   @inlinable // c-abi
   internal func append(_ arg: CVarArg) {
+#if !_runtime(_ObjC)
+    var arg = arg
+
+    // We may need to retain an object that provides a pointer value.
+    if let obj = arg as? _CVarArgObject {
+      arg = obj._cVarArgObject
+      retainer.append(arg)
+    }
+#endif
+
     var encoded = arg._cVarArgEncoding
 
 #if arch(x86_64) || arch(arm64)
@@ -560,12 +588,22 @@ final internal class __VaListBuilder {
 
   @inlinable // c-abi
   internal func append(_ arg: CVarArg) {
+#if !_runtime(_ObjC)
+    var arg = arg
+
+    // We may need to retain an object that provides a pointer value.
+    if let obj = arg as? _CVarArgObject {
+      arg = obj._cVarArgObject
+      retainer.append(arg)
+    }
+#endif
+
     // Write alignment padding if necessary.
     // This is needed on architectures where the ABI alignment of some
     // supported vararg type is greater than the alignment of Int, such
     // as non-iOS ARM. Note that we can't use alignof because it
     // differs from ABI alignment on some architectures.
-#if arch(arm) && !os(iOS)
+#if (arch(arm) && !os(iOS)) || arch(arm64_32) || arch(wasm32)
     if let arg = arg as? _CVarArgAligned {
       let alignmentInWords = arg._cVarArgAlignment / MemoryLayout<Int>.size
       let misalignmentInWords = count % alignmentInWords
@@ -664,6 +702,11 @@ final internal class __VaListBuilder {
   internal var allocated = 0
   @usableFromInline // c-abi
   internal var storage: UnsafeMutablePointer<Int>?
+
+#if !_runtime(_ObjC)
+  @usableFromInline // c-abi
+  internal var retainer = [CVarArg]()
+#endif
 
   internal static var alignedStorageForEmptyVaLists: Double = 0
 }

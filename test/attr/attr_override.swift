@@ -29,6 +29,7 @@ class A {
 
   var v1: Int { return 5 }
   var v2: Int { return 5 } // expected-note{{overridden declaration is here}}
+  internal var v21: Int { return 5 } // expected-note{{overridden declaration is here}}
   var v4: String { return "hello" }// expected-note{{attempt to override property here}}
   var v5: A { return self }
   var v6: A { return self }
@@ -57,6 +58,24 @@ class A {
     set {
     }
   }
+  
+  class subscript (i: String) -> String { // expected-note{{overridden declaration is here}} expected-note{{potential overridden class subscript 'subscript(_:)' here}}
+    get {
+      return "hello"
+    }
+    
+    set {
+    }
+  }
+  
+  class subscript (typeInSuperclass a: [Int]) -> String {
+    get {
+      return "hello"
+    }
+    
+    set {
+    }
+  }
 
   subscript (i: Int8) -> A { // expected-note{{potential overridden subscript 'subscript(_:)' here}}
     get { return self }
@@ -74,9 +93,9 @@ class B : A {
   override func f0() { }
   func f1() { } // expected-error{{overriding declaration requires an 'override' keyword}}{{3-3=override }}
   override func f2() { } // expected-error{{method does not override any method from its superclass}}
-
   override var v1: Int { return 5 }
-  var v2: Int { return 5 } // expected-error{{overriding declaration requires an 'override' keyword}}
+  var v2: Int { return 5 } // expected-error{{overriding declaration requires an 'override' keyword}}{{3-3=override }}
+  internal var v21: Int { return 5 } // expected-error{{overriding declaration requires an 'override' keyword}}{{12-12=override }}
   override var v3: Int { return 5 } // expected-error{{property does not override any property from its superclass}}
   override var v4: Int { return 5 } // expected-error{{property 'v4' with type 'Int' cannot override a property with type 'String'}}
 
@@ -123,6 +142,51 @@ class B : A {
     set {
     }
   }
+  
+  override class subscript (i: Int) -> String { // expected-error{{subscript does not override any subscript from its superclass}}
+    get {
+      return "hello"
+    }
+    
+    set {
+    }
+  }
+  
+  static subscript (i: String) -> String { // expected-error{{overriding declaration requires an 'override' keyword}} {{3-3=override }}
+    get {
+      return "hello"
+    }
+    
+    set {
+    }
+  }
+  
+  static subscript (i: Double) -> String {
+    get {
+      return "hello"
+    }
+    
+    set {
+    }
+  }
+  
+  override class subscript (typeInSuperclass a: [Int]) -> String {
+    get {
+      return "hello"
+    }
+    
+    set {
+    }
+  }
+
+  override subscript (typeInSuperclass a: [Int]) -> String { // expected-error{{subscript does not override any subscript from its superclass}}
+    get {
+      return "hello"
+    }
+
+    set {
+    }
+  }
 
   // Covariant
   override subscript (i: Int8) -> B {
@@ -147,7 +211,7 @@ struct S {
   override func f() { } // expected-error{{'override' can only be specified on class members}} {{3-12=}}
 }
 extension S {
-  override func ef() {} // expected-error{{method does not override any method from its superclass}}
+  override func ef() {} // expected-error{{'override' can only be specified on class members}} {{3-12=}}
 }
 
 enum E {
@@ -155,7 +219,10 @@ enum E {
 }
 
 protocol P {
-  override func f() // FIXME wording: expected-error{{method does not override any method from its superclass}}
+  override func f() // expected-error{{method does not override any method from its parent protocol}}
+  override var g: Int { get } // expected-error{{property does not override any property from its parent protocol}}
+  override subscript(h: Int) -> Bool { get } // expected-error{{subscript does not override any subscript from its parent protocol}}
+  override init(i: Int) // expected-error{{initializer does not override a designated initializer from its parent protocol}}
 }
 
 override func f() { } // expected-error{{'override' can only be specified on class members}} {{1-10=}}
@@ -324,7 +391,7 @@ class MismatchOptional : MismatchOptionalBase {
 
   override func functionParam(x: @escaping (Int) -> Int) {} // expected-error {{cannot override instance method parameter of type '((Int) -> Int)?' with non-optional type '(Int) -> Int'}} {{34-34=(}} {{56-56=)?}}
   override func tupleParam(x: (Int, Int)) {} // expected-error {{cannot override instance method parameter of type '(Int, Int)?' with non-optional type '(Int, Int)'}} {{41-41=?}}
-  override func compositionParam(x: P1 & P2) {} // expected-error {{cannot override instance method parameter of type '(P1 & P2)?' with non-optional type 'P1 & P2'}} {{37-37=(}} {{44-44=)?}}
+  override func compositionParam(x: P1 & P2) {} // expected-error {{cannot override instance method parameter of type '(any P1 & P2)?' with non-optional type 'any P1 & P2'}} {{37-37=(}} {{44-44=)?}}
 
   override func nameAndTypeMismatch(_: Int) {}
   // expected-error@-1 {{argument labels for method 'nameAndTypeMismatch' do not match those of overridden method 'nameAndTypeMismatch(label:)'}} {{37-37=label }}
@@ -438,4 +505,216 @@ class Index<F, T> {
 
 class CollectionIndex<C : Collection> : Index<C, C.I> {
   override func map(_ f: C) -> C.I {}
+}
+
+// https://github.com/apple/swift/issues/46789
+// Overrides with different generic signatures
+
+protocol Protocol1 {}
+protocol Protocol2 {}
+
+// Base class is generic, derived class is concrete.
+
+class Base1<T> {
+  func foo<U: Protocol1>(arg: U) {}
+}
+class Derived1: Base1<Protocol2> {
+  override func foo<T>(arg: T) {} // Ok?
+}
+
+// Base class is concrete, derived class is generic.
+
+class Base2 {
+  func foo() {}
+}
+class Derived2<T>: Base2 {
+  override func foo<U>(arg: U) {} // expected-error {{method does not override any method from its superclass}}
+}
+
+// Base class generic w/ method generic, derived class generic w/ method not
+// generic.
+
+class Base3<T> {
+  func foo<U>(arg: U) {}
+}
+class Derived3<T>: Base3<T> {
+  override func foo() {} // expected-error {{method does not override any method from its superclass}}
+}
+
+// Base class generic w/ method generic, derived class generic w/ method generic
+// but different requirement.
+
+class Base4<T> {
+  func foo<U>(arg: U) {}
+}
+class Derived4<T>: Base4<T> {
+  override func foo<U: Protocol1>(arg: U) {} // expected-error {{method does not override any method from its superclass}}
+}
+
+// Base class not generic w/ method generic, derived class not generic w/ method
+// generic but different requirement.
+
+class Base5 {
+  func foo<T>(arg: T) {}
+}
+class Derived5: Base5 {
+  override func foo<T: Protocol1>(arg: T) {} // expected-error {{method does not override any method from its superclass}}
+}
+
+// Base class not generic w/ method generic, derived class not generic w/ method
+// generic but removed requirement.
+
+class Base6 {
+  func foo<T: Protocol2>(arg: T) {}
+}
+class Derived6: Base6 {
+  override func foo<T>(arg: T) {} // Ok?
+}
+
+// Base class not generic w/ method generic, derived class generic w/ method
+// generic but different requirement.
+
+class Base7 {
+  func foo<T: Protocol2>(arg: T) {}
+}
+class Derived7<T>: Base7 {
+  override func foo<U: Protocol1>(arg: U) {} // expected-error {{method does not override any method from its superclass}}
+}
+
+// Override with orthogonal requirement on contextual generic parameter.
+
+class Base8<T> {
+  func foo1() where T: Protocol1 {}
+  func foo2() where T: Protocol1 {}
+}
+class Derived8<T>: Base8<T> {
+  override func foo1() where T: Protocol2 {} // expected-error {{method does not override any method from its superclass}}
+
+  override func foo2() {} // OK
+}
+
+// Subclass with new conformance requirement on inherited generic parameter.
+
+class Base9<T> {
+  func foo() where T: Protocol1 {}
+}
+class Derived9<T: Protocol2, U>: Base9<T> {
+  // Because the generic signature of foo() is the same either way,
+  // it may seem confusing that placing an additional constraint on the
+  // generic parameter declaration directly has a different effect on
+  // overridability in contrast to placing the constraint on foo().
+  // The former (unlike the latter) is accepted because the constraint
+  // in question only affects the ability to initialize an instance of the
+  // subclass — not the visibility of the override itself relative to an
+  // existing instance.
+  override func foo() where T: Protocol1 {} // OK
+}
+
+// Override with less strict requirement via contextual where clauses.
+
+class Base10<T> {
+  func foo() where T == Int {}
+}
+class Derived10<T>: Base10<T> {
+  override func foo() where T: FixedWidthInteger {} // OK
+}
+
+// Override with equivalent constraint on a different, non-inherited generic
+// parameter.
+
+class Base11<T> {
+  func foo() where T: Protocol1 {}
+}
+class Derived11<T, U>: Base11<T> {
+  override func foo() where U: Protocol1 {} // expected-error {{method does not override any method from its superclass}}
+}
+
+// Generic superclass / non-generic subclass.
+
+class Base12<T> {
+  // The fact that the return type matches the substitution
+  // for T must hold across overrides.
+  func foo() -> T where T: FixedWidthInteger { fatalError() } // expected-note {{potential overridden instance method 'foo()' here}}
+}
+class Derived12_1: Base12<Int> {
+  override func foo() -> Int { return .zero } // OK
+}
+class Derived12_2: Base12<Bool> {
+  override func foo() -> Int { return .zero } // expected-error {{method does not override any method from its superclass}}
+}
+
+// Misc //
+
+protocol P_Key {}
+protocol P_Container {
+  associatedtype Key: P_Key
+}
+
+class Base13<Key: P_Key> {
+  func foo(forKey key: Key) throws {}
+}
+
+class Derived13<C: P_Container> : Base13<C.Key> {
+  typealias Key = C.Key
+  override func foo(forKey key: Key) throws {} // Okay, no generic signature mismatch
+}
+
+// https://github.com/apple/swift/issues/52598
+
+class Base1_52598 {
+  func a<T>(_ val: T) -> String { return "not equatable" }
+  func a<T: Equatable>(_ val: T) -> String { return "equatable" }
+}
+class Derived1_52598: Base1_52598 {
+  override func a<T>(_ val: T) -> String { return super.a(val) } // okay
+  override func a<T: Equatable>(_ val: T) -> String { return super.a(val) } // okay
+}
+
+protocol P_52598 {
+  associatedtype Bar
+}
+struct S_52598: P_52598 {
+  typealias Bar = Int
+}
+class Base2_52598 {
+  init<F: P_52598>(_ arg: F) where F.Bar == Int {}
+}
+class Derived2_52598: Base2_52598 {
+  init(_ arg1: Int) { super.init(S_52598()) } // okay, doesn't crash
+}
+
+// https://github.com/apple/swift/issues/54147
+
+public protocol P_54147 {}
+public protocol Q_54147: P_54147 {
+    associatedtype A
+}
+
+public class Base_54147<F, A> {}
+
+public class Derived_54147<F, A>
+  : Base_54147<Base_54147<F, A>, A>,
+    Q_54147 {}
+
+public extension Base_54147 where F: Q_54147 {
+    static func foo(_: F.A) {}
+}
+extension Derived_54147 where F: P_54147 {
+    public static func foo(_: A) {}
+}
+
+// Make sure we don't crash on generic requirement mismatch
+protocol P3 {}
+
+protocol P4 {
+  associatedtype T
+}
+
+class Base {
+  func method<T: P3>(_: T) {}
+  func method<T: P4>(_: T) where T.T : P3 {}
+}
+
+class Derived: Base {
+  override func method<T: P3>(_: T) {}
 }

@@ -8,22 +8,24 @@
 // REQUIRES: executable_test
 
 // UNSUPPORTED: swift_test_mode_optimize_none_with_implicit_dynamic
+// Dynamic replacement is not supported when targeting Wasm.
+// UNSUPPORTED: wasm
 
 @_private(sourceFile: "dynamic_replacement_property_observer_orig.swift") import TestDidWillSet
 
-#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+#if canImport(Darwin)
   import Darwin
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
+#elseif canImport(Glibc)
   import Glibc
 #elseif os(Windows)
-  import MSVCRT
+  import CRT
   import WinSDK
 #else
 #error("Unsupported platform")
 #endif
 
 private func target_library_name(_ name: String) -> String {
-#if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
+#if canImport(Darwin)
   return "lib\(name).dylib"
 #elseif os(Windows)
   return "\(name).dll"

@@ -172,6 +172,32 @@ public:
   bool isRValue() const & { return StoredKind == Kind::RValue; }
   bool isLValue() const & { return StoredKind == Kind::LValue; }
 
+  /// Whether this argument is for a default argument that should be delayed.
+  /// Note that this will return false for caller-side default arguments which
+  /// are emitted directly.
+  bool isDelayedDefaultArg() const {
+    switch (StoredKind) {
+    case Kind::Invalid:
+      llvm_unreachable("argument source is invalid");
+    case Kind::RValue:
+    case Kind::LValue:
+      return false;
+    case Kind::Expr: {
+      auto *defaultArg = dyn_cast<DefaultArgumentExpr>(asKnownExpr());
+      if (!defaultArg)
+        return false;
+      return !defaultArg->isCallerSide();
+    }
+    }
+    llvm_unreachable("bad kind");
+  }
+
+  /// Return the default argument owner and parameter index, consuming
+  /// the argument source. Will assert if this is not a default argument.
+  DefaultArgumentExpr *asKnownDefaultArg() && {
+    return cast<DefaultArgumentExpr>(std::move(*this).asKnownExpr());
+  }
+
   /// Given that this source is storing an RValue, extract and clear
   /// that value.
   RValue &&asKnownRValue(SILGenFunction &SGF) && {
@@ -197,6 +223,9 @@ public:
   }
 
   Expr *findStorageReferenceExprForBorrow() &&;
+  Expr *findStorageReferenceExprForMoveOnly(SILGenFunction &SGF,
+                                      StorageReferenceOperationKind refKind) &&;
+  Expr *findStorageReferenceExprForBorrowExpr(SILGenFunction &SGF) &&;
 
   /// Given that this source is an expression, extract and clear
   /// that expression.
@@ -216,6 +245,7 @@ public:
                                 SGFContext C = SGFContext()) &&;
   ManagedValue getAsSingleValue(SILGenFunction &SGF,
                                 AbstractionPattern origFormalType,
+                                SILType loweredResultTy,
                                 SGFContext C = SGFContext()) &&;
 
   ManagedValue getConverted(SILGenFunction &SGF, const Conversion &conversion,
@@ -240,14 +270,11 @@ public:
                            AbstractionPattern origFormalType,
                            SILType expectedType = SILType()) &&;
 
-  /// Whether this argument source is an ArgumentShuffleExpr.
-  bool isShuffle() const;
-
   bool isObviouslyEqual(const ArgumentSource &other) const;
 
   ArgumentSource copyForDiagnostics() const;
 
-  void dump() const;
+  LLVM_DUMP_METHOD void dump() const;
   void dump(raw_ostream &os, unsigned indent = 0) const;
 
 private:
@@ -264,14 +291,17 @@ private:
 class PreparedArguments {
   SmallVector<AnyFunctionType::Param, 8> Params;
   std::vector<ArgumentSource> Arguments;
-  unsigned IsScalar : 1;
   unsigned IsNull : 1;
 public:
-  PreparedArguments() : IsScalar(false), IsNull(true) {}
-  PreparedArguments(ArrayRef<AnyFunctionType::Param> params, bool isScalar)
+  PreparedArguments() : IsNull(true) {}
+  explicit PreparedArguments(ArrayRef<AnyFunctionType::Param> params)
       : IsNull(true) {
-    emplace(params, isScalar);
+    emplace(params);
   }
+
+  // Create from an argument list.
+  PreparedArguments(ArrayRef<AnyFunctionType::Param> params,
+                    ArgumentList *argList);
 
   // Move-only.
   PreparedArguments(const PreparedArguments &) = delete;
@@ -279,10 +309,9 @@ public:
 
   PreparedArguments(PreparedArguments &&other)
     : Params(std::move(other.Params)), Arguments(std::move(other.Arguments)),
-      IsScalar(other.IsScalar), IsNull(other.IsNull) {}
+      IsNull(other.IsNull) {}
   PreparedArguments &operator=(PreparedArguments &&other) {
     Params = std::move(other.Params);
-    IsScalar = other.IsScalar;
     Arguments = std::move(other.Arguments);
     IsNull = other.IsNull;
     other.IsNull = true;
@@ -297,8 +326,6 @@ public:
   /// Returns true if this is a non-null and completed argument list.
   bool isValid() const {
     assert(!isNull());
-    if (IsScalar)
-      return Arguments.size() == 1;
     return Arguments.size() == Params.size();
   }
 
@@ -308,27 +335,17 @@ public:
     return Params;
   }
 
-  /// Is this a single-argument list?  Note that the argument might be a tuple.
-  bool isScalar() const {
-    assert(!isNull());
-    return IsScalar;
-  }
-
   MutableArrayRef<ArgumentSource> getSources() && {
     assert(isValid());
     return Arguments;
   }
 
   /// Emplace a (probably incomplete) argument list.
-  void emplace(ArrayRef<AnyFunctionType::Param> params, bool isScalar) {
+  void emplace(ArrayRef<AnyFunctionType::Param> params) {
     assert(isNull());
     Params.append(params.begin(), params.end());
-    IsScalar = isScalar;
     IsNull = false;
   }
-
-  /// Emplace an empty argument list.
-  void emplaceEmptyArgumentList(SILGenFunction &SGF);
 
   /// Add an emitted r-value argument to this argument list.
   void add(SILLocation loc, RValue &&arg) {
@@ -338,7 +355,7 @@ public:
 
   /// Add an arbitrary argument source to these arguments.
   ///
-  /// An argument list with an arbtrary argument source can't generally
+  /// An argument list with an arbitrary argument source can't generally
   /// be copied.
   void addArbitrary(ArgumentSource &&arg) {
     assert(!isNull());
@@ -351,6 +368,67 @@ public:
   bool isObviouslyEqual(const PreparedArguments &other) const;
 
   PreparedArguments copyForDiagnostics() const;
+};
+
+/// A class designed to provide a relatively optimal expansion
+/// of an argument source of tuple type.
+class ArgumentSourceExpansion {
+  enum class Kind : uint8_t {
+    ElementRValues,
+    TupleExpr,
+    Vanishing,
+  };
+
+  struct ElementRValuesStorage {
+    llvm::SmallVector<RValue, 4> Elements;
+    SILLocation Loc;
+
+    ElementRValuesStorage(SILLocation loc) : Loc(loc) {}
+  };
+
+  using StorageMembers = ExternalUnionMembers<ElementRValuesStorage,
+                                              TupleExpr *,
+                                              ArgumentSource *>;
+  static StorageMembers::Index getStorageIndexForKind(Kind kind) {
+    switch (kind) {
+    case Kind::ElementRValues:
+      return StorageMembers::indexOf<ElementRValuesStorage>();
+    case Kind::TupleExpr:
+      return StorageMembers::indexOf<TupleExpr*>();
+    case Kind::Vanishing:
+      return StorageMembers::indexOf<ArgumentSource *>();
+    }
+    llvm_unreachable("bad kind");
+  }
+
+  ExternalUnion<Kind, StorageMembers, getStorageIndexForKind> Storage;
+  Kind StoredKind;
+#ifndef NDEBUG
+  unsigned NumRemainingElements;
+#endif
+
+public:
+  /// Begin an expansion of the given argument source, which usually
+  /// must have tuple type.  However, if `vanishes` is passed, the
+  /// the argument source will *not* be expanded; the expansion behaves
+  /// instead as if it were of a nominal singleton tuple containing
+  /// the source.  (This is very useful for dealing with vanishing tuples
+  /// under variadic generics.)
+  ///
+  /// The expansion may keep a reference to the argument source passed in.
+  ArgumentSourceExpansion(SILGenFunction &SGF, ArgumentSource &&arg,
+                          bool vanishes = false);
+
+  ArgumentSourceExpansion(const ArgumentSourceExpansion &) = delete;
+  ArgumentSourceExpansion &operator=(const ArgumentSourceExpansion &) = delete;
+
+  ~ArgumentSourceExpansion() {
+    assert(NumRemainingElements == 0 && "didn't claim all elements?");
+    Storage.destruct(StoredKind);
+  }
+
+  void withElement(unsigned i,
+                   llvm::function_ref<void (ArgumentSource &&)> function);
 };
 
 } // end namespace Lowering

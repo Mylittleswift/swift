@@ -1,5 +1,7 @@
 // RUN: %target-swift-frontend -emit-sil -primary-file %s | %FileCheck %s
 
+// REQUIRES: swift_in_compiler
+
 // Test to ensure that mandatory inlining of generics with a dynamic Self
 // substitution works correctly with thick_metatype instructions and SIL
 // type lowering.
@@ -39,7 +41,7 @@ class C : P {
 // CHECK:       bb0(%0 : $C):
 // CHECK:         [[METATYPE:%.*]] = metatype $@thick @dynamic_self C.Type
 // CHECK-NEXT:    [[STATIC_METATYPE:%.*]] = upcast [[METATYPE]] : $@thick @dynamic_self C.Type to $@thick C.Type
-// CHECK-NEXT:    [[FN:%.*]] = class_method [[STATIC_METATYPE]] : $@thick C.Type, #C.init!allocator.1 : (C.Type) -> () -> C, $@convention(method) (@thick C.Type) -> @owned C
+// CHECK-NEXT:    [[FN:%.*]] = class_method [[STATIC_METATYPE]] : $@thick C.Type, #C.init!allocator : (C.Type) -> () -> C, $@convention(method) (@thick C.Type) -> @owned C
 // CHECK-NEXT:    [[RESULT2:%.*]] = apply [[FN]]([[STATIC_METATYPE]]) : $@convention(method) (@thick C.Type) -> @owned C
 // CHECK-NEXT:    [[RESULT:%.*]] = unchecked_ref_cast [[RESULT2]] : $C to $C
 // CHECK-NEXT:    return [[RESULT]] : $C
@@ -51,10 +53,8 @@ class C : P {
 // CHECK:       bb0(%0 : $C):
 // CHECK:         [[METATYPE:%.*]] = metatype $@thick @dynamic_self C.Type
 // CHECK-NEXT:    [[STATIC_METATYPE:%.*]] = upcast [[METATYPE]] : $@thick @dynamic_self C.Type to $@thick C.Type
-// CHECK-NEXT:    [[FN:%.*]] = class_method [[STATIC_METATYPE]] : $@thick C.Type, #C.init!allocator.1 : (C.Type) -> () -> C, $@convention(method) (@thick C.Type) -> @owned C
+// CHECK-NEXT:    [[FN:%.*]] = class_method [[STATIC_METATYPE]] : $@thick C.Type, #C.init!allocator : (C.Type) -> () -> C, $@convention(method) (@thick C.Type) -> @owned C
 // CHECK-NEXT:    [[RESULT2:%.*]] = apply [[FN]]([[STATIC_METATYPE]]) : $@convention(method) (@thick C.Type) -> @owned C
-// CHECK-NEXT:    tuple ()
-// CHECK-NEXT:    tuple ()
 // CHECK-NEXT:    return %5 : $C
   func returnsNewInstanceTransparentProtocol() -> Self {
     return makeInstanceTransparentProtocol(type(of: self))

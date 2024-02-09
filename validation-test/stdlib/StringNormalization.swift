@@ -9,17 +9,16 @@
 // See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
+
+// rdar://85480347
+// REQUIRES: rdar85480347
+
 // RUN: %empty-directory(%t)
-// RUN: if [ %target-runtime == "objc" ]; \
-// RUN: then \
-// RUN:   %target-clang -fobjc-arc %S/Inputs/NSSlowString/NSSlowString.m -c -o %t/NSSlowString.o && \
-// RUN:   %target-build-swift -I %S/Inputs/NSSlowString/ %t/NSSlowString.o %s -o %t/a.out; \
-// RUN: else \
-// RUN:   %target-build-swift %s -o %t/a.out; \
-// RUN: fi
+// RUN: %target-clang -fobjc-arc %S/Inputs/NSSlowString/NSSlowString.m -c -o %t/NSSlowString.o
+// RUN: %target-build-swift -I %S/Inputs/NSSlowString/ %t/NSSlowString.o %s -o %t/a.out
 
 // RUN: %target-codesign %t/a.out
-// RUN: %target-run %t/a.out %S/Inputs/NormalizationTest.txt
+// RUN: %target-run %t/a.out %S/Inputs/NormalizationTest.txt %S/Inputs/NormalizationTest15.txt
 // REQUIRES: executable_test
 // REQUIRES: objc_interop
 // REQUIRES: optimized_stdlib
@@ -56,6 +55,10 @@ private func expectEqualIterators(
 
 var tests = TestSuite("StringNormalization")
 
+//==------------------------------------------------------------------------==//
+// Older stdlib with ICU and supporting Unicode 11
+//==------------------------------------------------------------------------==//
+
 tests.test("StringNormalization/ConvertToNFC")
 .skip(.custom({
       if #available(macOS 10.14, iOS 12, watchOS 5, tvOS 12, *) { return false }
@@ -90,6 +93,43 @@ tests.test("StringNormalization/ConvertNFK*ToNFKC")
         "NFKD": test.NFKD
       ],
       stackTrace: SourceLocStack(test.loc))
+  }
+}
+
+//==------------------------------------------------------------------------==//
+// Newer stdlib with native normalization and supporting Unicode 15
+//==------------------------------------------------------------------------==//
+
+if #available(SwiftStdlib 5.9, *) {
+  tests.test("StringNormalization15/ConvertToNFC")
+  .code {
+    for test in normalizationTests14 {
+      expectEqualIterators(
+        label: "NFC",
+        expected: test.NFC,
+        others: [
+          "source": test.source,
+          "NFC": test.NFC,
+          "NFD": test.NFD
+        ],
+        stackTrace: SourceLocStack(test.loc)
+      )
+    }
+  }
+
+  tests.test("StringNormalization15/ConvertNFK*ToNFKC")
+  .code {
+    for test in normalizationTests14 {
+      expectEqualIterators(
+        label: "NFKC",
+        expected: test.NFKC,
+        others: [
+          "NFKC": test.NFKC,
+          "NFKD": test.NFKD
+        ],
+        stackTrace: SourceLocStack(test.loc)
+      )
+    }
   }
 }
 

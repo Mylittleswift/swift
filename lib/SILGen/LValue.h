@@ -105,6 +105,7 @@ public:
     CoroutineAccessorKind,      // coroutine accessor
     ValueKind,                  // random base pointer as an lvalue
     PhysicalKeyPathApplicationKind, // applying a key path
+    BorrowValueKind,            // load_borrow the base rvalue for a projection
 
     // Logical LValue kinds
     GetterSetterKind,           // property or subscript getter/setter
@@ -114,9 +115,12 @@ public:
     WritebackPseudoKind,        // a fake component to customize writeback
     OpenNonOpaqueExistentialKind,  // opened class or metatype existential
     LogicalKeyPathApplicationKind, // applying a key path
+    InitAccessorKind,           // init accessor
+    
     // Translation LValue kinds (a subtype of logical)
     OrigToSubstKind,            // generic type substitution
     SubstToOrigKind,            // generic type substitution
+    UncheckedConversionKind,    // unchecked_X_cast
 
     FirstLogicalKind = GetterSetterKind,
     FirstTranslationKind = OrigToSubstKind,
@@ -207,12 +211,29 @@ public:
 /// The only operation on this component is `project`.
 class PhysicalPathComponent : public PathComponent {
   virtual void _anchor() override;
+  llvm::Optional<ActorIsolation> ActorIso;
 
 protected:
-  PhysicalPathComponent(LValueTypeData typeData, KindTy Kind)
-    : PathComponent(typeData, Kind) {
+  PhysicalPathComponent(LValueTypeData typeData, KindTy Kind,
+                        llvm::Optional<ActorIsolation> actorIso = llvm::None)
+      : PathComponent(typeData, Kind), ActorIso(actorIso) {
     assert(isPhysical() && "PhysicalPathComponent Kind isn't physical");
   }
+
+public:
+  /// Obtains and consumes the actor-isolation required for any loads of
+  /// this component.
+  llvm::Optional<ActorIsolation> takeActorIsolation() {
+    llvm::Optional<ActorIsolation> current = ActorIso;
+    ActorIso = llvm::None;
+    return current;
+  }
+
+  void set(SILGenFunction &SGF, SILLocation loc,
+           ArgumentSource &&value, ManagedValue base) &&;
+
+  /// Determines whether this component has any actor-isolation.
+  bool hasActorIsolation() const { return ActorIso.has_value(); }
 };
 
 inline PhysicalPathComponent &PathComponent::asPhysical() {
@@ -261,15 +282,15 @@ public:
   ManagedValue project(SILGenFunction &SGF, SILLocation loc,
                        ManagedValue base) && override;
 
-  struct AccessedStorage {
+  struct AccessStorage {
     AbstractStorageDecl *Storage;
     bool IsSuper;
     const PreparedArguments *Indices;
-    Expr *IndexExprForDiagnostics;
+    ArgumentList *ArgListForDiagnostics;
   };
 
   /// Get the storage accessed by this component.
-  virtual Optional<AccessedStorage> getAccessedStorage() const = 0;
+  virtual llvm::Optional<AccessStorage> getAccessStorage() const = 0;
 
   /// Perform a writeback on the property.
   ///
@@ -299,8 +320,8 @@ protected:
   }
 
 public:
-  Optional<AccessedStorage> getAccessedStorage() const override {
-    return None;
+  llvm::Optional<AccessStorage> getAccessStorage() const override {
+    return llvm::None;
   }
 
   RValue get(SILGenFunction &SGF, SILLocation loc,
@@ -348,7 +369,7 @@ public:
                          CanType substFormalType);
 
   static LValue forAddress(SGFAccessKind accessKind, ManagedValue address,
-                           Optional<SILAccessEnforcement> enforcement,
+                           llvm::Optional<SILAccessEnforcement> enforcement,
                            AbstractionPattern origFormalType,
                            CanType substFormalType);
 
@@ -405,19 +426,33 @@ public:
     assert(&component == Path.back().get());
     Path.pop_back();
   }
-  
+
+  /// Pop the last component off this LValue unsafely. Validates that the
+  /// component is of kind \p kind as a soundness check.
+  ///
+  /// Please be careful when using this!
+  void unsafelyDropLastComponent(PathComponent::KindTy kind) & {
+    assert(kind == Path.back()->getKind());
+    Path.pop_back();
+  }
+
   /// Add a new component at the end of the access path of this lvalue.
   template <class T, class... As>
   void add(As &&... args) {
     Path.emplace_back(new T(std::forward<As>(args)...));
   }
 
-  void addNonMemberVarComponent(SILGenFunction &SGF, SILLocation loc,
-                                VarDecl *var, Optional<SubstitutionMap> subs,
-                                LValueOptions options,
-                                SGFAccessKind accessKind,
-                                AccessStrategy strategy,
-                                CanType formalRValueType);
+  // NOTE: Optional<ActorIsolation> inside of LValues
+  // Some path components carry an ActorIsolation value, which is an indicator
+  // that the access to that component must be performed by switching to the
+  // given actor's isolation domain. If the indicator is not present, that
+  // only means that a switch does not need to be emitted during the access.
+
+  void addNonMemberVarComponent(
+      SILGenFunction &SGF, SILLocation loc, VarDecl *var, SubstitutionMap subs,
+      LValueOptions options, SGFAccessKind accessKind, AccessStrategy strategy,
+      CanType formalRValueType,
+      llvm::Optional<ActorIsolation> actorIso = llvm::None);
 
   /// Add a member component to the access path of this lvalue.
   void addMemberComponent(SILGenFunction &SGF, SILLocation loc,
@@ -429,29 +464,23 @@ public:
                           AccessStrategy accessStrategy,
                           CanType formalRValueType,
                           PreparedArguments &&indices,
-                          Expr *indexExprForDiagnostics);
+                          ArgumentList *argListForDiagnostics);
 
-  void addMemberVarComponent(SILGenFunction &SGF, SILLocation loc,
-                             VarDecl *var,
-                             SubstitutionMap subs,
-                             LValueOptions options,
-                             bool isSuper,
-                             SGFAccessKind accessKind,
-                             AccessStrategy accessStrategy,
-                             CanType formalRValueType,
-                             bool isOnSelf = false);
+  void
+  addMemberVarComponent(SILGenFunction &SGF, SILLocation loc, VarDecl *var,
+                        SubstitutionMap subs, LValueOptions options,
+                        bool isSuper, SGFAccessKind accessKind,
+                        AccessStrategy accessStrategy, CanType formalRValueType,
+                        bool isOnSelf = false,
+                        llvm::Optional<ActorIsolation> actorIso = llvm::None);
 
-  void addMemberSubscriptComponent(SILGenFunction &SGF, SILLocation loc,
-                                   SubscriptDecl *subscript,
-                                   SubstitutionMap subs,
-                                   LValueOptions options,
-                                   bool isSuper,
-                                   SGFAccessKind accessKind,
-                                   AccessStrategy accessStrategy,
-                                   CanType formalRValueType,
-                                   PreparedArguments &&indices,
-                                   Expr *indexExprForDiagnostics,
-                                   bool isOnSelfParameter = false);
+  void addMemberSubscriptComponent(
+      SILGenFunction &SGF, SILLocation loc, SubscriptDecl *subscript,
+      SubstitutionMap subs, LValueOptions options, bool isSuper,
+      SGFAccessKind accessKind, AccessStrategy accessStrategy,
+      CanType formalRValueType, PreparedArguments &&indices,
+      ArgumentList *argListForDiagnostics, bool isOnSelfParameter = false,
+      llvm::Optional<ActorIsolation> actorIso = llvm::None);
 
   /// Add a subst-to-orig reabstraction component.  That is, given
   /// that this l-value trafficks in values following the substituted
@@ -501,7 +530,7 @@ public:
                                  SGFAccessKind selfAccess,
                                  SGFAccessKind otherAccess);
 
-  void dump() const;
+  SWIFT_DEBUG_DUMP;
   void dump(raw_ostream &os, unsigned indent = 0) const;
 };
   
@@ -538,7 +567,7 @@ struct LLVM_LIBRARY_VISIBILITY ExclusiveBorrowFormalAccess : FormalAccess {
                         SILGenFunction &SGF) const;
 
   void performWriteback(SILGenFunction &SGF, bool isFinal) {
-    Scope S(SGF.Cleanups, CleanupLocation::get(loc));
+    Scope S(SGF.Cleanups, CleanupLocation(loc));
     component->writeback(SGF, loc, base, materialized, isFinal);
   }
 
@@ -601,6 +630,25 @@ struct LLVM_LIBRARY_VISIBILITY UnenforcedFormalAccess : FormalAccess {
   void emitEndAccess(SILGenFunction &SGF);
 
   // Only called at the end formal evaluation scope. End this access.
+  void finishImpl(SILGenFunction &SGF) override;
+};
+
+// A formal access that keeps an LValue alive across an expression that uses an
+// unsafe pointer into that LValue. This supports emitLValueToPointer, which
+// handles InoutToPointerExpr. This formal access is nested within whatever
+// formal access is needed for the LValue itself and emits a fix_lifetime
+// instruction after the apply.
+struct LLVM_LIBRARY_VISIBILITY LValueToPointerFormalAccess : FormalAccess {
+  static SILValue enter(SILGenFunction &SGF, SILLocation loc, SILValue address);
+
+  SILValue address;
+
+  LValueToPointerFormalAccess(SILLocation loc, SILValue address,
+                              CleanupHandle cleanup)
+    : FormalAccess(sizeof(*this), FormalAccess::Unenforced, loc, cleanup),
+    address(address) {}
+
+  // Only called at the end formal evaluation scope. Emit fix_lifetime.
   void finishImpl(SILGenFunction &SGF) override;
 };
 

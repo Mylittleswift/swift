@@ -12,10 +12,15 @@
 
 /// A sequence whose elements consist of the elements that follow the initial
 /// consecutive elements of some base sequence that satisfy a given predicate.
-@_fixed_layout // lazy-performance
+@frozen // lazy-performance
 public struct LazyDropWhileSequence<Base: Sequence> {
   public typealias Element = Base.Element
-  
+
+  @usableFromInline // lazy-performance
+  internal var _base: Base
+  @usableFromInline // lazy-performance
+  internal let _predicate: (Element) -> Bool
+
   /// Create an instance with elements `transform(x)` for each element
   /// `x` of base.
   @inlinable // lazy-performance
@@ -24,10 +29,6 @@ public struct LazyDropWhileSequence<Base: Sequence> {
     self._predicate = predicate
   }
 
-  @usableFromInline // lazy-performance
-  internal var _base: Base
-  @usableFromInline // lazy-performance
-  internal let _predicate: (Element) -> Bool
 }
 
 extension LazyDropWhileSequence {
@@ -37,15 +38,9 @@ extension LazyDropWhileSequence {
   /// This is the associated iterator for the `LazyDropWhileSequence`,
   /// `LazyDropWhileCollection`, and `LazyDropWhileBidirectionalCollection`
   /// types.
-  @_fixed_layout // lazy-performance
+  @frozen // lazy-performance
   public struct Iterator {
     public typealias Element = Base.Element
-    
-    @inlinable // lazy-performance
-    internal init(_base: Base.Iterator, predicate: @escaping (Element) -> Bool) {
-      self._base = _base
-      self._predicate = predicate
-    }
 
     @usableFromInline // lazy-performance
     internal var _predicateHasFailed = false
@@ -53,6 +48,12 @@ extension LazyDropWhileSequence {
     internal var _base: Base.Iterator
     @usableFromInline // lazy-performance
     internal let _predicate: (Element) -> Bool
+
+    @inlinable // lazy-performance
+    internal init(_base: Base.Iterator, predicate: @escaping (Element) -> Bool) {
+      self._base = _base
+      self._predicate = predicate
+    }
   }
 }
 

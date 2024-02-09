@@ -206,28 +206,31 @@ public:
     unsigned asInt() const { return *reinterpret_cast<const unsigned *>(this); }
 
     struct ToLiveSucc {
-      Optional<SuccessorID> operator()(Optional<SuccessorID> ID) const {
+      llvm::Optional<SuccessorID>
+      operator()(llvm::Optional<SuccessorID> ID) const {
         return ID;
       }
     };
 
     struct ToLiveLocalSucc {
-      Optional<unsigned> operator()(Optional<SuccessorID> ID) const {
+      llvm::Optional<unsigned>
+      operator()(llvm::Optional<SuccessorID> ID) const {
         if (!ID)
-          return None;
+          return llvm::None;
         if ((*ID).IsNonLocal)
-          return None;
-        return (*ID).ID;
+          return llvm::None;
+        return static_cast<unsigned>((*ID).ID);
       }
     };
 
     struct ToLiveNonLocalSucc {
-      Optional<unsigned> operator()(Optional<SuccessorID> ID) const {
+      llvm::Optional<unsigned>
+      operator()(llvm::Optional<SuccessorID> ID) const {
         if (!ID)
-          return None;
+          return llvm::None;
         if (!(*ID).IsNonLocal)
-          return None;
-        return (*ID).ID;
+          return llvm::None;
+        return static_cast<unsigned>((*ID).ID);
       }
     };
   };
@@ -237,8 +240,7 @@ public:
 
   /// An iterator that knows how to iterate over the subregion indices of a
   /// region.
-  class subregion_iterator :
-    public std::iterator<std::bidirectional_iterator_tag, unsigned> {
+  class subregion_iterator {
     friend struct SubregionData;
     llvm::SmallVectorImpl<SubregionID>::const_iterator InnerIter;
     const llvm::SmallVectorImpl<std::pair<unsigned, unsigned>> *Subloops;
@@ -323,8 +325,7 @@ public:
 
   /// An iterator that knows how to iterate over the backedge indices of a
   /// region.
-  class backedge_iterator
-      : public std::iterator<std::bidirectional_iterator_tag, unsigned> {
+  class backedge_iterator {
     friend struct SubregionData;
     using InnerIterTy = llvm::SmallVectorImpl<unsigned>::const_iterator;
     llvm::Optional<InnerIterTy> InnerIter;
@@ -345,7 +346,7 @@ public:
     /// results in an unreachable being hit.
     backedge_iterator() : InnerIter() {}
 
-    bool hasValue() const { return InnerIter.hasValue(); }
+    bool hasValue() const { return InnerIter.has_value(); }
 
     /// Return the index of the current backedge index.
     unsigned operator*() const { return **InnerIter; }
@@ -369,11 +370,11 @@ public:
       return iter;
     }
     bool operator==(backedge_iterator rhs) const {
-      if (InnerIter.hasValue() != rhs.InnerIter.hasValue())
+      if (InnerIter.has_value() != rhs.InnerIter.has_value())
         llvm_unreachable("Comparing uncomparable iterators");
       // Now we know that the two either both have values or both do not have
       // values.
-      if (!InnerIter.hasValue())
+      if (!InnerIter.has_value())
         return true;
       return *InnerIter == *rhs.InnerIter;
     }
@@ -384,7 +385,7 @@ public:
 private:
   /// A pointer to one of a Loop, Basic Block, or Function represented by this
   /// region.
-  llvm::PointerUnion3<FunctionTy *, LoopTy *, BlockTy *> Ptr;
+  llvm::PointerUnion<FunctionTy *, LoopTy *, BlockTy *> Ptr;
 
   /// The ID of this region.
   unsigned ID;
@@ -591,11 +592,11 @@ public:
     return getSubregionData().rend();
   }
 
-  llvm::iterator_range<subregion_iterator> getSubregions() const {
+  iterator_range<subregion_iterator> getSubregions() const {
     return {subregion_begin(), subregion_end()};
   }
 
-  llvm::iterator_range<subregion_reverse_iterator>
+  iterator_range<subregion_reverse_iterator>
   getReverseSubregions() const {
     return {subregion_rbegin(), subregion_rend()};
   }
@@ -626,13 +627,13 @@ public:
     return getSubregionData().getBackedgeRegions();
   }
 
-  Optional<unsigned> getBackedgeRegion() const {
+  llvm::Optional<unsigned> getBackedgeRegion() const {
     if (isBlock())
-      return None;
+      return llvm::None;
     auto bedge_begin = getSubregionData().backedge_begin();
     auto bedge_end = getSubregionData().backedge_end();
     if (bedge_begin == bedge_end)
-      return None;
+      return llvm::None;
     return *bedge_begin;
   }
 
@@ -674,7 +675,7 @@ public:
   unsigned succ_size() const { return Succs.size(); }
 
 private:
-  using InnerSuccRange = IteratorRange<decltype(Succs)::const_iterator>;
+  using InnerSuccRange = iterator_range<decltype(Succs)::const_iterator>;
 
 public:
   using SuccRange =
@@ -718,7 +719,7 @@ public:
 
   /// Return the ID of the parent region of this BB. Asserts if this is a
   /// function region.
-  Optional<unsigned> getParentID() const { return ParentID; }
+  llvm::Optional<unsigned> getParentID() const { return ParentID; }
 
   unsigned getRPONumber() const {
     if (isBlock())
@@ -726,8 +727,9 @@ public:
     return getSubregionData().RPONumOfHeaderBlock;
   }
 
-  void dump() const;
-  void print(llvm::raw_ostream &os, bool insertSpaces = false) const;
+  void dump(bool isVerbose = false) const;
+  void print(llvm::raw_ostream &os, bool isShort = false,
+             bool isVerbose = false) const;
   void dumpName() const;
   void printName(llvm::raw_ostream &os) const;
 
@@ -762,7 +764,7 @@ private:
 
   unsigned addSucc(LoopRegion *Successor) {
     assert(!isFunction() && "Functions cannot have successors");
-    return Succs.insert(SuccessorID(Successor->getID(), false));
+    return Succs.insert(SuccessorID(Successor->getID(), false)).first;
   }
 
   void replacePred(unsigned OldPredID, unsigned NewPredID) {
@@ -932,11 +934,11 @@ public:
   RegionTy *getRegionForNonLocalSuccessor(const RegionTy *Child,
                                           unsigned SuccID) const;
 
-  Optional<unsigned> getGrandparentID(const RegionTy *GrandChild) {
+  llvm::Optional<unsigned> getGrandparentID(const RegionTy *GrandChild) {
     if (auto ParentID = GrandChild->getParentID()) {
       return getRegion(*ParentID)->getParentID();
     }
-    return None;
+    return llvm::None;
   }
 
   /// Look up the region associated with this block and return it. Asserts if
@@ -964,7 +966,7 @@ public:
   const_iterator end() const { return IDToRegionMap.end(); }
   unsigned size() const { return IDToRegionMap.size(); }
   bool empty() const { return IDToRegionMap.empty(); }
-  llvm::iterator_range<const_iterator> getRegions() const {
+  iterator_range<const_iterator> getRegions() const {
     return {begin(), end()};
   }
 
@@ -1082,7 +1084,7 @@ public:
 
   virtual std::unique_ptr<LoopRegionFunctionInfo>
   newFunctionAnalysis(SILFunction *F) override {
-    return llvm::make_unique<LoopRegionFunctionInfo>(F, POA->get(F),
+    return std::make_unique<LoopRegionFunctionInfo>(F, POA->get(F),
                                                      SLA->get(F));
   }
 

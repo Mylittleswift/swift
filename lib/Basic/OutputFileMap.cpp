@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/Basic/OutputFileMap.h"
+#include "swift/Basic/FileTypes.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Path.h"
@@ -87,7 +88,10 @@ void OutputFileMap::dump(llvm::raw_ostream &os, bool Sort) const {
       const TypeToPathMap &Map = InputPair.second;
       std::vector<TypePathPair> Pairs;
       Pairs.insert(Pairs.end(), Map.begin(), Map.end());
-      std::sort(Pairs.begin(), Pairs.end());
+      std::sort(Pairs.begin(), Pairs.end(), [](const TypePathPair &LHS,
+                                               const TypePathPair &RHS) -> bool {
+        return LHS < RHS;
+      });
       for (auto &OutputPair : Pairs) {
         printOutputPair(InputPair.first, OutputPair);
       }
@@ -109,7 +113,7 @@ static void writeQuotedEscaped(llvm::raw_ostream &os,
 
 void OutputFileMap::write(llvm::raw_ostream &os,
                           ArrayRef<StringRef> inputs) const {
-  for (const auto input : inputs) {
+  for (const auto &input : inputs) {
     writeQuotedEscaped(os, input);
     os << ":";
 
@@ -224,7 +228,7 @@ OutputFileMap::parse(std::unique_ptr<llvm::MemoryBuffer> Buffer,
 
       llvm::SmallString<128> PathStorage;
       OutputMap.insert(std::pair<file_types::ID, std::string>(
-          Kind, resolvePath(Path, PathStorage)));
+          Kind, resolvePath(Path, PathStorage).str()));
     }
 
     llvm::SmallString<128> InputStorage;

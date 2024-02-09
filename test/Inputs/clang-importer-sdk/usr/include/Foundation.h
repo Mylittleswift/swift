@@ -7,6 +7,7 @@
 #import <CoreFoundation.h>
 #import <CoreGraphics.h>
 #endif
+#import <stdbool.h>
 
 #define NS_DESIGNATED_INITIALIZER __attribute__((objc_designated_initializer))
 
@@ -262,6 +263,7 @@ __attribute__((warn_unused_result)) NSString *NSStringToNSString(NSString *str);
 @property (nonnull) NSDictionary<id <NSCopying>, Bee *> *anythingToBees;
 
 @property(getter=isMakingHoney) BOOL makingHoney;
+@property(readonly,getter=isEmpty) bool empty;
 @property(setter=assignGuard:) id guard;
 
 + (instancetype)hiveWithQueen:(Bee *)queen;
@@ -383,6 +385,47 @@ typedef NS_ENUM(NSInteger, NSPrefixWordBreakReordered2Custom) {
   PrefixWordBreakReordered2ProblemCase __attribute__((swift_name("problemCase"))),
   NSPrefixWordBreakReordered2GoodCase,
   NSPrefixWordBreakReordered2DeprecatedGoodCase __attribute__((deprecated)),
+};
+
+typedef NS_ENUM(NSInteger, NSPrefixWordBreakForgotToDeprecate) {
+  NSPrefixWordBreakNewName1,
+  NSPrefixWordBreakNewName2,
+  NSOldName1PrefixWordBreak = NSPrefixWordBreakNewName1, // should have been deprecated
+};
+
+typedef NS_ENUM(NSInteger, NSPrefixWordBreakInvalidWord) {
+  NSPrefixWordBreakFoo,
+  NSPrefixWordBreakBar,
+  NSPrefixWordBreak42,  // expected prefix would have left an invalid identifier
+};
+
+// Check tiebreaking rules. In each case, the diagnostic should choose the 'Better' case over the 'Worse' case.
+typedef NS_ENUM(NSInteger, NSPrefixWordBreakSuffixTieBreakers) {
+  // Available preferred over unavailable.
+  NSPrefixWordBreakBetterForTest1,
+  NSPrefixWordBreakWorseForTest1 __attribute__((unavailable)),
+
+  // Un-deprecated preferred over deprecated.
+  NSPrefixWordBreakBetterForTest2,
+  NSPrefixWordBreakWorseForTest2 __attribute__((deprecated)),
+
+  // Shorter preferred over longer (it's a closer match).
+  NSPrefixWordBreakBetterForTest3,
+  NSPrefixWordBreakWorseXXXForTest3,
+
+  // Alphabetically first preferred over second (arbitrary tiebreaker).
+  NSPrefixWordBreakBetterForTest4,
+  NSPrefixWordBreakWorseXForTest4,
+
+  // Make sure we're not choosing based on ordering.
+  NSPrefixWordBreakWorseXForTest5,
+  NSPrefixWordBreakBetterForTest5,
+};
+
+typedef NS_OPTIONS(NSInteger, NSPrefixWordBreakOptions) {
+  NSPrefixWordBreakNewOption1 = 0x1,
+  NSPrefixWordBreakNewOption2 = 0x2,
+  NSOldOption1PrefixWordBreak = NSPrefixWordBreakNewOption1, // should have been deprecated
 };
 
 typedef NS_ENUM(NSInteger, NSSwiftNameAllTheThings) {
@@ -947,7 +990,7 @@ __attribute__((availability(macosx, introduced = 10.52)))
 @end
 
 @interface NSObject (Silly)
--(void)doSelector:(SEL)selector;
+- (void)doSelector:(nonnull SEL)selector;
 @end
 
 @interface Bee (Gerunds)
@@ -1071,7 +1114,7 @@ extern NSString *NSHTTPRequestKey;
 @end
 
 @interface NSObject (Selectors)
--(void)messageSomeObject:(nonnull id)object selector:(SEL)selector;
+- (void)messageSomeObject:(nonnull id)object selector:(nonnull SEL)selector;
 @end
 
 @interface NSOperation : NSObject
@@ -1180,4 +1223,16 @@ void takeNullableId(_Nullable id);
 
 @interface IUOProperty
 @property (readonly) id<OptionalRequirements> iuo;
+@end
+
+@interface ColorDescriptor : NSObject <NSCopying>
+@end
+
+@interface ColorArray : NSObject
+- (ColorDescriptor *)objectAtIndexedSubscript:(NSUInteger)attachmentIndex;
+- (void)setObject:(nullable ColorDescriptor *)attachment atIndexedSubscript:(NSUInteger)attachmentIndex;
+@end
+
+@interface PaletteDescriptor : NSObject <NSCopying>
+@property (readonly, nonnull) ColorArray *colors;
 @end

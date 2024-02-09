@@ -9,12 +9,12 @@
 // TODO: rdar://problem/33388782
 // REQUIRES: CPU=x86_64
 
-#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+#if canImport(Darwin)
   import Darwin
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
+#elseif canImport(Glibc)
   import Glibc
 #elseif os(Windows)
-  import MSVCRT
+  import CRT
 
   let S_IRUSR: Int32 = ucrt._S_IREAD
   let S_IWUSR: Int32 = 0

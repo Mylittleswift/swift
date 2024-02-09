@@ -30,10 +30,10 @@ namespace swift {
 ///   : $@convention(method) <τ_0_0 where τ_0_0 : P, τ_0_0 : Q>
 ///     (@guaranteed τ_0_0) -> @owned τ_0_0
 ///
-/// When successfull, ConcreteExistentialInfo can be used to determine the
+/// When successful, ConcreteExistentialInfo can be used to determine the
 /// concrete type of the opened existential.
 struct OpenedArchetypeInfo {
-  ArchetypeType *OpenedArchetype = nullptr;
+  OpenedArchetypeType *OpenedArchetype = nullptr;
   // The opened value.
   SingleValueInstruction *OpenedArchetypeValue;
   // The existential value.
@@ -49,6 +49,8 @@ struct OpenedArchetypeInfo {
     assert(!OpenedArchetype || (OpenedArchetypeValue && ExistentialValue));
     return OpenedArchetype;
   }
+  
+  void dump() const;
 };
 
 /// Record conformance and concrete type info derived from an init_existential
@@ -83,7 +85,7 @@ struct ConcreteExistentialInfo {
 
   // Search for a recognized pattern in which the given existential value is
   // initialized to a concrete type. Constructs a valid ConcreteExistentialInfo
-  // object if successfull.
+  // object if successful.
   ConcreteExistentialInfo(SILValue existential, SILInstruction *user);
 
   // This constructor initializes a ConcreteExistentialInfo based on already
@@ -91,18 +93,19 @@ struct ConcreteExistentialInfo {
   ConcreteExistentialInfo(SILValue existential, SILInstruction *user,
                           CanType ConcreteType, ProtocolDecl *Protocol);
 
-  /// For scenerios where ConcreteExistentialInfo is created using a known
+  /// For scenarios where ConcreteExistentialInfo is created using a known
   /// ConcreteType and ProtocolDecl, the ConcreteValue can be null.
   bool isValid() const { return ConcreteType && !ExistentialSubs.empty(); }
 
   // Do a conformance lookup on ConcreteType with the given requirement, P. If P
   // is satisfiable based on the existential's conformance, return the new
   // conformance on P. Otherwise return None.
-  Optional<ProtocolConformanceRef>
-  lookupExistentialConformance(ProtocolDecl *P) const {
+  ProtocolConformanceRef lookupExistentialConformance(ProtocolDecl *P) const {
     CanType selfTy = P->getSelfInterfaceType()->getCanonicalType();
     return ExistentialSubs.lookupConformance(selfTy, P);
   }
+  
+  void dump() const;
 
 private:
   void initializeSubstitutionMap(
@@ -116,7 +119,7 @@ private:
 struct ConcreteOpenedExistentialInfo {
   OpenedArchetypeInfo OAI;
   // If CEI has a value, it must be valid.
-  Optional<ConcreteExistentialInfo> CEI;
+  llvm::Optional<ConcreteExistentialInfo> CEI;
 
   ConcreteOpenedExistentialInfo(Operand &use);
 
@@ -132,6 +135,8 @@ struct ConcreteOpenedExistentialInfo {
     assert(CEI->isValid());
     return true;
   }
+  
+  void dump() const;
 };
 
 } // end namespace swift

@@ -9,7 +9,7 @@ let r3 : Optional<() rethrows -> ()> = nil // expected-error {{only function dec
 
 func f1(_ f: () throws -> ()) rethrows { try f() }
 func f2(_ f: () -> ()) rethrows { f() } // expected-error {{'rethrows' function must take a throwing function argument}}
-func f3(_ f: UndeclaredFunctionType) rethrows { f() } // expected-error {{use of undeclared type 'UndeclaredFunctionType'}}
+func f3(_ f: UndeclaredFunctionType) rethrows { f() } // expected-error {{cannot find type 'UndeclaredFunctionType' in scope}}
 
 /** Protocol conformance checking ********************************************/
 
@@ -71,10 +71,10 @@ class C1 : Super {
 
 class C2 : Super {
   override func tf() throws {}
-  override func nf() throws {} // expected-error {{cannot override non-throwing method with throwing method}}
+  override func nf() throws {} // expected-error {{cannot override non-throwing instance method with throwing instance method}}
 
   override func thf(_ f: () throws -> ()) throws {}
-  override func nhf(_ f: () throws -> ()) throws {} // expected-error {{cannot override non-throwing method with throwing method}}
+  override func nhf(_ f: () throws -> ()) throws {} // expected-error {{cannot override non-throwing instance method with throwing instance method}}
   override func rhf(_ f: () throws -> ()) throws {} // expected-error {{override of 'rethrows' method should also be 'rethrows'}}
 }
 
@@ -83,7 +83,7 @@ class C3 : Super {
   override func nf() {}
 
   override func thf(_ f: () throws -> ()) rethrows {}
-  override func nhf(_ f: () throws -> ()) rethrows {} // expected-error {{cannot override non-throwing method with throwing method}}
+  override func nhf(_ f: () throws -> ()) rethrows {} // expected-error {{cannot override non-throwing instance method with throwing instance method}}
   override func rhf(_ f: () throws -> ()) rethrows {}
 }
 
@@ -468,7 +468,7 @@ func testThrowsInCatchInRethrows(_ fn: () throws -> Void) rethrows {
   }
 }
 
-// Sanity-check that throwing in catch blocks behaves as expected outside of
+// Soundness-check that throwing in catch blocks behaves as expected outside of
 // rethrows functions
 
 func testThrowsInCatch(_ fn: () throws -> Void) {
@@ -536,7 +536,7 @@ func testDoRethrow() {
   DoRethrowGeneric<Int>().method(fn:) { (a, b) in return a }
 }
 
-// https://bugs.swift.org/browse/SR-7120 - capture lists
+// https://github.com/apple/swift/issues/49668
 func rethrowsWithCaptureList<R, T>(
   array: [T],
   operation: (Int) throws -> R
@@ -553,10 +553,10 @@ public func rdar40472018() {
 }
 
 
-// https://bugs.swift.org/browse/SR-6299
+// https://github.com/apple/swift/issues/48849
 // Verify that we do not emit an invalid
 //   "... can throw but the expression is not marked with 'try'"
-// error on the use of the operators.
+// error on the use of operators.
 
 infix operator <|: infixr0
 infix operator |>: infixl1
@@ -611,4 +611,80 @@ func rdar_47550715() {
 
   func foo(_: A<F>? = nil) {} // Ok
   func bar(_: A<F>? = .none) {} // Ok
+}
+
+// https://github.com/apple/swift/issues/56630
+// Test cases for diagnostic note 'because_rethrows_default_argument_throws'
+
+func nonThrowableDefaultRethrows(_ f: () throws -> () = {}) rethrows {
+  try f()
+}
+
+// FIXME: This should compile and not emit a diagnostic because ideally the
+// compiler could statically know the default argument value could never throw.
+// (https://github.com/apple/swift/issues/44143)
+nonThrowableDefaultRethrows() // expected-error {{call can throw but is not marked with 'try'}}
+                              // expected-note@-1 {{call is to 'rethrows' function, but a defaulted argument function can throw}}
+
+func throwableDefaultRethrows(_ f: () throws -> () = { throw SomeError.Badness }) rethrows {
+  try f()
+}
+// This should always emit a diagnostic because we can statically know that default argument can throw. 
+throwableDefaultRethrows()  // expected-error {{call can throw but is not marked with 'try'}}
+                            // expected-note@-1 {{call is to 'rethrows' function, but a defaulted argument function can throw}}
+
+// rdar://76169080 - rethrows -vs- Optional default arguments
+func optionalRethrowsDefaultArg1(_: (() throws -> ())? = nil) rethrows {}
+
+func callsOptionalRethrowsDefaultArg1() throws {
+  optionalRethrowsDefaultArg1()
+  optionalRethrowsDefaultArg1(nil)
+  try optionalRethrowsDefaultArg1 { throw SomeError.Badness }
+}
+
+func optionalRethrowsDefaultArg2(_: (() throws -> ())? = { throw SomeError.Badness }) rethrows {}
+
+func callsOptionalRethrowsDefaultArg2() throws {
+  optionalRethrowsDefaultArg2()  // expected-error {{call can throw but is not marked with 'try'}}
+                                 // expected-note@-1 {{call is to 'rethrows' function, but a defaulted argument function can throw}}
+  optionalRethrowsDefaultArg2(nil)
+  try optionalRethrowsDefaultArg2 { throw SomeError.Badness }
+}
+
+protocol P1 {
+  var id: Int { get }
+  func test(_: some Sequence) -> [any P1]
+}
+
+func open(p: any P1, s: any Sequence) throws {
+  _ = p.test(s).map(\.id)
+}
+
+// Rethrows checking and parameter packs, oh my.
+func rethrowsWithParameterPacks<each Arg>(_ arguments: repeat each Arg, body: () throws -> Void) rethrows { }
+
+enum MyError: Error {
+case fail
+}
+
+func testRethrowsWithParameterPacks() throws {
+  try rethrowsWithParameterPacks { throw MyError.fail }
+  rethrowsWithParameterPacks { }
+
+  try rethrowsWithParameterPacks(1) { throw MyError.fail }
+  rethrowsWithParameterPacks(1) { }
+
+  try rethrowsWithParameterPacks(1, "hello") { throw MyError.fail }
+  rethrowsWithParameterPacks(1, "hello") { }
+
+  rethrowsWithParameterPacks { throw MyError.fail }
+  // expected-error@-1{{call can throw but is not marked with 'try'}}
+  // expected-note@-2{{call is to 'rethrows' function, but argument function can throw}}
+}
+
+// Rethrows checking with the original parameter type providing the cues.
+func takesArbitraryAndRethrows<T>(_ value: T, body: () throws -> Void) rethrows { }
+
+func testArbitraryAndRethrows() {
+  takesArbitraryAndRethrows(throwingFunc) { }
 }

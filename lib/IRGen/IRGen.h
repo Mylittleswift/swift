@@ -36,6 +36,7 @@ namespace swift {
 
 namespace irgen {
   using Lowering::AbstractionPattern;
+  class ConstantInitBuilder;
   using clang::CodeGen::ConstantInitFuture;
   class IRGenFunction;
 
@@ -43,13 +44,23 @@ namespace irgen {
 /// store vectors of spare bits.
 using SpareBitVector = ClusteredBitVector;
 
+enum class StackProtectorMode : bool { NoStackProtector, StackProtector };
+
 class Size;
 
-enum IsPOD_t : bool { IsNotPOD, IsPOD };
-inline IsPOD_t operator&(IsPOD_t l, IsPOD_t r) {
-  return IsPOD_t(unsigned(l) & unsigned(r));
+/// True if no runtime work has to occur to destroy values of a type.
+/// If the type is also copyable, this also implies that the type is bitwise-
+/// copyable.
+enum IsTriviallyDestroyable_t : bool {
+  IsNotTriviallyDestroyable,
+  IsTriviallyDestroyable,
+};
+inline IsTriviallyDestroyable_t operator&(IsTriviallyDestroyable_t l,
+                                           IsTriviallyDestroyable_t r) {
+  return IsTriviallyDestroyable_t(unsigned(l) & unsigned(r));
 }
-inline IsPOD_t &operator&=(IsPOD_t &l, IsPOD_t r) {
+inline IsTriviallyDestroyable_t &operator&=(IsTriviallyDestroyable_t &l,
+                                             IsTriviallyDestroyable_t r) {
   return (l = (l & r));
 }
 
@@ -74,6 +85,14 @@ inline IsBitwiseTakable_t operator&(IsBitwiseTakable_t l, IsBitwiseTakable_t r) 
   return IsBitwiseTakable_t(unsigned(l) & unsigned(r));
 }
 inline IsBitwiseTakable_t &operator&=(IsBitwiseTakable_t &l, IsBitwiseTakable_t r) {
+  return (l = (l & r));
+}
+
+enum IsCopyable_t : bool { IsNotCopyable, IsCopyable };
+inline IsCopyable_t operator&(IsCopyable_t l, IsCopyable_t r) {
+  return IsCopyable_t(unsigned(l) & unsigned(r));
+}
+inline IsCopyable_t &operator&=(IsCopyable_t &l, IsCopyable_t r) {
   return (l = (l & r));
 }
 
@@ -166,48 +185,85 @@ enum class SymbolReferenceKind : uint8_t {
   Far_Relative_Indirectable,
 };
 
+/// A lazy constant initializer.
+struct LazyConstantInitializer {
+  llvm::Type *DefaultType;
+  llvm::function_ref<ConstantInitFuture(ConstantInitBuilder &)> Build;
+  llvm::function_ref<void(llvm::GlobalVariable *)> Create;
+};
+
 /// An initial value for a definition of an llvm::GlobalVariable.
 class ConstantInit {
-  llvm::PointerUnion<ConstantInitFuture, llvm::Type*> Data;
+  union {
+    ConstantInitFuture Future;
+    const LazyConstantInitializer *Lazy;
+    llvm::Type *Delayed;
+  };
+  enum class Kind {
+    None, Future, Lazy, Delayed
+  } TheKind;
+
 public:
   /// No initializer is given.  When this is used as an argument to
   /// a getAddrOf... API, it means that only a declaration is being
   /// requested.
-  ConstantInit() {}
+  ConstantInit() : TheKind(Kind::None) {}
 
   /// Use a concrete value as a concrete initializer.
   ConstantInit(llvm::Constant *initializer)
-    : Data(ConstantInitFuture(initializer)) {}
+    : Future(ConstantInitFuture(initializer)), TheKind(Kind::Future) {}
 
   /// Use a ConstantInitBuilder future as a concrete initializer.
-  /*implicit*/ ConstantInit(ConstantInitFuture future) : Data(future) {
+  /*implicit*/ ConstantInit(ConstantInitFuture future)
+    : Future(future), TheKind(Kind::Future) {
     assert(future && "don't pass around null futures");
+  }
+
+  static ConstantInit getLazy(const LazyConstantInitializer *initializer) {
+    assert(initializer && "null lazy initializer");
+    auto result = ConstantInit();
+    result.TheKind = Kind::Lazy;
+    result.Lazy = initializer;
+    return result;
   }
 
   /// There will be a definition (with the given type), but we don't
   /// have it yet.
   static ConstantInit getDelayed(llvm::Type *type) {
     auto result = ConstantInit();
-    result.Data = type;
+    result.TheKind = Kind::Delayed;
+    result.Delayed = type;
     return result;
   }
 
-  explicit operator bool() const { return bool(Data); }
+  explicit operator bool() const { return TheKind != Kind::None; }
 
   inline llvm::Type *getType() const {
-    assert(Data && "not a definition");
-    if (auto type = Data.dyn_cast<llvm::Type*>()) {
-      return type;
+    assert(TheKind != Kind::None && "not a definition");
+    if (TheKind == Kind::Delayed) {
+      return Delayed;
+    } else if (TheKind == Kind::Lazy) {
+      return Lazy->DefaultType;
     } else {
-      return Data.get<ConstantInitFuture>().getType();
+      assert(TheKind == Kind::Future);
+      return Future.getType();
     }
   }
 
+  bool isLazy() const {
+    return TheKind == Kind::Lazy;
+  }
+  const LazyConstantInitializer *getLazy() const {
+    assert(isLazy());
+    return Lazy;
+  }
+
   bool hasInit() const {
-    return Data.is<ConstantInitFuture>();
+    return TheKind == Kind::Future;
   }
   ConstantInitFuture getInit() const {
-    return Data.get<ConstantInitFuture>();
+    assert(hasInit());
+    return Future;
   }
 };
 
@@ -235,24 +291,21 @@ inline bool operator<=(OperationCost l, OperationCost r) {
 /// An alignment value, in eight-bit units.
 class Alignment {
 public:
-  using int_type = uint32_t;
+  using int_type = uint64_t;
 
-  constexpr Alignment() : Value(0) {}
-  constexpr explicit Alignment(int_type Value) : Value(Value) {}
-  explicit Alignment(clang::CharUnits value) : Value(value.getQuantity()) {}
+  constexpr Alignment() : Shift(0) {}
+  explicit Alignment(int_type Value) : Shift(llvm::Log2_64(Value)) {
+    assert(llvm::isPowerOf2_64(Value));
+  }
+  explicit Alignment(clang::CharUnits value) : Alignment(value.getQuantity()) {}
 
-  constexpr int_type getValue() const { return Value; }
-  constexpr int_type getMaskValue() const { return Value - 1; }
-
-  bool isOne() const { return Value == 1; }
-  bool isZero() const { return Value == 0; }
+  constexpr int_type getValue() const { return int_type(1) << Shift; }
+  constexpr int_type getMaskValue() const { return getValue() - 1; }
 
   Alignment alignmentAtOffset(Size S) const;
   Size asSize() const;
 
-  unsigned log2() const {
-    return llvm::Log2_64(Value);
-  }
+  unsigned log2() const { return Shift; }
 
   operator clang::CharUnits() const {
     return asCharUnits();
@@ -261,17 +314,24 @@ public:
     return clang::CharUnits::fromQuantity(getValue());
   }
 
-  explicit operator bool() const { return Value != 0; }
+  explicit operator llvm::MaybeAlign() const { return llvm::MaybeAlign(getValue()); }
 
-  friend bool operator< (Alignment L, Alignment R){ return L.Value <  R.Value; }
-  friend bool operator<=(Alignment L, Alignment R){ return L.Value <= R.Value; }
-  friend bool operator> (Alignment L, Alignment R){ return L.Value >  R.Value; }
-  friend bool operator>=(Alignment L, Alignment R){ return L.Value >= R.Value; }
-  friend bool operator==(Alignment L, Alignment R){ return L.Value == R.Value; }
-  friend bool operator!=(Alignment L, Alignment R){ return L.Value != R.Value; }
+  friend bool operator< (Alignment L, Alignment R){ return L.Shift <  R.Shift; }
+  friend bool operator<=(Alignment L, Alignment R){ return L.Shift <= R.Shift; }
+  friend bool operator> (Alignment L, Alignment R){ return L.Shift >  R.Shift; }
+  friend bool operator>=(Alignment L, Alignment R){ return L.Shift >= R.Shift; }
+  friend bool operator==(Alignment L, Alignment R){ return L.Shift == R.Shift; }
+  friend bool operator!=(Alignment L, Alignment R){ return L.Shift != R.Shift; }
+
+  template<unsigned Value>
+  static constexpr Alignment create() {
+    Alignment result;
+    result.Shift = llvm::CTLog2<Value>();
+    return result;
+  }
 
 private:
-  int_type Value;
+  unsigned char Shift;
 };
 
 /// A size value, in eight-bit units.

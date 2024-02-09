@@ -12,10 +12,10 @@
 
 #include "sourcekitd/ExpressionTypeArray.h"
 #include "sourcekitd/CompactArray.h"
+#include "sourcekitd/DictionaryKeys.h"
 #include "SourceKit/Core/LLVM.h"
 #include "SourceKit/Core/LangSupport.h"
 #include "SourceKit/Support/UIdent.h"
-#include "DictionaryKeys.h"
 
 #include "llvm/Support/MemoryBuffer.h"
 
@@ -100,7 +100,7 @@ public:
 };
 
 // data[0] = ProtocolListFuncs::funcs
-// data[1] = custum buffer
+// data[1] = custom buffer
 // data[2] = offset for the element in ExpressionTypeArray
 struct ProtocolListFuncs {
   static sourcekitd_variant_type_t get_type(sourcekitd_variant_t var) {
@@ -170,21 +170,24 @@ struct ExpressionTypeArrayBuilder::Implementation {
   }
 
   // data[0] = ExpressionTypeArrayBuilder::funcs
-  // data[1] = custum buffer
+  // data[1] = custom buffer
   static size_t array_get_count(sourcekitd_variant_t array) {
     ExpressionTypeReader reader((char*)array.data[1]);
     return reader.count();
   }
 
-  std::unique_ptr<llvm::MemoryBuffer> createBuffer() {
+  std::unique_ptr<llvm::MemoryBuffer> createBuffer(CustomBufferKind Kind) {
     std::array<CompactArrayBuilderImpl*, 3> builders =
       {&builder, &strBuilder, &protoBuilder};
+    auto kindSize = sizeof(uint64_t);
     size_t headerSize = sizeof(uint64_t) * builders.size();
-    auto allSize = headerSize;
+    auto allSize = kindSize + headerSize;
     for (auto *b: builders)
       allSize += b->sizeInBytes();
     auto result = llvm::WritableMemoryBuffer::getNewUninitMemBuffer(allSize);
-    char *start = result->getBufferStart();
+    *reinterpret_cast<uint64_t*>(result->getBufferStart()) = (uint64_t)Kind;
+
+    char *start = result->getBufferStart() + kindSize;
     char *headerPtr = start;
     char *ptr = start + headerSize;
     auto addBuilder = [&](CompactArrayBuilderImpl& buffer) {
@@ -223,7 +226,7 @@ void ExpressionTypeArrayBuilder::add(const ExpressionType &expType) {
 
 std::unique_ptr<llvm::MemoryBuffer>
 ExpressionTypeArrayBuilder::createBuffer() {
-  return Impl.createBuffer();
+  return Impl.createBuffer(CustomBufferKind::ExpressionTypeArray);
 }
 
 VariantFunctions ExpressionTypeArrayBuilder::Funcs = {

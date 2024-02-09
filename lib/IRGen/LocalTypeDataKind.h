@@ -21,6 +21,7 @@
 
 #include "swift/AST/ProtocolConformanceRef.h"
 #include "swift/AST/Type.h"
+#include "swift/IRGen/ValueWitness.h"
 #include <stdint.h>
 #include "llvm/ADT/DenseMapInfo.h"
 
@@ -28,7 +29,6 @@ namespace swift {
   class ProtocolDecl;
 
 namespace irgen {
-  enum class ValueWitness : unsigned;
 
 /// The kind of local type data we might want to store for a type.
 class LocalTypeDataKind {
@@ -49,15 +49,20 @@ private:
     FormalTypeMetadata,
     RepresentationTypeMetadata,
     ValueWitnessTable,
+    Shape,
     // <- add more special cases here
 
     // The first enumerator for an individual value witness.
     ValueWitnessBase,
 
+    // The first enumerator for an individual value witness discriminator.
+    ValueWitnessDiscriminatorBase = ValueWitnessBase + MaxNumValueWitnesses,
+
     FirstPayloadValue = 2048,
-    Kind_Decl = 0,
-    Kind_Conformance = 1,
-    KindMask = 0x1,
+    Kind_Decl = 0b0,
+    Kind_Conformance = 0b1,
+    Kind_PackConformance = 0b10,
+    KindMask = 0b11,
   };
 
 public:
@@ -86,7 +91,17 @@ public:
   static LocalTypeDataKind forValueWitness(ValueWitness witness) {
     return LocalTypeDataKind(ValueWitnessBase + (unsigned)witness);
   }
+
+  /// The discriminator for a specific value witness.
+  static LocalTypeDataKind forValueWitnessDiscriminator(ValueWitness witness) {
+    return LocalTypeDataKind(ValueWitnessDiscriminatorBase + (unsigned)witness);
+  }
   
+  /// A reference to the shape expression of a pack type.
+  static LocalTypeDataKind forPackShapeExpression() {
+    return LocalTypeDataKind(Shape);
+  }
+
   /// A reference to a protocol witness table for an archetype.
   ///
   /// This only works for non-concrete types because in principle we might
@@ -98,17 +113,24 @@ public:
     return LocalTypeDataKind(uintptr_t(protocol) | Kind_Decl);
   }
 
-  /// A reference to a protocol witness table for an archetype.
+  /// A reference to a protocol witness table for a concrete type.
   static LocalTypeDataKind
   forConcreteProtocolWitnessTable(ProtocolConformance *conformance) {
     assert(conformance && "conformance reference may not be null");
     return LocalTypeDataKind(uintptr_t(conformance) | Kind_Conformance);
   }
 
+  static LocalTypeDataKind forProtocolWitnessTablePack(PackConformance *pack) {
+    assert(pack && "pack conformance reference may not be null");
+    return LocalTypeDataKind(uintptr_t(pack) | Kind_PackConformance);
+  }
+
   static LocalTypeDataKind
   forProtocolWitnessTable(ProtocolConformanceRef conformance) {
     if (conformance.isConcrete()) {
       return forConcreteProtocolWitnessTable(conformance.getConcrete());
+    } else if (conformance.isPack()) {
+      return forProtocolWitnessTablePack(conformance.getPack());
     } else {
       return forAbstractProtocolWitnessTable(conformance.getAbstract());
     }
@@ -145,11 +167,24 @@ public:
     return reinterpret_cast<ProtocolDecl*>(Value - Kind_Decl);
   }
 
+  bool isPackProtocolConformance() const {
+    return (!isSingletonKind() &&
+            ((Value & KindMask) == Kind_PackConformance));
+  }
+
+  PackConformance *getPackProtocolConformance() const {
+    assert(isPackProtocolConformance());
+    return reinterpret_cast<PackConformance*>(Value - Kind_PackConformance);
+  }
+
   ProtocolConformanceRef getProtocolConformance() const {
     assert(!isSingletonKind());
     if ((Value & KindMask) == Kind_Decl) {
       return ProtocolConformanceRef(getAbstractProtocolConformance());
+    } else if ((Value & KindMask) == Kind_PackConformance) {
+      return ProtocolConformanceRef(getPackProtocolConformance());
     } else {
+      assert((Value & KindMask) == Kind_Conformance);
       return ProtocolConformanceRef(getConcreteProtocolConformance());
     }
   }
@@ -203,8 +238,8 @@ template <> struct DenseMapInfo<swift::irgen::LocalTypeDataKey> {
              swift::irgen::LocalTypeDataKind::forFormalTypeMetadata() };
   }
   static unsigned getHashValue(const LocalTypeDataKey &key) {
-    return combineHashValue(CanTypeInfo::getHashValue(key.Type),
-                            key.Kind.getRawValue());
+    return detail::combineHashValue(CanTypeInfo::getHashValue(key.Type),
+                                    key.Kind.getRawValue());
   }
   static bool isEqual(const LocalTypeDataKey &a, const LocalTypeDataKey &b) {
     return a == b;

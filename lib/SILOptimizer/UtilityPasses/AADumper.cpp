@@ -23,7 +23,6 @@
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILValue.h"
 #include "swift/SILOptimizer/Analysis/AliasAnalysis.h"
-#include "swift/SILOptimizer/Analysis/SideEffectAnalysis.h"
 #include "swift/SILOptimizer/Analysis/Analysis.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "llvm/Support/Debug.h"
@@ -64,7 +63,7 @@ class SILAADumper : public SILModuleTransform {
       if (!gatherValues(Fn, Values))
         continue;
 
-      AliasAnalysis *AA = PM->getAnalysis<AliasAnalysis>();
+      AliasAnalysis *AA = PM->getAnalysis<AliasAnalysis>(&Fn);
 
       // A cache
       llvm::DenseMap<uint64_t, AliasAnalysis::AliasResult> Results;

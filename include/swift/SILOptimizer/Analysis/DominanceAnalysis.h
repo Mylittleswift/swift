@@ -16,7 +16,6 @@
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/Dominance.h"
 #include "swift/SILOptimizer/Analysis/Analysis.h"
-#include "llvm/ADT/DenseMap.h"
 
 namespace swift {
 class SILModule;
@@ -25,7 +24,7 @@ class SILInstruction;
 class DominanceAnalysis : public FunctionAnalysisBase<DominanceInfo> {
 protected:
   virtual void verify(DominanceInfo *DI) const override {
-    if (DI->getRoots().empty())
+    if (DI->roots().empty())
       return;
     DI->verify();
   }
@@ -37,12 +36,16 @@ public:
   DominanceAnalysis(const DominanceAnalysis &) = delete;
   DominanceAnalysis &operator=(const DominanceAnalysis &) = delete;
 
+  static SILAnalysisKind getAnalysisKind() {
+    return SILAnalysisKind::Dominance;
+  }
+
   static bool classof(const SILAnalysis *S) {
     return S->getKind() == SILAnalysisKind::Dominance;
   }
 
   std::unique_ptr<DominanceInfo> newFunctionAnalysis(SILFunction *F) override {
-    return llvm::make_unique<DominanceInfo>(F);
+    return std::make_unique<DominanceInfo>(F);
   }
 
   virtual bool shouldInvalidate(SILAnalysis::InvalidationKind K) override {
@@ -53,7 +56,7 @@ public:
 class PostDominanceAnalysis : public FunctionAnalysisBase<PostDominanceInfo> {
 protected:
   virtual void verify(PostDominanceInfo *PDI) const override {
-    if (PDI->getRoots().empty())
+    if (PDI->roots().empty())
       return;
     PDI->verify();
   }
@@ -66,13 +69,17 @@ public:
   PostDominanceAnalysis(const PostDominanceAnalysis &) = delete;
   PostDominanceAnalysis &operator=(const PostDominanceAnalysis &) = delete;
 
+  static SILAnalysisKind getAnalysisKind() {
+    return SILAnalysisKind::PostDominance;
+  }
+
   static bool classof(const SILAnalysis *S) {
     return S->getKind() == SILAnalysisKind::PostDominance;
   }
 
   std::unique_ptr<PostDominanceInfo>
   newFunctionAnalysis(SILFunction *F) override {
-    return llvm::make_unique<PostDominanceInfo>(F);
+    return std::make_unique<PostDominanceInfo>(F);
   }
 
   virtual bool shouldInvalidate(SILAnalysis::InvalidationKind K) override {

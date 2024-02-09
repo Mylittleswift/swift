@@ -11,8 +11,9 @@
 //===----------------------------------------------------------------------===//
 
 internal struct _BridgingBufferHeader {
-  internal init(_ count: Int) { self.count = count }
   internal var count: Int
+
+  internal init(_ count: Int) { self.count = count }
 }
 
 // NOTE: older runtimes called this class _BridgingBufferStorage.
@@ -25,6 +26,7 @@ internal final class __BridgingBufferStorage
 internal typealias _BridgingBuffer
   = ManagedBufferPointer<_BridgingBufferHeader, AnyObject>
 
+@available(OpenBSD, unavailable, message: "malloc_size is unavailable.")
 extension ManagedBufferPointer
 where Header == _BridgingBufferHeader, Element == AnyObject {
   internal init(_ count: Int) {

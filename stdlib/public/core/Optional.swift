@@ -10,8 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-/// A type that represents either a wrapped value or `nil`, the absence of a
-/// value.
+/// A type that represents either a wrapped value or the absence of a value.
 ///
 /// You use the `Optional` type whenever you use optional values, even if you
 /// never type the word `Optional`. Swift's type system usually shows the
@@ -118,8 +117,8 @@
 ///
 /// Unconditionally unwrapping a `nil` instance with `!` triggers a runtime
 /// error.
-@_frozen
-public enum Optional<Wrapped> : ExpressibleByNilLiteral {
+@frozen
+public enum Optional<Wrapped>: ExpressibleByNilLiteral {
   // The compiler has special knowledge of Optional<Wrapped>, including the fact
   // that it is an `enum` with cases named `none` and `some`.
 
@@ -262,24 +261,56 @@ public enum Optional<Wrapped> : ExpressibleByNilLiteral {
       _internalInvariantFailure("_unsafelyUnwrappedUnchecked of nil optional")
     }
   }
+
+  /// Takes the wrapped value being stored in this instance and returns it while
+  /// also setting the instance to `nil`. If there is no value being stored in
+  /// this instance, this returns `nil` instead.
+  ///
+  ///     var numberOfShoes: Int? = 34
+  ///
+  ///     if let numberOfShoes = numberOfShoes.take() {
+  ///       print(numberOfShoes)
+  ///       // Prints "34"
+  ///     }
+  ///
+  ///     print(numberOfShoes)
+  ///     // Prints "nil"
+  ///
+  /// - Returns: The wrapped value being stored in this instance. If this
+  ///   instance is `nil`, returns `nil`.
+  internal mutating func _take() -> Wrapped? {
+    switch self {
+    case .some(let wrapped):
+      self = nil
+      return wrapped
+    case .none:
+      return nil
+    }
+  }
 }
 
-extension Optional : CustomDebugStringConvertible {
+@_unavailableInEmbedded
+extension Optional: CustomDebugStringConvertible {
   /// A textual representation of this instance, suitable for debugging.
   public var debugDescription: String {
     switch self {
     case .some(let value):
+#if !SWIFT_STDLIB_STATIC_PRINT
       var result = "Optional("
       debugPrint(value, terminator: "", to: &result)
       result += ")"
       return result
+#else
+    return "(optional printing not available)"
+#endif
     case .none:
       return "nil"
     }
   }
 }
 
-extension Optional : CustomReflectable {
+#if SWIFT_ENABLE_REFLECTION
+extension Optional: CustomReflectable {
   public var customMirror: Mirror {
     switch self {
     case .some(let value):
@@ -292,6 +323,7 @@ extension Optional : CustomReflectable {
     }
   }
 }
+#endif
 
 @_transparent
 public // COMPILER_INTRINSIC
@@ -302,17 +334,24 @@ func _diagnoseUnexpectedNilOptional(_filenameStart: Builtin.RawPointer,
                                     _isImplicitUnwrap: Builtin.Int1) {
   // Cannot use _preconditionFailure as the file and line info would not be
   // printed.
-  preconditionFailure(
-    Bool(_isImplicitUnwrap)
-      ? "Unexpectedly found nil while implicitly unwrapping an Optional value"
-      : "Unexpectedly found nil while unwrapping an Optional value",
-    file: StaticString(_start: _filenameStart,
-                       utf8CodeUnitCount: _filenameLength,
-                       isASCII: _filenameIsASCII),
-    line: UInt(_line))
+  if Bool(_isImplicitUnwrap) {
+    _preconditionFailure(
+      "Unexpectedly found nil while implicitly unwrapping an Optional value",
+      file: StaticString(_start: _filenameStart,
+                         utf8CodeUnitCount: _filenameLength,
+                         isASCII: _filenameIsASCII),
+      line: UInt(_line))
+  } else {
+    _preconditionFailure(
+      "Unexpectedly found nil while unwrapping an Optional value",
+      file: StaticString(_start: _filenameStart,
+                         utf8CodeUnitCount: _filenameLength,
+                         isASCII: _filenameIsASCII),
+      line: UInt(_line))
+  }
 }
 
-extension Optional : Equatable where Wrapped : Equatable {
+extension Optional: Equatable where Wrapped: Equatable {
   /// Returns a Boolean value indicating whether two optional instances are
   /// equal.
   ///
@@ -336,9 +375,9 @@ extension Optional : Equatable where Wrapped : Equatable {
   /// `numberToMatch` constant is wrapped as an optional before comparing to the
   /// optional `numberFromString`:
   ///
-  ///     let numberToFind: Int = 23
+  ///     let numberToMatch: Int = 23
   ///     let numberFromString: Int? = Int("23")      // Optional(23)
-  ///     if numberToFind == numberFromString {
+  ///     if numberToMatch == numberFromString {
   ///         print("It's a match!")
   ///     }
   ///     // Prints "It's a match!"
@@ -357,7 +396,7 @@ extension Optional : Equatable where Wrapped : Equatable {
   /// - Parameters:
   ///   - lhs: An optional value to compare.
   ///   - rhs: Another optional value to compare.
-  @inlinable
+  @_transparent
   public static func ==(lhs: Wrapped?, rhs: Wrapped?) -> Bool {
     switch (lhs, rhs) {
     case let (l?, r?):
@@ -390,8 +429,8 @@ extension Optional: Hashable where Wrapped: Hashable {
 
 // Enable pattern matching against the nil literal, even if the element type
 // isn't equatable.
-@_fixed_layout
-public struct _OptionalNilComparisonType : ExpressibleByNilLiteral {
+@frozen
+public struct _OptionalNilComparisonType: ExpressibleByNilLiteral {
   /// Create an instance initialized with `nil`.
   @_transparent
   public init(nilLiteral: ()) {
@@ -668,9 +707,9 @@ public func ?? <T>(optional: T?, defaultValue: @autoclosure () throws -> T?)
 //===----------------------------------------------------------------------===//
 
 #if _runtime(_ObjC)
-extension Optional : _ObjectiveCBridgeable {
+extension Optional: _ObjectiveCBridgeable {
   // The object that represents `none` for an Optional of this type.
-  internal static var _nilSentinel : AnyObject {
+  internal static var _nilSentinel: AnyObject {
     @_silgen_name("_swift_Foundation_getOptionalNilSentinelObject")
     get
   }
@@ -741,3 +780,7 @@ extension Optional : _ObjectiveCBridgeable {
   }
 }
 #endif
+
+extension Optional: Sendable where Wrapped: Sendable { }
+
+extension Optional: _BitwiseCopyable where Wrapped: _BitwiseCopyable { }

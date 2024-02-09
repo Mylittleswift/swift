@@ -16,6 +16,7 @@
 #include "swift/Frontend/Frontend.h"
 #include "swift/Frontend/PrintingDiagnosticConsumer.h"
 #include "swift/IDE/TypeContextInfo.h"
+#include "swift/IDETool/IDEInspectionInstance.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Comment.h"
 #include "clang/AST/Decl.h"
@@ -24,76 +25,18 @@ using namespace SourceKit;
 using namespace swift;
 using namespace ide;
 
-static bool swiftTypeContextInfoImpl(SwiftLangSupport &Lang,
-                                     llvm::MemoryBuffer *UnresolvedInputFile,
-                                     unsigned Offset,
-                                     ArrayRef<const char *> Args,
-                                     ide::TypeContextInfoConsumer &Consumer,
-                                     std::string &Error) {
-  auto bufferIdentifier =
-      Lang.resolvePathSymlinks(UnresolvedInputFile->getBufferIdentifier());
-
-  auto origOffset = Offset;
-  auto newBuffer = SwiftLangSupport::makeCodeCompletionMemoryBuffer(
-      UnresolvedInputFile, Offset, bufferIdentifier);
-
-  CompilerInstance CI;
-  PrintingDiagnosticConsumer PrintDiags;
-  CI.addDiagnosticConsumer(&PrintDiags);
-
-  EditorDiagConsumer TraceDiags;
-  trace::TracedOperation TracedOp(trace::OperationKind::CodeCompletion);
-  if (TracedOp.enabled()) {
-    CI.addDiagnosticConsumer(&TraceDiags);
-    trace::SwiftInvocation SwiftArgs;
-    trace::initTraceInfo(SwiftArgs, bufferIdentifier, Args);
-    TracedOp.setDiagnosticProvider(
-        [&TraceDiags](SmallVectorImpl<DiagnosticEntryInfo> &diags) {
-          TraceDiags.getAllDiagnostics(diags);
-        });
-    TracedOp.start(
-        SwiftArgs,
-        {std::make_pair("OriginalOffset", std::to_string(origOffset)),
-         std::make_pair("Offset", std::to_string(Offset))});
-  }
-
-  CompilerInvocation Invocation;
-  bool Failed = Lang.getASTManager()->initCompilerInvocation(
-      Invocation, Args, CI.getDiags(), bufferIdentifier, Error);
-  if (Failed)
-    return false;
-  if (!Invocation.getFrontendOptions().InputsAndOutputs.hasInputs()) {
-    Error = "no input filenames specified";
-    return false;
-  }
-
-  Invocation.setCodeCompletionPoint(newBuffer.get(), Offset);
-
-  // Create a factory for code completion callbacks that will feed the
-  // Consumer.
-  std::unique_ptr<CodeCompletionCallbacksFactory> callbacksFactory(
-      ide::makeTypeContextInfoCallbacksFactory(Consumer));
-
-  Invocation.setCodeCompletionFactory(callbacksFactory.get());
-
-  if (CI.setup(Invocation)) {
-    // FIXME: error?
-    return true;
-  }
-  CI.performSema();
-
-  return true;
+static void translateTypeContextInfoOptions(OptionsDictionary &from,
+                                            TypeContextInfo::Options &to) {
+  // TypeContextInfo doesn't receive any options at this point.
 }
 
-void SwiftLangSupport::getExpressionContextInfo(
-    llvm::MemoryBuffer *UnresolvedInputFile, unsigned Offset,
-    ArrayRef<const char *> Args,
-    SourceKit::TypeContextInfoConsumer &SKConsumer) {
-  class Consumer : public ide::TypeContextInfoConsumer {
-    SourceKit::TypeContextInfoConsumer &SKConsumer;
+static void deliverResults(SourceKit::TypeContextInfoConsumer &SKConsumer,
+                           CancellableResult<TypeContextInfoResult> Result) {
+  switch (Result.getKind()) {
+  case CancellableResultKind::Success: {
+    SKConsumer.setReusingASTContext(Result->DidReuseAST);
 
-    /// Convert an IDE result to a SK result and send it to \c SKConsumer.
-    void handleSingleResult(const ide::TypeContextInfoItem &Item) {
+    for (auto &Item : Result->Results) {
       SmallString<512> SS;
       llvm::raw_svector_ostream OS(SS);
 
@@ -123,7 +66,7 @@ void SwiftLangSupport::getExpressionContextInfo(
 
         // Name.
         memberElem.DeclNameBegin = SS.size();
-        member->getFullName().print(OS);
+        member->getName().print(OS);
         memberElem.DeclNameLength = SS.size() - memberElem.DeclNameBegin;
 
         // Description.
@@ -148,7 +91,7 @@ void SwiftLangSupport::getExpressionContextInfo(
               memberElem.BriefComment = RC->getBriefText(ClangContext);
           }
         } else {
-          memberElem.BriefComment = member->getBriefComment();
+          memberElem.BriefComment = member->getSemanticBriefComment();
         }
       }
 
@@ -171,20 +114,49 @@ void SwiftLangSupport::getExpressionContextInfo(
 
       SKConsumer.handleResult(Info);
     }
-
-  public:
-    Consumer(SourceKit::TypeContextInfoConsumer &SKConsumer)
-        : SKConsumer(SKConsumer){};
-
-    void handleResults(ArrayRef<ide::TypeContextInfoItem> Results) {
-      for (auto &Item : Results)
-        handleSingleResult(Item);
-    }
-  } Consumer(SKConsumer);
-
-  std::string Error;
-  if (!swiftTypeContextInfoImpl(*this, UnresolvedInputFile, Offset, Args,
-                                Consumer, Error)) {
-    SKConsumer.failed(Error);
+    break;
   }
+  case CancellableResultKind::Failure:
+    SKConsumer.failed(Result.getError());
+    break;
+  case CancellableResultKind::Cancelled:
+    SKConsumer.cancelled();
+    break;
+  }
+}
+
+void SwiftLangSupport::getExpressionContextInfo(
+    llvm::MemoryBuffer *UnresolvedInputFile, unsigned Offset,
+    OptionsDictionary *optionsDict, ArrayRef<const char *> Args,
+    SourceKitCancellationToken CancellationToken,
+    SourceKit::TypeContextInfoConsumer &SKConsumer,
+    llvm::Optional<VFSOptions> vfsOptions) {
+  std::string error;
+
+  TypeContextInfo::Options options;
+  if (optionsDict) {
+    translateTypeContextInfoOptions(*optionsDict, options);
+  }
+
+  // FIXME: the use of None as primary file is to match the fact we do not read
+  // the document contents using the editor documents infrastructure.
+  auto fileSystem =
+      getFileSystem(vfsOptions, /*primaryFile=*/llvm::None, error);
+  if (!fileSystem) {
+    return SKConsumer.failed(error);
+  }
+
+  performWithParamsToCompletionLikeOperation(
+      UnresolvedInputFile, Offset, /*InsertCodeCompletionToken=*/true, Args,
+      fileSystem, CancellationToken,
+      [&](CancellableResult<CompletionLikeOperationParams> ParamsResult) {
+        ParamsResult.mapAsync<TypeContextInfoResult>(
+            [&](auto &CIParams, auto DeliverTransformed) {
+              getIDEInspectionInstance()->typeContextInfo(
+                  CIParams.Invocation, Args, fileSystem,
+                  CIParams.completionBuffer, Offset, CIParams.DiagC,
+                  CIParams.CancellationFlag, DeliverTransformed);
+            },
+            [&](auto Result) { deliverResults(SKConsumer, Result); });
+      });
 }

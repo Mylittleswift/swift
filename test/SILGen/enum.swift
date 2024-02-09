@@ -26,26 +26,16 @@ enum Optionable {
 func Optionable_cases(_ x: Int) {
 
   // CHECK:       [[METATYPE:%.*]] = metatype $@thin Optionable.Type
-  // CHECK:       [[FN:%.*]] = function_ref @$s4enum10OptionableO4mereyACSicACmFTc
-  // CHECK-NEXT:  [[CTOR:%.*]] = apply [[FN]]([[METATYPE]])
-  // CHECK-NEXT:  destroy_value [[CTOR]]
+  // CHECK:       [[FN:%.*]] = function_ref @$s4enum16Optionable_casesyySiFAA0B0OSicADmcfu_
   _ = Optionable.mere
 
-  // CHECK-NEXT:  [[METATYPE:%.*]] = metatype $@thin Optionable.Type
-  // CHECK-NEXT:  [[RES:%.*]] = enum $Optionable, #Optionable.mere!enumelt.1, %0 : $Int
+  // CHECK:  [[METATYPE:%.*]] = metatype $@thin Optionable.Type
+  // CHECK:  [[RES:%.*]] = enum $Optionable, #Optionable.mere!enumelt, %0 : $Int
   _ = Optionable.mere(x)
 }
 
-// CHECK-LABEL: sil shared [transparent] [thunk] [ossa] @$s4enum10OptionableO4mereyACSicACmF
-// CHECK:        [[FN:%.*]] = function_ref @$s4enum10OptionableO4mereyACSicACmF
-// CHECK-NEXT:   [[METHOD:%.*]] = partial_apply [callee_guaranteed] [[FN]](%0)
-// CHECK-NEXT:   return [[METHOD]]
-// CHECK-NEXT: }
-
-// CHECK-LABEL: sil shared [transparent] [ossa] @$s4enum10OptionableO4mereyACSicACmF
-// CHECK:        [[RES:%.*]] = enum $Optionable, #Optionable.mere!enumelt.1, %0 : $Int
-// CHECK-NEXT:   return [[RES]] : $Optionable
-// CHECK-NEXT: }
+// CHECK-LABEL: sil private [ossa] @$s4enum16Optionable_casesyySiFAA0B0OSicADmcfu_ : $@convention(thin) (@thin Optionable.Type) -> @owned @callee_guaranteed (Int) -> Optionable
+// CHECK-LABEL: sil private [ossa] @$s4enum16Optionable_casesyySiFAA0B0OSicADmcfu_ADSicfu0_ : $@convention(thin) (Int, @thin Optionable.Type) -> Optionable {
 
 protocol P {}
 struct S : P {}
@@ -60,7 +50,7 @@ enum AddressOnly {
 func AddressOnly_cases(_ s: S) {
 
   // CHECK:       [[METATYPE:%.*]] = metatype $@thin AddressOnly.Type
-  // CHECK:       [[FN:%.*]] = function_ref @$s4enum11AddressOnlyO4mereyAcA1P_pcACmFTc
+  // CHECK:       [[FN:%.*]] = function_ref @$s4enum17AddressOnly_casesyyAA1SVFAA0bC0OAA1P_pcAFmcfu_
   // CHECK-NEXT:  [[CTOR:%.*]] = apply [[FN]]([[METATYPE]])
   // CHECK-NEXT:  destroy_value [[CTOR]]
   _ = AddressOnly.mere
@@ -73,48 +63,31 @@ func AddressOnly_cases(_ s: S) {
   _ = AddressOnly.nought
 
   // CHECK-NEXT:  [[METATYPE:%.*]] = metatype $@thin AddressOnly.Type
-  // CHECK-NEXT:  [[P_BUF:%.*]] = alloc_stack $P
+  // CHECK-NEXT:  [[P_BUF:%.*]] = alloc_stack $any P
   // CHECK-NEXT:  [[PAYLOAD_ADDR:%.*]] = init_existential_addr [[P_BUF]]
   // CHECK-NEXT:  store %0 to [trivial] [[PAYLOAD_ADDR]]
   // CHECK-NEXT:  [[MERE:%.*]] = alloc_stack $AddressOnly
   // CHECK-NEXT:  [[PAYLOAD:%.*]] = init_enum_data_addr [[MERE]]
-  // CHECK-NEXT:  copy_addr [take] [[P_BUF]] to [initialization] [[PAYLOAD]] : $*P
+  // CHECK-NEXT:  copy_addr [take] [[P_BUF]] to [init] [[PAYLOAD]] : $*any P
   // CHECK-NEXT:  inject_enum_addr [[MERE]]
   // CHECK-NEXT:  destroy_addr [[MERE]]
   // CHECK-NEXT:  dealloc_stack [[MERE]]
-  // CHECK-NEXT:  dealloc_stack [[P_BUF]] : $*P
+  // CHECK-NEXT:  dealloc_stack [[P_BUF]] : $*any P
   _ = AddressOnly.mere(s)
 
   // Address-only enum vs loadable payload
 
   // CHECK-NEXT:  [[METATYPE:%.*]] = metatype $@thin AddressOnly.Type
   // CHECK-NEXT:  [[PHANTOM:%.*]] = alloc_stack $AddressOnly
-  // CHECK-NEXT:  [[PAYLOAD:%.*]] = init_enum_data_addr [[PHANTOM]] : $*AddressOnly, #AddressOnly.phantom!enumelt.1
+  // CHECK-NEXT:  [[PAYLOAD:%.*]] = init_enum_data_addr [[PHANTOM]] : $*AddressOnly, #AddressOnly.phantom!enumelt
   // CHECK-NEXT:  store %0 to [trivial] [[PAYLOAD]]
-  // CHECK-NEXT:  inject_enum_addr [[PHANTOM]] : $*AddressOnly, #AddressOnly.phantom!enumelt.1
+  // CHECK-NEXT:  inject_enum_addr [[PHANTOM]] : $*AddressOnly, #AddressOnly.phantom!enumelt
   // CHECK-NEXT:  destroy_addr [[PHANTOM]]
   // CHECK-NEXT:  dealloc_stack [[PHANTOM]]
 
   _ = AddressOnly.phantom(s)
   // CHECK:       return
 }
-
-// CHECK-LABEL: sil shared [transparent] [thunk] [ossa] @$s4enum11AddressOnlyO4mereyAcA1P_pcACmFTc
-// CHECK:       [[FN:%.*]] = function_ref @$s4enum11AddressOnlyO4mereyAcA1P_pcACmF
-// CHECK-NEXT:  [[METHOD:%.*]] = partial_apply [callee_guaranteed] [[FN]](%0)
-// CHECK-NEXT:  // function_ref
-// CHECK-NEXT:  [[CANONICAL_THUNK_FN:%.*]] = function_ref @$s4enum1P_pAA11AddressOnlyOIegir_AaB_pADIegnr_TR : $@convention(thin) (@in_guaranteed P, @guaranteed @callee_guaranteed (@in P) -> @out AddressOnly) -> @out AddressOnly
-// CHECK-NEXT:  [[CANONICAL_THUNK:%.*]] = partial_apply [callee_guaranteed] [[CANONICAL_THUNK_FN]]([[METHOD]])
-// CHECK-NEXT:  return [[CANONICAL_THUNK]] : $@callee_guaranteed (@in_guaranteed P) -> @out AddressOnly
-// CHECK-NEXT: }
-
-// CHECK-LABEL: sil shared [transparent] [ossa] @$s4enum11AddressOnlyO4mereyAcA1P_pcACmF : $@convention
-// CHECK: bb0([[ARG0:%.*]] : $*AddressOnly, [[ARG1:%.*]] : $*P, [[ARG2:%.*]] : $@thin AddressOnly.Type):
-// CHECK:        [[RET_DATA:%.*]] = init_enum_data_addr [[ARG0]] : $*AddressOnly, #AddressOnly.mere!enumelt.1
-// CHECK-NEXT:   copy_addr [take] [[ARG1]] to [initialization] [[RET_DATA]] : $*P
-// CHECK-NEXT:   inject_enum_addr [[ARG0]] : $*AddressOnly, #AddressOnly.mere!enumelt.1
-// CHECK:        return
-// CHECK-NEXT: } // end sil function '$s4enum11AddressOnlyO4mereyAcA1P_pcACmF'
 
 enum PolyOptionable<T> {
   case nought
@@ -133,10 +106,10 @@ func PolyOptionable_cases<T>(_ t: T) {
 
 // CHECK-NEXT:    [[METATYPE:%.*]] = metatype $@thin PolyOptionable<T>.Type
 // CHECK-NEXT:    [[T_BUF:%.*]] = alloc_stack $T
-// CHECK-NEXT:    copy_addr %0 to [initialization] [[T_BUF]]
+// CHECK-NEXT:    copy_addr %0 to [init] [[T_BUF]]
 // CHECK-NEXT:    [[MERE:%.*]] = alloc_stack $PolyOptionable<T>
 // CHECK-NEXT:    [[PAYLOAD:%.*]] = init_enum_data_addr [[MERE]]
-// CHECK-NEXT:    copy_addr [take] [[T_BUF]] to [initialization] [[PAYLOAD]] : $*T
+// CHECK-NEXT:    copy_addr [take] [[T_BUF]] to [init] [[PAYLOAD]] : $*T
 // CHECK-NEXT:    inject_enum_addr [[MERE]]
 // CHECK-NEXT:    destroy_addr [[MERE]]
 // CHECK-NEXT:    dealloc_stack [[MERE]]
@@ -158,7 +131,7 @@ func PolyOptionable_specialized_cases(_ t: Int) {
   _ = PolyOptionable<Int>.nought
 
 // CHECK-NEXT:    [[METATYPE:%.*]] = metatype $@thin PolyOptionable<Int>.Type
-// CHECK-NEXT:    [[NOUGHT:%.*]] = enum $PolyOptionable<Int>, #PolyOptionable.mere!enumelt.1, %0
+// CHECK-NEXT:    [[NOUGHT:%.*]] = enum $PolyOptionable<Int>, #PolyOptionable.mere!enumelt, %0
   _ = PolyOptionable<Int>.mere(t)
 
 // CHECK:         return
@@ -172,29 +145,6 @@ struct String { var ptr: AnyObject }
 
 enum Foo { case a(P, String) }
 
-// Curry Thunk for Foo.a(_:)
-//
-// CHECK-LABEL: sil shared [transparent] [thunk] [ossa] @$s4enum3FooO1ayAcA1P_p_AA6StringVtcACmFTc
-// CHECK:         [[FN:%.*]] = function_ref @$s4enum3FooO1ayAcA1P_p_AA6StringVtcACmF
-// CHECK-NEXT:    [[METHOD:%.*]] = partial_apply [callee_guaranteed] [[FN]](%0)
-// CHECK-NEXT:    // function_ref
-// CHECK-NEXT:    [[CANONICAL_THUNK_FN:%.*]] = function_ref @$s4enum1P_pAA6StringVAA3FooOIegixr_AaB_pAdFIegngr_TR : $@convention(thin) (@in_guaranteed P, @guaranteed String, @guaranteed @callee_guaranteed (@in P, @owned String) -> @out Foo) -> @out Foo
-// CHECK-NEXT:    [[CANONICAL_THUNK:%.*]] = partial_apply [callee_guaranteed] [[CANONICAL_THUNK_FN]]([[METHOD]])
-// CHECK-NEXT:    return [[CANONICAL_THUNK]]
-// CHECK-NEXT:  }
-
-// Foo.a(_:)
-// CHECK-LABEL: sil shared [transparent] [ossa] @$s4enum3FooO1ayAcA1P_p_AA6StringVtcACmF
-// CHECK: bb0([[ARG0:%.*]] : $*Foo, [[ARG1:%.*]] : $*P, [[ARG2:%.*]] : @owned $String, [[ARG3:%.*]] : $@thin Foo.Type):
-// CHECK:         [[PAYLOAD:%.*]] = init_enum_data_addr [[ARG0]] : $*Foo, #Foo.a!enumelt.1
-// CHECK-NEXT:    [[LEFT:%.*]] = tuple_element_addr [[PAYLOAD]] : $*(P, String), 0
-// CHECK-NEXT:    [[RIGHT:%.*]] = tuple_element_addr [[PAYLOAD]] : $*(P, String), 1
-// CHECK-NEXT:    copy_addr [take] [[ARG1]] to [initialization] [[LEFT]] : $*P
-// CHECK-NEXT:    store [[ARG2]] to [init] [[RIGHT]]
-// CHECK-NEXT:    inject_enum_addr [[ARG0]] : $*Foo, #Foo.a!enumelt.1
-// CHECK:         return
-// CHECK-NEXT:  } // end sil function '$s4enum3FooO1ayAcA1P_p_AA6StringVtcACmF'
-
 func Foo_cases() {
   _ = Foo.a
 }
@@ -205,12 +155,12 @@ enum Indirect<T> {
 }
 // CHECK-LABEL: sil{{.*}} @{{.*}}makeIndirectEnum{{.*}} : $@convention(thin) <T> (@in_guaranteed T) -> @owned Indirect<T>
 // CHECK: [[BOX:%.*]] = alloc_box $<τ_0_0> { var (τ_0_0, other: τ_0_0) } <T>
-// CHECK: enum $Indirect<T>, #Indirect.payload!enumelt.1, [[BOX]] : $<τ_0_0> { var (τ_0_0, other: τ_0_0) } <T>
+// CHECK: enum $Indirect<T>, #Indirect.payload!enumelt, [[BOX]] : $<τ_0_0> { var (τ_0_0, other: τ_0_0) } <T>
 func makeIndirectEnum<T>(_ payload: T) -> Indirect<T> {
   return Indirect.payload((payload, other: payload))
 }
 
-// https://bugs.swift.org/browse/SR-9675
+// https://github.com/apple/swift/issues/52118
 
 enum TrailingClosureConcrete {
   case label(fn: () -> Int)
@@ -240,18 +190,20 @@ func useTrailingClosureGeneric<T>(t: T) {
   _ = TrailingClosureGeneric<T>.twoElementsNoLabel(t) { t }
 }
 
-enum SR7799 {
+// https://github.com/apple/swift/issues/50338
+
+enum OneOrTwo {
   case one
   case two
 }
 
-// CHECK-LABEL: sil hidden [ossa] @$s4enum6sr77993baryAA6SR7799OSg_tF : $@convention(thin) (Optional<SR7799>) -> () {
-// CHECK: bb0(%0 : $Optional<SR7799>):
-// CHECK-NEXT:  debug_value %0 : $Optional<SR7799>, let, name "bar", argno 1
-// CHECK-NEXT:  switch_enum %0 : $Optional<SR7799>, case #Optional.some!enumelt.1: bb1, default bb4
-// CHECK: bb1(%3 : $SR7799):
-// CHECK-NEXT:  switch_enum %3 : $SR7799, case #SR7799.one!enumelt: bb2, case #SR7799.two!enumelt: bb3
-func sr7799(bar: SR7799?) {
+// CHECK-LABEL: sil hidden [ossa] @$s4enum18matchOptionalEnum13baryAA8OneOrTwoOSg_tF : $@convention(thin) (Optional<OneOrTwo>) -> () {
+// CHECK: bb0(%0 : $Optional<OneOrTwo>):
+// CHECK-NEXT:  debug_value %0 : $Optional<OneOrTwo>, let, name "bar", argno 1
+// CHECK-NEXT:  switch_enum %0 : $Optional<OneOrTwo>, case #Optional.some!enumelt: bb1, default bb4
+// CHECK: bb1([[PHI_ARG:%.*]] : $OneOrTwo):
+// CHECK-NEXT:  switch_enum [[PHI_ARG]] : $OneOrTwo, case #OneOrTwo.one!enumelt: bb2, case #OneOrTwo.two!enumelt: bb3
+func matchOptionalEnum1(bar: OneOrTwo?) {
   switch bar {
   case .one: print("one")
   case .two?: print("two")
@@ -259,13 +211,57 @@ func sr7799(bar: SR7799?) {
   }
 }
 
-// CHECK-LABEL: sil hidden [ossa] @$s4enum8sr7799_13baryAA6SR7799OSgSg_tF : $@convention(thin) (Optional<Optional<SR7799>>) -> () {
-// CHECK: bb0(%0 : $Optional<Optional<SR7799>>):
-// CHECK-NEXT: debug_value %0 : $Optional<Optional<SR7799>>, let, name "bar", argno 1
-// CHECK-NEXT: switch_enum %0 : $Optional<Optional<SR7799>>, case #Optional.none!enumelt: bb1, default bb2
-func sr7799_1(bar: SR7799??) {
+// CHECK-LABEL: sil hidden [ossa] @$s4enum18matchOptionalEnum23baryAA8OneOrTwoOSgSg_tF : $@convention(thin) (Optional<Optional<OneOrTwo>>) -> () {
+// CHECK: bb0(%0 : $Optional<Optional<OneOrTwo>>):
+// CHECK-NEXT: debug_value %0 : $Optional<Optional<OneOrTwo>>, let, name "bar", argno 1
+// CHECK-NEXT: switch_enum %0 : $Optional<Optional<OneOrTwo>>, case #Optional.none!enumelt: bb1, default bb2
+func matchOptionalEnum2(bar: OneOrTwo??) {
   switch bar {
   case .none: print("none")
   default: print("default")
   }
+}
+
+enum OneTwoOrNone {
+    case one
+    case two
+
+    var none: Self {
+        .one
+    }
+}
+
+// CHECK-LABEL: sil hidden [ossa] @$s4enum18matchOptionalEnum33baryAA12OneTwoOrNoneOSg_tF : $@convention(thin) (Optional<OneTwoOrNone>) -> () {
+// CHECK: bb0(%0 : $Optional<OneTwoOrNone>):
+// CHECK-NEXT:  debug_value %0 : $Optional<OneTwoOrNone>, let, name "bar", argno 1
+// CHECK-NEXT:  switch_enum %0 : $Optional<OneTwoOrNone>, case #Optional.some!enumelt: bb1, case #Optional.none!enumelt: bb4
+// CHECK: bb1([[PHI_ARG:%.*]] : $OneTwoOrNone):
+// CHECK-NEXT:  switch_enum [[PHI_ARG]] : $OneTwoOrNone, case #OneTwoOrNone.one!enumelt: bb2, case #OneTwoOrNone.two!enumelt: bb3
+func matchOptionalEnum3(bar: OneTwoOrNone?) {
+  switch bar {
+  case .one: print("one")
+  case .two?: print("two")
+  case .none: print("none")
+  default: print("default")
+  }
+}
+
+// Make sure that we handle enum, tuple initialization composed
+// correctly. Previously, we leaked down a failure path due to us misusing
+// scopes.
+enum rdar81817725 {
+    case localAddress
+    case setOption(Int, Any)
+
+    static func takeAny(_:Any) -> Bool { return true }
+
+    static func testSwitchCleanup(syscall: rdar81817725, expectedLevel: Int,
+                                  valueMatcher: (Any) -> Bool)
+      throws -> Bool {
+        if case .setOption(expectedLevel, let value) = syscall {
+            return rdar81817725.takeAny(value)
+        } else {
+            return false
+        }
+    }
 }

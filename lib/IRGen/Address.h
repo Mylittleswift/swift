@@ -18,12 +18,13 @@
 #define SWIFT_IRGEN_ADDRESS_H
 
 #include "IRGen.h"
-#include "llvm/IR/Value.h"
+#include "llvm/ADT/ilist.h"
 #include "llvm/IR/Argument.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instruction.h"
-#include "llvm/ADT/ilist.h"
-#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Value.h"
 
 namespace swift {
 namespace irgen {
@@ -31,11 +32,17 @@ namespace irgen {
 /// The address of an object in memory.
 class Address {
   llvm::Value *Addr;
+  llvm::Type *ElementType;
   Alignment Align;
 
 public:
   Address() : Addr(nullptr) {}
-  Address(llvm::Value *addr, Alignment align) : Addr(addr), Align(align) {
+
+  Address(llvm::Value *addr, llvm::Type *elementType, Alignment align)
+      : Addr(addr), ElementType(elementType), Align(align) {
+    if (addr == llvm::DenseMapInfo<llvm::Value *>::getEmptyKey() ||
+        llvm::DenseMapInfo<llvm::Value *>::getTombstoneKey())
+      return;
     assert(addr != nullptr && "building an invalid address");
   }
 
@@ -55,6 +62,14 @@ public:
   llvm::PointerType *getType() const {
     return cast<llvm::PointerType>(Addr->getType());
   }
+
+  llvm::Type *getElementType() const { return ElementType; }
+
+  bool operator==(Address RHS) const {
+    return Addr == RHS.Addr && ElementType == RHS.ElementType &&
+           Align == RHS.Align;
+  }
+  bool operator!=(Address RHS) const { return !(*this == RHS); }
 };
 
 /// An address in memory together with the (possibly null) heap
@@ -112,6 +127,7 @@ class StackAddress {
 
   /// In a normal function, the result of llvm.stacksave or null.
   /// In a coroutine, the result of llvm.coro.alloca.alloc.
+  /// In an async function, the result of the taskAlloc call.
   llvm::Value *ExtraInfo;
 
 public:
@@ -130,9 +146,64 @@ public:
   llvm::Value *getExtraInfo() const { return ExtraInfo; }
 
   bool isValid() const { return Addr.isValid(); }
+
+  bool operator==(StackAddress RHS) const {
+    return Addr == RHS.Addr && ExtraInfo == RHS.ExtraInfo;
+  }
+  bool operator!=(StackAddress RHS) const { return !(*this == RHS); }
 };
 
 } // end namespace irgen
 } // end namespace swift
+
+namespace llvm {
+template <>
+struct DenseMapInfo<swift::irgen::Address> {
+  static swift::irgen::Address getEmptyKey() {
+    return swift::irgen::Address(DenseMapInfo<llvm::Value *>::getEmptyKey(),
+                                 DenseMapInfo<llvm::Type *>::getEmptyKey(),
+                                 swift::irgen::Alignment(8));
+  }
+  static swift::irgen::Address getTombstoneKey() {
+    return swift::irgen::Address(DenseMapInfo<llvm::Value *>::getTombstoneKey(),
+                                 DenseMapInfo<llvm::Type *>::getTombstoneKey(),
+                                 swift::irgen::Alignment(8));
+  }
+  static unsigned getHashValue(swift::irgen::Address address) {
+    return detail::combineHashValue(
+        DenseMapInfo<llvm::Value *>::getHashValue(address.getAddress()),
+        detail::combineHashValue(
+            DenseMapInfo<llvm::Type *>::getHashValue(address.getElementType()),
+            DenseMapInfo<swift::irgen::Alignment::int_type>::getHashValue(
+                address.getAlignment().getValue())));
+  }
+  static bool isEqual(swift::irgen::Address LHS, swift::irgen::Address RHS) {
+    return LHS == RHS;
+  }
+};
+template <>
+struct DenseMapInfo<swift::irgen::StackAddress> {
+  static swift::irgen::StackAddress getEmptyKey() {
+    return swift::irgen::StackAddress(
+        DenseMapInfo<swift::irgen::Address>::getEmptyKey(),
+        DenseMapInfo<llvm::Value *>::getEmptyKey());
+  }
+  static swift::irgen::StackAddress getTombstoneKey() {
+    return swift::irgen::StackAddress(
+        DenseMapInfo<swift::irgen::Address>::getTombstoneKey(),
+        DenseMapInfo<llvm::Value *>::getTombstoneKey());
+  }
+  static unsigned getHashValue(swift::irgen::StackAddress address) {
+    return detail::combineHashValue(
+        DenseMapInfo<swift::irgen::Address>::getHashValue(address.getAddress()),
+        DenseMapInfo<swift::irgen::Alignment::int_type>::getHashValue(
+            address.getAlignment().getValue()));
+  }
+  static bool isEqual(swift::irgen::StackAddress LHS,
+                      swift::irgen::StackAddress RHS) {
+    return LHS == RHS;
+  }
+};
+} // end namespace llvm
 
 #endif

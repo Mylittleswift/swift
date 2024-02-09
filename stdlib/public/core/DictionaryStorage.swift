@@ -117,6 +117,7 @@ internal class __RawDictionaryStorage: __SwiftNativeNSDictionary {
 // renamed. The old name must not be used in the new runtime.
 @_fixed_layout
 @usableFromInline
+@_objc_non_lazy_realization
 internal class __EmptyDictionarySingleton: __RawDictionaryStorage {
   @nonobjc
   internal override init(_doNotCallMe: ()) {
@@ -186,6 +187,29 @@ extension __EmptyDictionarySingleton: _NSDictionaryCore {
 }
 #endif
 
+#if $Embedded
+// In embedded Swift, the stdlib is a .swiftmodule only without any .o/.a files,
+// to allow consuming it by clients with different LLVM codegen setting (-mcpu
+// flags, etc.), which means we cannot declare the singleton in a C/C++ file.
+//
+// TODO: We should figure out how to make this a constant so that it's placed in
+// non-writable memory (can't be a let, Builtin.addressof below requires a var).
+public var _swiftEmptyDictionarySingleton: (Int, Int, Int, Int, UInt8, UInt8, UInt16, UInt32, Int, Int, Int, Int) =
+    (
+      /*isa*/0, /*refcount*/-1, // HeapObject header
+      /*count*/0,
+      /*capacity*/0,
+      /*scale*/0,
+      /*reservedScale*/0,
+      /*extra*/0,
+      /*age*/0,
+      /*seed*/0,
+      /*rawKeys*/1,
+      /*rawValues*/1,
+      /*metadata*/~1
+    )
+#endif
+
 extension __RawDictionaryStorage {
   /// The empty singleton that is used for every single Dictionary that is
   /// created without any elements. The contents of the storage should never
@@ -195,6 +219,35 @@ extension __RawDictionaryStorage {
   internal static var empty: __EmptyDictionarySingleton {
     return Builtin.bridgeFromRawPointer(
       Builtin.addressof(&_swiftEmptyDictionarySingleton))
+  }
+  
+  @_alwaysEmitIntoClient
+  @inline(__always)
+  internal final func uncheckedKey<Key: Hashable>(at bucket: _HashTable.Bucket) -> Key {
+    defer { _fixLifetime(self) }
+    _internalInvariant(_hashTable.isOccupied(bucket))
+    let keys = _rawKeys.assumingMemoryBound(to: Key.self)
+    return keys[bucket.offset]
+  }
+
+  @_alwaysEmitIntoClient
+  @inline(never)
+  internal final func find<Key: Hashable>(_ key: Key) -> (bucket: _HashTable.Bucket, found: Bool) {
+    return find(key, hashValue: key._rawHashValue(seed: _seed))
+  }
+
+  @_alwaysEmitIntoClient
+  @inline(never)
+  internal final func find<Key: Hashable>(_ key: Key, hashValue: Int) -> (bucket: _HashTable.Bucket, found: Bool) {
+      let hashTable = _hashTable
+      var bucket = hashTable.idealBucket(forHashValue: hashValue)
+      while hashTable._isOccupied(bucket) {
+        if uncheckedKey(at: bucket) == key {
+          return (bucket, true)
+        }
+        bucket = hashTable.bucket(wrappedAfter: bucket)
+      }
+      return (bucket, false)
   }
 }
 
@@ -443,7 +496,7 @@ extension _DictionaryStorage {
         truncatingIfNeeded: ObjectIdentifier(storage).hashValue)
     }
 
-    storage._seed = seed ?? _HashTable.hashSeed(for: storage, scale: scale)
+    storage._seed = seed ?? _HashTable.hashSeed(for: Builtin.castToNativeObject(storage), scale: scale)
     storage._rawKeys = UnsafeMutableRawPointer(keysAddr)
     storage._rawValues = UnsafeMutableRawPointer(valuesAddr)
 

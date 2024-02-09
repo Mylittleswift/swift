@@ -31,18 +31,18 @@ struct WidthPreservingAPIntDenseMapInfo {
   // for the value, then use a parser that always produces values with
   // minimal bit-widths so that we don't get a conflict.
   static inline APInt getEmptyKey() {
-    return APInt::getAllOnesValue(/*bitwidth*/2);
+    return APInt::getAllOnes(/*bitwidth*/2);
   }
   static inline APInt getTombstoneKey() {
-    return APInt::getAllOnesValue(/*bitwidth*/3);
+    return APInt::getAllOnes(/*bitwidth*/3);
   }
 
   static unsigned getHashValue(const APInt &Key) {
-    return static_cast<unsigned>(hash_value(Key));
+    return llvm::DenseMapInfo<APInt>::getHashValue(Key);
   }
 
   static bool isEqual(const APInt &LHS, const APInt &RHS) {
-    return LHS.getBitWidth() == RHS.getBitWidth() && LHS == RHS;
+    return llvm::DenseMapInfo<APInt>::isEqual(LHS, RHS);
   }
 };
 

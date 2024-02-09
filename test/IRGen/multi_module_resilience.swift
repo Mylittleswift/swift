@@ -18,27 +18,17 @@ import OtherModule
 // CHECK-LABEL: define {{(dllexport |protected )?}}swiftcc void @"$s4main7copyFoo3foo11OtherModule0C0VAF_tF"
 // CHECK: [[T0:%.*]] = call swiftcc %swift.metadata_response @"$s11OtherModule3FooVMa"([[INT]] 0)
 // CHECK: [[METADATA:%.*]] = extractvalue %swift.metadata_response [[T0]], 0
-// CHECK: [[VWT:%.*]] = load i8**,
+// CHECK: [[VWT:%.*]] = load ptr,
 //   Allocate 'copy'.
-// CHECK: [[VWT_CAST:%.*]] = bitcast i8** [[VWT]] to %swift.vwtable*
-// CHECK: [[SIZE_ADDR:%.*]] = getelementptr inbounds %swift.vwtable, %swift.vwtable* [[VWT_CAST]], i32 0, i32 8
-// CHECK: [[SIZE:%.*]] = load [[INT]], [[INT]]* [[SIZE_ADDR]]
+// CHECK: [[SIZE_ADDR:%.*]] = getelementptr inbounds %swift.vwtable, ptr [[VWT]], i32 0, i32 8
+// CHECK: [[SIZE:%.*]] = load [[INT]], ptr [[SIZE_ADDR]]
 // CHECK: [[ALLOCA:%.*]] = alloca i8, [[INT]] [[SIZE]],
-// CHECK: [[COPY:%.*]] = bitcast i8* [[ALLOCA]] to [[FOO:%T11OtherModule3FooV]]*
 //   Perform 'initializeWithCopy' via the VWT instead of trying to inline it.
-// CHECK: [[T0:%.*]] = getelementptr inbounds i8*, i8** [[VWT]], i32 2
-// CHECK: [[T1:%.*]] = load i8*, i8** [[T0]],
-// CHECK: [[COPYFN:%.*]] = bitcast i8* [[T1]] to %swift.opaque* (%swift.opaque*, %swift.opaque*, %swift.type*)*
-// CHECK: [[DEST:%.*]] = bitcast [[FOO]]* [[COPY]] to %swift.opaque*
-// CHECK: [[SRC:%.*]] = bitcast [[FOO]]* %1 to %swift.opaque*
-// CHECK: call %swift.opaque* [[COPYFN]](%swift.opaque* noalias [[DEST]], %swift.opaque* noalias [[SRC]], %swift.type* [[METADATA]])
-//   Perform 'initializeWithTake' via the VWT.
-// CHECK: [[T0:%.*]] = getelementptr inbounds i8*, i8** [[VWT]], i32 4
-// CHECK: [[T1:%.*]] = load i8*, i8** [[T0]],
-// CHECK: [[TAKEFN:%.*]] = bitcast i8* [[T1]] to %swift.opaque* (%swift.opaque*, %swift.opaque*, %swift.type*)*
-// CHECK: [[DEST:%.*]] = bitcast [[FOO]]* %0 to %swift.opaque*
-// CHECK: [[SRC:%.*]] = bitcast [[FOO]]* [[COPY]] to %swift.opaque*
-// CHECK: call %swift.opaque* [[TAKEFN]](%swift.opaque* noalias [[DEST]], %swift.opaque* noalias [[SRC]], %swift.type* [[METADATA]])
+// CHECK: [[T0:%.*]] = getelementptr inbounds ptr, ptr [[VWT]], i32 2
+// CHECK: [[T1:%.*]] = load ptr, ptr [[T0]],
+// CHECK: call ptr [[T1]](ptr noalias [[ALLOCA]], ptr noalias %1, ptr [[METADATA]])
+//   Perform 'initializeWithCopy' via the VWT.
+// CHECK: call ptr [[T1]](ptr noalias %0, ptr noalias [[ALLOCA]], ptr [[METADATA]])
 public func copyFoo(foo: Foo) -> Foo {
   let copy = foo
   return copy
@@ -47,27 +37,17 @@ public func copyFoo(foo: Foo) -> Foo {
 // CHECK-LABEL: define {{(dllexport |protected )?}}swiftcc void @"$s4main7copyBar3bar11OtherModule0C0VAF_tF"
 // CHECK: [[T0:%.*]] = call swiftcc %swift.metadata_response @"$s11OtherModule3BarVMa"([[INT]] 0)
 // CHECK: [[METADATA:%.*]] = extractvalue %swift.metadata_response [[T0]], 0
-// CHECK: [[VWT:%.*]] = load i8**,
+// CHECK: [[VWT:%.*]] = load ptr,
 //   Allocate 'copy'.
-// CHECK: [[VWT_CAST:%.*]] = bitcast i8** [[VWT]] to %swift.vwtable*
-// CHECK: [[SIZE_ADDR:%.*]] = getelementptr inbounds %swift.vwtable, %swift.vwtable* [[VWT_CAST]], i32 0, i32 8
-// CHECK: [[SIZE:%.*]] = load [[INT]], [[INT]]* [[SIZE_ADDR]]
+// CHECK: [[SIZE_ADDR:%.*]] = getelementptr inbounds %swift.vwtable, ptr [[VWT]], i32 0, i32 8
+// CHECK: [[SIZE:%.*]] = load [[INT]], ptr [[SIZE_ADDR]]
 // CHECK: [[ALLOCA:%.*]] = alloca i8, [[INT]] [[SIZE]],
-// CHECK: [[COPY:%.*]] = bitcast i8* [[ALLOCA]] to [[BAR:%T11OtherModule3BarV]]*
 //   Perform 'initializeWithCopy' via the VWT instead of trying to inline it.
-// CHECK: [[T0:%.*]] = getelementptr inbounds i8*, i8** [[VWT]], i32 2
-// CHECK: [[T1:%.*]] = load i8*, i8** [[T0]],
-// CHECK: [[COPYFN:%.*]] = bitcast i8* [[T1]] to %swift.opaque* (%swift.opaque*, %swift.opaque*, %swift.type*)*
-// CHECK: [[DEST:%.*]] = bitcast [[BAR]]* [[COPY]] to %swift.opaque*
-// CHECK: [[SRC:%.*]] = bitcast [[BAR]]* %1 to %swift.opaque*
-// CHECK: call %swift.opaque* [[COPYFN]](%swift.opaque* noalias [[DEST]], %swift.opaque* noalias [[SRC]], %swift.type* [[METADATA]])
-//   Perform 'initializeWithTake' via the VWT.
-// CHECK: [[T0:%.*]] = getelementptr inbounds i8*, i8** [[VWT]], i32 4
-// CHECK: [[T1:%.*]] = load i8*, i8** [[T0]],
-// CHECK: [[TAKEFN:%.*]] = bitcast i8* [[T1]] to %swift.opaque* (%swift.opaque*, %swift.opaque*, %swift.type*)*
-// CHECK: [[DEST:%.*]] = bitcast [[BAR]]* %0 to %swift.opaque*
-// CHECK: [[SRC:%.*]] = bitcast [[BAR]]* [[COPY]] to %swift.opaque*
-// CHECK: call %swift.opaque* [[TAKEFN]](%swift.opaque* noalias [[DEST]], %swift.opaque* noalias [[SRC]], %swift.type* [[METADATA]])
+// CHECK: [[T0:%.*]] = getelementptr inbounds ptr, ptr [[VWT]], i32 2
+// CHECK: [[T1:%.*]] = load ptr, ptr [[T0]],
+// CHECK: call ptr [[T1]](ptr noalias [[ALLOCA]], ptr noalias %1, ptr [[METADATA]])
+//   Perform 'initializeWithCopy' via the VWT.
+// CHECK: call ptr [[T1]](ptr noalias %0, ptr noalias [[ALLOCA]], ptr [[METADATA]])
 public func copyBar(bar: Bar) -> Bar {
   let copy = bar
   return copy

@@ -34,7 +34,9 @@ PMOMemoryObjectInfo::PMOMemoryObjectInfo(AllocationInst *allocation)
   if (auto *abi = dyn_cast<AllocBoxInst>(MemoryInst)) {
     assert(abi->getBoxType()->getLayout()->getFields().size() == 1 &&
            "analyzing multi-field boxes not implemented");
-    MemorySILType = abi->getBoxType()->getFieldType(module, 0);
+    MemorySILType =
+        getSILBoxFieldType(TypeExpansionContext(*abi->getFunction()),
+                           abi->getBoxType(), module.Types, 0);
   } else {
     MemorySILType = cast<AllocStackInst>(MemoryInst)->getElementType();
   }
@@ -149,11 +151,11 @@ public:
 
   /// This is the main entry point for the use walker.  It collects uses from
   /// the address and the refcount result of the allocation.
-  LLVM_NODISCARD bool collectFrom();
+  [[nodiscard]] bool collectFrom();
 
 private:
-  LLVM_NODISCARD bool collectUses(SILValue Pointer);
-  LLVM_NODISCARD bool collectContainerUses(SILValue boxValue);
+  [[nodiscard]] bool collectUses(SILValue Pointer);
+  [[nodiscard]] bool collectContainerUses(SILValue boxValue);
 };
 } // end anonymous namespace
 
@@ -286,9 +288,12 @@ bool ElementUseCollector::collectUses(SILValue Pointer) {
     // Stores *to* the allocation are writes.
     if (auto *si = dyn_cast<StoreInst>(User)) {
       if (UI->getOperandNumber() == StoreInst::Dest) {
-        if (PointeeType.is<TupleType>()) {
-          UsesToScalarize.push_back(User);
-          continue;
+        if (auto tupleType = PointeeType.getAs<TupleType>()) {
+          if (!tupleType->isEqual(Module.getASTContext().TheEmptyTupleType) &&
+              !tupleType->containsPackExpansionType()) {
+            UsesToScalarize.push_back(User);
+            continue;
+          }
         }
 
         auto kind = ([&]() -> PMOUseKind {
@@ -310,6 +315,7 @@ bool ElementUseCollector::collectUses(SILValue Pointer) {
           case StoreOwnershipQualifier::Trivial:
             return PMOUseKind::InitOrAssign;
           }
+          llvm_unreachable("covered switch");
         })();
         Uses.emplace_back(si, kind);
         continue;
@@ -319,9 +325,12 @@ bool ElementUseCollector::collectUses(SILValue Pointer) {
     if (auto *CAI = dyn_cast<CopyAddrInst>(User)) {
       // If this is a copy of a tuple, we should scalarize it so that we don't
       // have an access that crosses elements.
-      if (PointeeType.is<TupleType>()) {
-        UsesToScalarize.push_back(CAI);
-        continue;
+      if (auto tupleType = PointeeType.getAs<TupleType>()) {
+        if (!tupleType->isEqual(Module.getASTContext().TheEmptyTupleType) &&
+            !tupleType->containsPackExpansionType()) {
+          UsesToScalarize.push_back(CAI);
+          continue;
+        }
       }
 
       // If this is the source of the copy_addr, then this is a load.  If it is
@@ -379,11 +388,13 @@ bool ElementUseCollector::collectUses(SILValue Pointer) {
       case ParameterConvention::Direct_Owned:
       case ParameterConvention::Direct_Unowned:
       case ParameterConvention::Direct_Guaranteed:
+      case ParameterConvention::Pack_Owned:
+      case ParameterConvention::Pack_Guaranteed:
+      case ParameterConvention::Pack_Inout:
         llvm_unreachable("address value passed to indirect parameter");
 
       // If this is an in-parameter, it is like a load.
       case ParameterConvention::Indirect_In:
-      case ParameterConvention::Indirect_In_Constant:
       case ParameterConvention::Indirect_In_Guaranteed:
         Uses.emplace_back(User, PMOUseKind::IndirectIn);
         continue;
@@ -433,6 +444,10 @@ bool ElementUseCollector::collectUses(SILValue Pointer) {
     // Sanitizer instrumentation is not user visible, so it should not
     // count as a use and must not affect compile-time diagnostics.
     if (isSanitizerInstrumentation(User))
+      continue;
+
+    // We don't care about debug instructions.
+    if (User->isDebugInstruction())
       continue;
 
     // Otherwise, the use is something complicated, it escapes.

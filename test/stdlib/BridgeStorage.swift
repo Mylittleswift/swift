@@ -1,8 +1,8 @@
-//===--- BridgeStorage.swift.gyb ------------------------------*- swift -*-===//
+//===--- BridgeStorage.swift ----------------------------------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2020 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -79,19 +79,7 @@ func expectTagged(_ s: NSString, _ expected: Bool) -> NSString {
   let mask: UInt = 0
 #endif
 
-  var osSupportsTaggedStrings: Bool
-#if os(iOS)
-  // NSTaggedPointerString is enabled starting in iOS 9.0.
-  osSupportsTaggedStrings = isOSAtLeast(9,0)
-#elseif os(tvOS) || os(watchOS)
-  // NSTaggedPointerString is supported in all versions of TVOS and watchOS.
-  osSupportsTaggedStrings = true
-#elseif os(OSX)
-  // NSTaggedPointerString is enabled starting in OS X 10.10.
-  osSupportsTaggedStrings = isOSAtLeast(10,10)
-#endif
-
-  let taggedStringsSupported = osSupportsTaggedStrings && mask != 0
+  let taggedStringsSupported = mask != 0
 
   let tagged = unsafeBitCast(s, to: UInt.self) & mask != 0
 
@@ -145,6 +133,8 @@ allTests.test("_BridgeStorage") {
         expectTrue(b.unflaggedNativeInstance === c)
         expectFalse(b.isUniquelyReferencedUnflaggedNative())
       }
+      // Keep 'c' alive for the isUniquelyReferenced check above.
+      _fixLifetime(c)
     }
 
   }
@@ -155,6 +145,7 @@ allTests.test("_BridgeStorage") {
   // Add a reference and verify that it's still native but no longer unique
   var c = b
   expectFalse(b.isUniquelyReferencedNative())
+  _fixLifetime(b) // make sure b is not killed early
   _fixLifetime(c) // make sure c is not killed early
 
   let n = C()

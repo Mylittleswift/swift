@@ -1,4 +1,4 @@
-// RUN: %target-swift-emit-silgen -module-name inlinable_attribute -emit-verbose-sil -warnings-as-errors %s | %FileCheck %s
+// RUN: %target-swift-emit-silgen -module-name inlinable_attribute -emit-verbose-sil -warnings-as-errors -disable-availability-checking %s | %FileCheck %s
 
 // CHECK-LABEL: sil [serialized] [ossa] @$s19inlinable_attribute15fragileFunctionyyF : $@convention(thin) () -> ()
 @inlinable public func fragileFunction() {
@@ -26,7 +26,7 @@ public class MyCls {
 
   // Allocating entry point is [serialized]
 
-  // CHECK-LABEL: sil [serialized] [ossa] @$s19inlinable_attribute5MyClsC14designatedInitACyt_tcfC : $@convention(method) (@thick MyCls.Type) -> @owned MyCls
+  // CHECK-LABEL: sil [serialized] [exact_self_class] [ossa] @$s19inlinable_attribute5MyClsC14designatedInitACyt_tcfC : $@convention(method) (@thick MyCls.Type) -> @owned MyCls
   public init(designatedInit: ()) {}
 
   // Note -- convenience init is intentionally not [serialized]
@@ -37,13 +37,40 @@ public class MyCls {
   }
 }
 
+public actor MyAct {
+  // CHECK-LABEL: sil [serialized] [ossa] @$s19inlinable_attribute5MyActCfD : $@convention(method) (@owned MyAct) -> ()
+  @inlinable deinit {}
+
+  /// whether delegating or not, the initializers for an actor are not serialized unless marked inlinable.
+
+  // CHECK-LABEL: sil [exact_self_class] [ossa] @$s19inlinable_attribute5MyActC14designatedInitACyt_tcfC : $@convention(method) (@thick MyAct.Type) -> @owned MyAct
+  // CHECK-LABEL: sil [ossa] @$s19inlinable_attribute5MyActC14designatedInitACyt_tcfc : $@convention(method) (@owned MyAct) -> @owned MyAct
+  public init(designatedInit: ()) {}
+
+  // CHECK-LABEL: sil [ossa] @$s19inlinable_attribute5MyActC15convenienceInitACyt_tcfC : $@convention(method) (@thick MyAct.Type) -> @owned MyAct
+  public init(convenienceInit: ()) {
+    self.init(designatedInit: ())
+  }
+
+
+  // CHECK-LABEL: sil [serialized] [exact_self_class] [ossa] @$s19inlinable_attribute5MyActC0A14DesignatedInitACyt_tcfC : $@convention(method) (@thick MyAct.Type) -> @owned MyAct
+  // CHECK-LABEL: sil [serialized] [ossa] @$s19inlinable_attribute5MyActC0A14DesignatedInitACyt_tcfc : $@convention(method) (@owned MyAct) -> @owned MyAct
+  @inlinable public init(inlinableDesignatedInit: ()) {}
+
+  // CHECK-LABEL: sil [serialized] [ossa] @$s19inlinable_attribute5MyActC0A15ConvenienceInitACyt_tcfC : $@convention(method) (@thick MyAct.Type) -> @owned MyAct
+  @inlinable public init(inlinableConvenienceInit: ()) {
+    self.init(designatedInit: ())
+  }
+}
+
 // Make sure enum case constructors for public and versioned enums are
 // [serialized].
 @usableFromInline enum MyEnum {
   case c(MySt)
 }
 
-// CHECK-LABEL: sil shared [transparent] [serializable] [thunk] [ossa] @$s19inlinable_attribute6MyEnumO1cyAcA0C2StVcACmFTc : $@convention(thin) (@thin MyEnum.Type) -> @owned @callee_guaranteed (MySt) -> MyEnum
+// CHECK-LABEL: sil shared [serialized] [ossa] @$s19inlinable_attribute16referencesMyEnumyyFAA0dE0OAA0D2StVcADmcfu_ : $@convention(thin) (@thin MyEnum.Type) -> @owned @callee_guaranteed (MySt) -> MyEnum {
+// CHECK-LABEL: sil shared [serialized] [ossa] @$s19inlinable_attribute16referencesMyEnumyyFAA0dE0OAA0D2StVcADmcfu_AdFcfu0_ : $@convention(thin) (MySt, @thin MyEnum.Type) -> MyEnum {
 
 @inlinable public func referencesMyEnum() {
   _ = MyEnum.c
@@ -52,7 +79,7 @@ public class MyCls {
 // CHECK-LABEL: sil non_abi [transparent] [serialized] [ossa] @$s19inlinable_attribute15HasInitializersV1xSivpfi : $@convention(thin) () -> Int
 // CHECK-LABEL: sil non_abi [transparent] [serialized] [ossa] @$s19inlinable_attribute15HasInitializersV1ySivpfi : $@convention(thin) () -> Int
 
-@_fixed_layout
+@frozen
 public struct HasInitializers {
   public let x = 1234
   internal let y = 4321
@@ -64,13 +91,13 @@ public class Horse {
   public func gallop() {}
 }
 
-// CHECK-LABEL: sil [serialized] [ossa] @$s19inlinable_attribute15talkAboutAHorse1hyAA5HorseC_tF : $@convention(thin) (@guaranteed Horse) -> () {
-// CHECK: function_ref @$s19inlinable_attribute5HorseC6gallopyyFTc
+// CHECK-LABEL: sil shared [serialized] [ossa] @$s19inlinable_attribute15talkAboutAHorse1hyAA5HorseC_tFyycAEcfu_ : $@convention(thin) (@guaranteed Horse) -> @owned @callee_guaranteed () -> () {
+// CHECK: function_ref @$s19inlinable_attribute15talkAboutAHorse1hyAA5HorseC_tFyycAEcfu_yycfu0_
 // CHECK: return
 // CHECK: }
 
-// CHECK-LABEL: sil shared [serializable] [thunk] [ossa] @$s19inlinable_attribute5HorseC6gallopyyFTc : $@convention(thin) (@guaranteed Horse) -> @owned @callee_guaranteed () -> () {
-// CHECK: class_method
+// CHECK-LABEL: sil shared [serialized] [ossa] @$s19inlinable_attribute15talkAboutAHorse1hyAA5HorseC_tFyycAEcfu_yycfu0_ : $@convention(thin) (@guaranteed Horse) -> () {
+// CHECK: class_method %0 : $Horse, #Horse.gallop : (Horse) -> () -> (), $@convention(method) (@guaranteed Horse) -> ()
 // CHECK: return
 // CHECK: }
 
@@ -135,15 +162,15 @@ private class PrivateDerivedFromUFI : UFIBase {}
 // CHECK-LABEL: sil [serialized] [ossa] @$s19inlinable_attribute3basyyF
 @inlinable
 public func bas() {
-  // CHECK-LABEL: sil shared [serializable] [ossa] @$s19inlinable_attribute3basyyF3zimL_yyF
+  // CHECK-LABEL: sil shared [serialized] [ossa] @$s19inlinable_attribute3basyyF3zimL_yyF
   func zim() {
-    // CHECK-LABEL: sil shared [serializable] [ossa] @$s19inlinable_attribute3basyyF3zimL_yyF4zangL_yyF
+    // CHECK-LABEL: sil shared [serialized] [ossa] @$s19inlinable_attribute3basyyF3zimL_yyF4zangL_yyF
     func zang() { }
   }
 
   // CHECK-LABEL: sil shared [serialized] [ossa] @$s19inlinable_attribute3bas{{[_0-9a-zA-Z]*}}U_
-  let zung = {
-    // CHECK-LABEL: sil shared [serializable] [ossa] @$s19inlinable_attribute3basyyFyycfU_7zippityL_yyF
+  let _ = {
+    // CHECK-LABEL: sil shared [serialized] [ossa] @$s19inlinable_attribute3basyyFyycfU_7zippityL_yyF
     func zippity() { }
   }
 }
@@ -167,18 +194,18 @@ public func global(_ x: Int) -> Int { return x }
   let _: @convention(c) (Int) -> Int = local
 }
 
-// CHECK-LABEL: sil shared [serializable] [thunk] [ossa] @$s19inlinable_attribute6globalyS2iFTo : $@convention(c) (Int) -> Int
+// CHECK-LABEL: sil shared [serialized] [thunk] [ossa] @$s19inlinable_attribute6globalyS2iFTo : $@convention(c) (Int) -> Int
 // CHECK: function_ref @$s19inlinable_attribute6globalyS2iF
 // CHECK: return
 
 // CHECK-LABEL: sil shared [serialized] [ossa] @$s19inlinable_attribute16cFunctionPointeryyFS2icfU_ : $@convention(thin) (Int) -> Int {
 
-// CHECK-LABEL: sil shared [serializable] [thunk] [ossa] @$s19inlinable_attribute16cFunctionPointeryyFS2icfU_To : $@convention(c) (Int) -> Int {
+// CHECK-LABEL: sil shared [serialized] [thunk] [ossa] @$s19inlinable_attribute16cFunctionPointeryyFS2icfU_To : $@convention(c) (Int) -> Int {
 // CHECK: function_ref @$s19inlinable_attribute16cFunctionPointeryyFS2icfU_
 // CHECK: return
 
-// CHECK-LABEL: sil shared [serializable] [ossa] @$s19inlinable_attribute16cFunctionPointeryyF5localL_yS2iF : $@convention(thin) (Int) -> Int {
+// CHECK-LABEL: sil shared [serialized] [ossa] @$s19inlinable_attribute16cFunctionPointeryyF5localL_yS2iF : $@convention(thin) (Int) -> Int {
 
-// CHECK-LABEL: sil shared [serializable] [thunk] [ossa] @$s19inlinable_attribute16cFunctionPointeryyF5localL_yS2iFTo : $@convention(c) (Int) -> Int {
+// CHECK-LABEL: sil shared [serialized] [thunk] [ossa] @$s19inlinable_attribute16cFunctionPointeryyF5localL_yS2iFTo : $@convention(c) (Int) -> Int {
 // CHECK: function_ref @$s19inlinable_attribute16cFunctionPointeryyF5localL_yS2iF
 // CHECK: return

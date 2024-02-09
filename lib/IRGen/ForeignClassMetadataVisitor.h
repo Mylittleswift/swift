@@ -35,6 +35,7 @@ public:
     : super(IGM), Target(target) {}
 
   void layout() {
+    asImpl().addLayoutStringPointer();
     super::layout();
     asImpl().addNominalTypeDescriptor();
     asImpl().addSuperclass();
@@ -60,6 +61,7 @@ protected:
 
 public:
   void addMetadataFlags() { addPointer(); }
+  void addLayoutStringPointer() { addPointer(); }
   void addValueWitnessTable() { addPointer(); }
   void addNominalTypeDescriptor() { addPointer(); }
   void addSuperclass() { addPointer(); }
@@ -68,6 +70,29 @@ public:
 private:
   void addPointer() {
     NextOffset += super::IGM.getPointerSize();
+  }
+};
+
+template <class Impl>
+class ForeignReferenceTypeMetadataVisitor
+    : public NominalMetadataVisitor<Impl> {
+  using super = NominalMetadataVisitor<Impl>;
+protected:
+  ClassDecl *Target;
+  using super::asImpl;
+public:
+  ForeignReferenceTypeMetadataVisitor(IRGenModule &IGM, ClassDecl *target)
+      : super(IGM), Target(target) {}
+
+  void layout() {
+    asImpl().addLayoutStringPointer();
+    super::layout();
+    asImpl().addNominalTypeDescriptor();
+    asImpl().addReservedWord();
+  }
+
+  CanType getTargetType() const {
+    return Target->getDeclaredType()->getCanonicalType();
   }
 };
 

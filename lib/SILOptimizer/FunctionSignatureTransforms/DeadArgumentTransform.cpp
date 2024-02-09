@@ -29,13 +29,13 @@ bool FunctionSignatureTransform::DeadArgumentAnalyzeParameters() {
   // Did we decide we should optimize any parameter?
   SILFunction *F = TransformDescriptor.OriginalFunction;
   bool SignatureOptimize = false;
-  auto Args = F->begin()->getFunctionArguments();
+  auto Args = F->begin()->getSILFunctionArguments();
   auto OrigShouldModifySelfArgument =
       TransformDescriptor.shouldModifySelfArgument;
   // Analyze the argument information.
   for (unsigned i : indices(Args)) {
     ArgumentDescriptor &A = TransformDescriptor.ArgumentDescList[i];
-    if (!A.PInfo.hasValue()) {
+    if (!A.PInfo.has_value()) {
       // It is not an argument. It could be an indirect result.
       continue;
     }
@@ -70,7 +70,6 @@ bool FunctionSignatureTransform::DeadArgumentAnalyzeParameters() {
       for (auto &AD : TransformDescriptor.ArgumentDescList) {
         if (AD.IsEntirelyDead) {
           AD.IsEntirelyDead = false;
-          break;
         }
       }
       TransformDescriptor.shouldModifySelfArgument =

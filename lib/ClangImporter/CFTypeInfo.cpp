@@ -43,7 +43,7 @@ static constexpr const llvm::StringLiteral KnownCFTypes[] = {
 const size_t NumKnownCFTypes = sizeof(KnownCFTypes) / sizeof(*KnownCFTypes);
 
 /// Maintain a set of known CF types.
-static bool isKnownCFTypeName(StringRef name) {
+bool CFPointeeInfo::isKnownCFTypeName(StringRef name) {
   return std::binary_search(KnownCFTypes, KnownCFTypes + NumKnownCFTypes,
                             name, SortByLengthComparator());
 }
@@ -52,6 +52,9 @@ static bool isKnownCFTypeName(StringRef name) {
 CFPointeeInfo
 CFPointeeInfo::classifyTypedef(const clang::TypedefNameDecl *typedefDecl) {
   clang::QualType type = typedefDecl->getUnderlyingType();
+
+  if (auto elaborated = type->getAs<clang::ElaboratedType>())
+    type = elaborated->desugar();
 
   if (auto subTypedef = type->getAs<clang::TypedefType>()) {
     if (classifyTypedef(subTypedef->getDecl()))

@@ -1,6 +1,5 @@
-// RUN: %target-typecheck-verify-swift
-// RUN: %target-typecheck-verify-swift -solver-enable-operator-designated-types
-// REQUIRES: OS=macosx
+// RUN: %target-typecheck-verify-swift -solver-expression-time-threshold=1
+// REQUIRES: OS=macosx,no_asan
 
 import simd
 import CoreGraphics
@@ -17,7 +16,7 @@ class SomeView {
     let displayScale: CGFloat = CGFloat()
     let _ = (descriptionTextViewFrame.height 
              + (-descriptionTextView.lastBaselineOffsetFromBottom - textInset.bottom + descriptionLabelProperties.lastBaselineOffsetFromBottom)
-            + (-descriptionTextView.firstBaselineOffsetFromTop - textInset.top + descriptionTextBaselineOffset).ceilingValue(scale: displayScale)
+             + (-descriptionTextView.firstBaselineOffsetFromTop - textInset.top + descriptionTextBaselineOffset).ceilingValue(scale: displayScale)
             )
   }
 

@@ -105,14 +105,14 @@ var addressOnly: Fungible {
 func funge(x x: inout Fungible) {}
 
 funge(x: &addressOnly)
-// CHECK: [[TEMP:%.*]] = alloc_stack $Fungible
-// CHECK: [[GET:%.*]] = function_ref @$s9writeback11addressOnlyAA8Fungible_pvg : $@convention(thin) () -> @out Fungible
-// CHECK: apply [[GET]]([[TEMP]]) : $@convention(thin) () -> @out Fungible
-// CHECK: [[FUNGE:%.*]] = function_ref @$s9writeback5funge1xyAA8Fungible_pz_tF : $@convention(thin) (@inout Fungible) -> ()
-// CHECK: apply [[FUNGE]]([[TEMP]]) : $@convention(thin) (@inout Fungible) -> ()
-// CHECK: [[SET:%.*]] = function_ref @$s9writeback11addressOnlyAA8Fungible_pvs : $@convention(thin) (@in Fungible) -> ()
-// CHECK: apply [[SET]]([[TEMP]]) : $@convention(thin) (@in Fungible) -> ()
-// CHECK: dealloc_stack [[TEMP]] : $*Fungible
+// CHECK: [[TEMP:%.*]] = alloc_stack $any Fungible
+// CHECK: [[GET:%.*]] = function_ref @$s9writeback11addressOnlyAA8Fungible_pvg : $@convention(thin) () -> @out any Fungible
+// CHECK: apply [[GET]]([[TEMP]]) : $@convention(thin) () -> @out any Fungible
+// CHECK: [[FUNGE:%.*]] = function_ref @$s9writeback5funge1xyAA8Fungible_pz_tF : $@convention(thin) (@inout any Fungible) -> ()
+// CHECK: apply [[FUNGE]]([[TEMP]]) : $@convention(thin) (@inout any Fungible) -> ()
+// CHECK: [[SET:%.*]] = function_ref @$s9writeback11addressOnlyAA8Fungible_pvs : $@convention(thin) (@in any Fungible) -> ()
+// CHECK: apply [[SET]]([[TEMP]]) : $@convention(thin) (@in any Fungible) -> ()
+// CHECK: dealloc_stack [[TEMP]] : $*any Fungible
 
 // Test that writeback occurs with generic properties.
 // <rdar://problem/16525257> 
@@ -130,15 +130,15 @@ protocol Frobable {
 }
 
 // CHECK-LABEL: sil hidden [ossa] @$s9writeback12test_generic{{[_0-9a-zA-Z]*}}F 
-// CHECK:         witness_method $Runce, #Runcible.frob!modify.1
-// CHECK:         witness_method $Runce.Frob, #Frobable.anse!setter.1
+// CHECK:         witness_method $Runce, #Runcible.frob!modify
+// CHECK:         witness_method $Runce.Frob, #Frobable.anse!setter
 func test_generic<Runce: Runcible>(runce runce: inout Runce, anse: Runce.Frob.Anse) {
   runce.frob.anse = anse
 }
 
 // We should *not* write back when referencing decls or members as rvalues.
 // <rdar://problem/16530235>
-// CHECK-LABEL: sil hidden [ossa] @$s9writeback15loadAddressOnlyAA8Fungible_pyF : $@convention(thin) () -> @out Fungible {
+// CHECK-LABEL: sil hidden [ossa] @$s9writeback15loadAddressOnlyAA8Fungible_pyF : $@convention(thin) () -> @out any Fungible {
 func loadAddressOnly() -> Fungible {
   // CHECK:       function_ref writeback.addressOnly.getter
   // CHECK-NOT:   function_ref writeback.addressOnly.setter
@@ -146,10 +146,10 @@ func loadAddressOnly() -> Fungible {
 }
 
 // CHECK-LABEL: sil hidden [ossa] @$s9writeback10loadMember{{[_0-9a-zA-Z]*}}F
-// CHECK:         witness_method $Runce, #Runcible.frob!getter.1
-// CHECK:         witness_method $Runce.Frob, #Frobable.anse!getter.1
-// CHECK-NOT:     witness_method $Runce.Frob, #Frobable.anse!setter.1
-// CHECK-NOT:     witness_method $Runce, #Runcible.frob!setter.1
+// CHECK:         witness_method $Runce, #Runcible.frob!getter
+// CHECK:         witness_method $Runce.Frob, #Frobable.anse!getter
+// CHECK-NOT:     witness_method $Runce.Frob, #Frobable.anse!setter
+// CHECK-NOT:     witness_method $Runce, #Runcible.frob!setter
 func loadMember<Runce: Runcible>(runce runce: Runce) -> Runce.Frob.Anse {
   return runce.frob.anse
 }

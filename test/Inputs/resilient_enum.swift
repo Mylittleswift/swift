@@ -1,25 +1,25 @@
 import resilient_struct
 
 // Fixed-layout enum with resilient members
-@_frozen public enum SimpleShape {
+@frozen public enum SimpleShape {
   case KleinBottle
   case Triangle(Size)
 }
 
 // Fixed-layout enum with resilient members
-@_frozen public enum Shape {
+@frozen public enum Shape {
   case Point
   case Rect(Size)
   case RoundedRect(Size, Size)
 }
 
 // Fixed-layout enum with indirect resilient members
-@_frozen public enum FunnyShape {
+@frozen public enum FunnyShape {
   indirect case Parallelogram(Size)
   indirect case Trapezoid(Size)
 }
 
-@_frozen public enum FullyFixedLayout {
+@frozen public enum FullyFixedLayout {
   case noPayload
   case hasPayload(Int)
 }
@@ -38,7 +38,7 @@ public struct Color {
   }
 }
 
-@_frozen public enum CustomColor {
+@frozen public enum CustomColor {
   case Black
   case White
   case Custom(Color)
@@ -207,4 +207,29 @@ public enum ResilientIndirectEnum {
 
   // -2
   indirect case B(ResilientIndirectEnum, ResilientIndirectEnum)
+}
+
+public enum ResilientEnumWithUnavailableCase {
+  case available
+
+  @available(*, unavailable)
+  case unavailable
+}
+
+public enum ResilientEnumWithUnavailableCaseAndPayload {
+  @available(*, unavailable)
+  case int(_ i: UnavailableResilientInt)
+
+  case double(_ d: ResilientDouble)
+}
+
+extension ResilientEnumWithUnavailableCaseAndPayload {
+  @_alwaysEmitIntoClient
+  public var intValue: Int {
+    switch self {
+    case .int(let i): return i.i
+    case .double(let d): return Int(d.d)
+    default: return -1
+    }
+  }
 }

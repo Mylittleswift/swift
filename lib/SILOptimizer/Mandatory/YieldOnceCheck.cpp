@@ -17,6 +17,7 @@
 // graph of the coroutine has a yield instruction before a return instruction.
 
 #define DEBUG_TYPE "yield-once-check"
+
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/DiagnosticsSIL.h"
 #include "swift/AST/Expr.h"
@@ -24,6 +25,9 @@
 #include "swift/SIL/BasicBlockUtils.h"
 #include "swift/SIL/CFG.h"
 #include "swift/SIL/Dominance.h"
+#include "swift/SIL/TerminatorUtils.h"
+#include "swift/SIL/BasicBlockBits.h"
+#include "swift/SIL/BasicBlockData.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "llvm/ADT/BreadthFirstIterator.h"
 #include "llvm/ADT/DenseSet.h"
@@ -47,25 +51,31 @@ class YieldOnceCheck : public SILFunctionTransform {
     /// (BeforeYield) or after seeing a yield (AfterYield), or in both states
     /// (Conflict). This enum is a semi-lattice where Conflict is the top and
     /// the merge of BeforeYield and AfterYield states is Conflict.
-    enum YieldState { BeforeYield, AfterYield, Conflict } yieldState;
+    enum YieldState { BeforeYield, AfterYield, Conflict } yieldState = Conflict;
 
   private:
+    friend class BasicBlockData<BBState>;
+  
     // The following states are maintained for emitting diagnostics.
 
     /// For AfterYield and Conflict states, this field records the yield
     /// instruction that was seen while propagating the state.
-    SILInstruction *yieldInst;
+    SILInstruction *yieldInst = nullptr;
 
     /// For Conflict state, these fields record the basic blocks that
     /// propagated the 'AfterYield' and 'BeforeYield' states which resulted
     /// in the Conflict.
-    SILBasicBlock *yieldingPred;
-    SILBasicBlock *nonYieldingPred;
+    SILBasicBlock *yieldingPred = nullptr;
+    SILBasicBlock *nonYieldingPred = nullptr;
+    
+    bool visited = false;
+
+    BBState() {}
 
     BBState(YieldState yState, SILInstruction *yieldI, SILBasicBlock *yieldPred,
             SILBasicBlock *noYieldPred)
         : yieldState(yState), yieldInst(yieldI), yieldingPred(yieldPred),
-          nonYieldingPred(noYieldPred) {}
+          nonYieldingPred(noYieldPred), visited(true) {}
 
   public:
     static BBState getInitialState() {
@@ -98,6 +108,8 @@ class YieldOnceCheck : public SILFunctionTransform {
       assert(yieldState == Conflict);
       return nonYieldingPred;
     }
+    
+    bool isVisited() const { return visited; }
   };
 
   /// A structure that records an error found during the analysis along with
@@ -140,21 +152,21 @@ class YieldOnceCheck : public SILFunctionTransform {
   /// an error that is detected.
   /// \return the state at the exit of the basic block if it can be computed
   /// and None otherwise.
-  static Optional<BBState>
+  static llvm::Optional<BBState>
   transferStateThroughBasicBlock(SILBasicBlock *bb, BBState inState,
-                                 Optional<YieldError> &error) {
-    error = None;
+                                 llvm::Optional<YieldError> &error) {
+    error = llvm::None;
     auto *term = bb->getTerminator();
 
     if (auto *returnInst = dyn_cast<ReturnInst>(term)) {
       if (inState.yieldState == BBState::BeforeYield) {
         error = YieldError::getReturnBeforeYieldError(returnInst, inState);
-        return None;
+        return llvm::None;
       }
 
       if (inState.yieldState == BBState::Conflict) {
         error = YieldError::getReturnOnConflict(returnInst, inState);
-        return None;
+        return llvm::None;
       }
       return inState;
     }
@@ -162,7 +174,7 @@ class YieldOnceCheck : public SILFunctionTransform {
     if (auto *yieldInst = dyn_cast<YieldInst>(term)) {
       if (inState.yieldState != BBState::BeforeYield) {
         error = YieldError::getMultipleYieldError(yieldInst, inState);
-        return None;
+        return llvm::None;
       }
 
       // If the current state is BeforeYield and if the basic block ends in a
@@ -190,7 +202,7 @@ class YieldOnceCheck : public SILFunctionTransform {
   /// \return the new state obtained by merging the oldState with the newState
   static BBState merge(SILBasicBlock *mergeBlock, BBState oldState,
                        BBState newState, SILBasicBlock *newStatePred,
-                       llvm::DenseMap<SILBasicBlock *, BBState> &bbToStateMap) {
+                       BasicBlockData<BBState> &bbToStateMap) {
     auto oldYieldState = oldState.yieldState;
     auto newYieldState = newState.yieldState;
 
@@ -218,7 +230,7 @@ class YieldOnceCheck : public SILFunctionTransform {
     // propagated the 'oldState'.
     SILBasicBlock *oldStatePred = nullptr;
     for (auto predBB : mergeBlock->getPredecessorBlocks()) {
-      if (predBB != newStatePred && bbToStateMap.count(predBB)) {
+      if (predBB != newStatePred && bbToStateMap[predBB].isVisited()) {
         oldStatePred = predBB;
         break;
       }
@@ -241,19 +253,19 @@ class YieldOnceCheck : public SILFunctionTransform {
   /// Diagnostics are not reported for nodes unreachable from the entry of
   /// the control-flow graph.
   void diagnoseYieldOnceUsage(SILFunction &fun) {
-    llvm::DenseMap<SILBasicBlock *, BBState> bbToStateMap;
+    BasicBlockData<BBState> bbToStateMap(&fun);
 
     SmallVector<SILBasicBlock *, 16> worklist;
 
     auto *entryBB = fun.getEntryBlock();
-    bbToStateMap.try_emplace(entryBB, BBState::getInitialState());
+    bbToStateMap[entryBB] = BBState::getInitialState();
     worklist.push_back(entryBB);
 
     // ReturnBeforeYield errors, which denote that no paths yield before
     // returning, are not diagnosed until the analysis completes, in order to
     // distinguish them from ReturnOnConflict errors, which happen when some
     // paths yield and some don't.
-    Optional<YieldError> returnBeforeYieldError = None;
+    llvm::Optional<YieldError> returnBeforeYieldError = llvm::None;
 
     // The algorithm uses a worklist to propagate the state through basic
     // blocks until a fix point. Since the state lattice has height one, each
@@ -265,18 +277,19 @@ class YieldOnceCheck : public SILFunctionTransform {
     // errors along shorter paths to return.
     while (!worklist.empty()) {
       SILBasicBlock *bb = worklist.pop_back_val();
-      const BBState &state = bbToStateMap.find(bb)->getSecond();
+      const BBState &state = bbToStateMap[bb];
+      assert(state.isVisited());
 
-      Optional<YieldError> errorResult = None;
+      llvm::Optional<YieldError> errorResult = llvm::None;
       auto resultState = transferStateThroughBasicBlock(bb, state, errorResult);
 
-      if (!resultState.hasValue()) {
-        auto error = errorResult.getValue();
+      if (!resultState.has_value()) {
+        auto error = errorResult.value();
 
         // ReturnBeforeYield errors will not be reported until the analysis
         // completes. So record it and continue.
         if (error.errorKind == YieldError::ReturnBeforeYield) {
-          if (!returnBeforeYieldError.hasValue()) {
+          if (!returnBeforeYieldError.has_value()) {
             returnBeforeYieldError = error;
           }
           continue;
@@ -286,15 +299,14 @@ class YieldOnceCheck : public SILFunctionTransform {
         return;
       }
 
-      auto nextState = resultState.getValue();
+      auto nextState = resultState.value();
 
       for (auto *succBB : bb->getSuccessorBlocks()) {
-        // Optimistically try to set the state of the successor as next state.
-        auto insertResult = bbToStateMap.try_emplace(succBB, nextState);
-
-        // If the insertion was successful, it means we are seeing the successor
-        // for the first time. Add the successor to the worklist.
-        if (insertResult.second) {
+        BBState &succState = bbToStateMap[succBB];
+        if (!succState.isVisited()) {
+          // We are seeing the successor for the first time.
+          // Add the successor to the worklist.
+          succState = nextState;
           worklist.insert(worklist.begin(), succBB);
           continue;
         }
@@ -302,10 +314,9 @@ class YieldOnceCheck : public SILFunctionTransform {
         // Here the successor already has a state. Merge the current and
         // previous states and propagate it if it is different from the
         // old state.
-        const auto &oldState = insertResult.first->second;
-        auto mergedState = merge(succBB, oldState, nextState, bb, bbToStateMap);
+        auto mergedState = merge(succBB, succState, nextState, bb, bbToStateMap);
 
-        if (mergedState.yieldState == oldState.yieldState)
+        if (mergedState.yieldState == succState.yieldState)
           continue;
 
         // Even though at this point there has to be an error since there is an
@@ -313,18 +324,18 @@ class YieldOnceCheck : public SILFunctionTransform {
         // continue propagation of this conflict state to determine
         // whether this results in multiple-yields error or return-on-conflict
         // error.
-        insertResult.first->second = mergedState;
+        succState = mergedState;
         worklist.insert(worklist.begin(), succBB);
       }
     }
 
-    if (returnBeforeYieldError.hasValue()) {
-      emitDiagnostics(returnBeforeYieldError.getValue(), fun, bbToStateMap);
+    if (returnBeforeYieldError.has_value()) {
+      emitDiagnostics(returnBeforeYieldError.value(), fun, bbToStateMap);
     }
   }
 
   void emitDiagnostics(YieldError &error, SILFunction &fun,
-                       llvm::DenseMap<SILBasicBlock *, BBState> &visitedBBs) {
+                       BasicBlockData<BBState> &visitedBBs) {
     ASTContext &astCtx = fun.getModule().getASTContext();
 
     switch (error.errorKind) {
@@ -390,10 +401,10 @@ class YieldOnceCheck : public SILFunctionTransform {
 
       // Find all transitive predecessors of 'yieldPred' that were visited
       // during the analysis
-      SmallPtrSet<SILBasicBlock *, 8> predecessorsOfYieldPred;
+      BasicBlockSet predecessorsOfYieldPred(&fun);
       for (auto *predBB :
            llvm::breadth_first<llvm::Inverse<SILBasicBlock *>>(yieldPred)) {
-        if (visitedBBs.count(predBB)) {
+        if (visitedBBs[predBB].isVisited()) {
           predecessorsOfYieldPred.insert(predBB);
         }
       }
@@ -401,13 +412,13 @@ class YieldOnceCheck : public SILFunctionTransform {
       // Find the first predecessor of 'noYieldPred' that is also a predecessor
       // of 'yieldPred', in the breadth-first search order of the reversed CFG.
       SILBasicBlock *lowestCommonAncestorBB = nullptr;
-      SmallPtrSet<SILBasicBlock *, 8> predecessorsOfNoYieldPred;
+      BasicBlockSet predecessorsOfNoYieldPred(&fun);
       for (auto *pred :
            llvm::breadth_first<llvm::Inverse<SILBasicBlock *>>(noYieldPred)) {
-        if (!visitedBBs.count(pred)) {
+        if (!visitedBBs[pred].isVisited()) {
           continue;
         }
-        if (predecessorsOfYieldPred.count(pred)) {
+        if (predecessorsOfYieldPred.contains(pred)) {
           lowestCommonAncestorBB = pred;
           break;
         }
@@ -421,7 +432,7 @@ class YieldOnceCheck : public SILFunctionTransform {
       // doesn't yield.
       SILBasicBlock *noYieldTarget = nullptr;
       for (auto *succ : lowestCommonAncestorBB->getSuccessorBlocks()) {
-        if (predecessorsOfNoYieldPred.count(succ)) {
+        if (predecessorsOfNoYieldPred.contains(succ)) {
           noYieldTarget = succ;
           break;
         }
@@ -444,18 +455,18 @@ class YieldOnceCheck : public SILFunctionTransform {
       // For switch_enum instructions, report the case that doesn't yield.
       enum SwitchCaseKind { Default, OptionNil, OptionSome };
 
-      if (auto *switchEnum = dyn_cast<SwitchEnumInstBase>(conflictingBranch)) {
+      if (auto switchEnum = SwitchEnumTermInst(conflictingBranch)) {
         auto enumCaseLoc = noYieldTarget->begin()->getLoc().getSourceLoc();
 
-        if (switchEnum->hasDefault() &&
-            switchEnum->getDefaultBB() == noYieldTarget) {
+        if (switchEnum.hasDefault() &&
+            switchEnum.getDefaultBB() == noYieldTarget) {
           diagnose(astCtx, enumCaseLoc, diag::case_doesnt_yield, Default);
           return;
         }
 
         // Find the case identifier that doesn't yield.
         NullablePtr<EnumElementDecl> enumElemDecl =
-            switchEnum->getUniqueCaseForDestination(noYieldTarget);
+            switchEnum.getUniqueCaseForDestination(noYieldTarget);
         assert(enumElemDecl.isNonNull());
 
         // Specialize diagnostics for cases of an optional.
@@ -465,7 +476,7 @@ class YieldOnceCheck : public SILFunctionTransform {
           diagnose(astCtx, enumCaseLoc, diag::case_doesnt_yield, OptionSome);
         } else {
           diagnose(astCtx, enumCaseLoc, diag::named_case_doesnt_yield,
-                   enumElemDecl.get()->getName());
+                   enumElemDecl.get()->getBaseIdentifier());
         }
         return;
       }
@@ -481,11 +492,11 @@ class YieldOnceCheck : public SILFunctionTransform {
           return;
         }
         // Find the case that doesn't yield.
-        Optional<unsigned> caseNumberOpt =
+        llvm::Optional<unsigned> caseNumberOpt =
             switchValue->getUniqueCaseForDestination(noYieldTarget);
-        assert(caseNumberOpt.hasValue());
+        assert(caseNumberOpt.has_value());
 
-        auto caseNumber = caseNumberOpt.getValue();
+        auto caseNumber = caseNumberOpt.value();
         diagnose(
             astCtx, enumCaseLoc, diag::switch_value_case_doesnt_yield,
             (Twine(caseNumber) + llvm::getOrdinalSuffix(caseNumber)).str());

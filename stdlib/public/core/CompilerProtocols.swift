@@ -98,7 +98,7 @@
 ///     // Prints "false"
 ///     print(allowedMoves.rawValue & Directions.right.rawValue)
 ///     // Prints "0"
-public protocol RawRepresentable {
+public protocol RawRepresentable<RawValue> {
   /// The raw type that can be used to represent all values of the conforming
   /// type.
   ///
@@ -149,8 +149,8 @@ public protocol RawRepresentable {
 ///   - lhs: A raw-representable instance.
 ///   - rhs: A second raw-representable instance.
 @inlinable // trivial-implementation
-public func == <T : RawRepresentable>(lhs: T, rhs: T) -> Bool
-  where T.RawValue : Equatable {
+public func == <T: RawRepresentable>(lhs: T, rhs: T) -> Bool
+  where T.RawValue: Equatable {
   return lhs.rawValue == rhs.rawValue
 }
 
@@ -160,21 +160,21 @@ public func == <T : RawRepresentable>(lhs: T, rhs: T) -> Bool
 ///   - lhs: A raw-representable instance.
 ///   - rhs: A second raw-representable instance.
 @inlinable // trivial-implementation
-public func != <T : RawRepresentable>(lhs: T, rhs: T) -> Bool
-  where T.RawValue : Equatable {
+public func != <T: RawRepresentable>(lhs: T, rhs: T) -> Bool
+  where T.RawValue: Equatable {
   return lhs.rawValue != rhs.rawValue
 }
 
 // This overload is needed for ambiguity resolution against the
-// implementation of != for T : Equatable
+// implementation of != for T: Equatable
 /// Returns a Boolean value indicating whether the two arguments are not equal.
 ///
 /// - Parameters:
 ///   - lhs: A raw-representable instance.
 ///   - rhs: A second raw-representable instance.
 @inlinable // trivial-implementation
-public func != <T : Equatable>(lhs: T, rhs: T) -> Bool
-  where T : RawRepresentable, T.RawValue : Equatable {
+public func != <T: Equatable>(lhs: T, rhs: T) -> Bool
+  where T: RawRepresentable, T.RawValue: Equatable {
   return lhs.rawValue != rhs.rawValue
 }
 
@@ -185,7 +185,11 @@ public func != <T : Equatable>(lhs: T, rhs: T) -> Bool
 extension RawRepresentable where RawValue: Hashable, Self: Hashable {
   @inlinable // trivial
   public var hashValue: Int {
-    return rawValue.hashValue
+    // Note: in Swift 5.5 and below, this used to return `rawValue.hashValue`.
+    // The current definition matches the default `hashValue` implementation,
+    // so that RawRepresentable types don't need to implement both `hashValue`
+    // and `hash(into:)` to customize their hashing.
+    _hashValue(for: self)
   }
 
   @inlinable // trivial
@@ -195,7 +199,21 @@ extension RawRepresentable where RawValue: Hashable, Self: Hashable {
 
   @inlinable // trivial
   public func _rawHashValue(seed: Int) -> Int {
-    return rawValue._rawHashValue(seed: seed)
+    // In 5.0, this used to return rawValue._rawHashValue(seed: seed).  This was
+    // slightly faster, but it interfered with conforming types' ability to
+    // customize their hashing. The current definition is equivalent to the
+    // default implementation; however, we need to keep the definition to remain
+    // ABI compatible with code compiled on 5.0.
+    //
+    // Note that unless a type provides a custom hash(into:) implementation,
+    // this new version returns the same values as the original 5.0 definition,
+    // so code that used to work in 5.0 remains working whether or not the
+    // original definition was inlined.
+    //
+    // See https://github.com/apple/swift/issues/53126.
+    var hasher = Hasher(_seed: seed)
+    self.hash(into: &hasher)
+    return hasher._finalize()
   }
 }
 
@@ -235,7 +253,7 @@ extension RawRepresentable where RawValue: Hashable, Self: Hashable {
 /// demonstrates this automatic implementation.
 public protocol CaseIterable {
   /// A type that can represent a collection of all values of this type.
-  associatedtype AllCases: Collection
+  associatedtype AllCases: Collection = [Self]
     where AllCases.Element == Self
   
   /// A collection of all values of this type.
@@ -284,7 +302,7 @@ public protocol ExpressibleByIntegerLiteral {
   ///
   /// The standard library integer and floating-point types are all valid types
   /// for `IntegerLiteralType`.
-  associatedtype IntegerLiteralType : _ExpressibleByBuiltinIntegerLiteral
+  associatedtype IntegerLiteralType: _ExpressibleByBuiltinIntegerLiteral
 
   /// Creates an instance initialized to the specified integer value.
   ///
@@ -327,7 +345,7 @@ public protocol ExpressibleByFloatLiteral {
   ///
   /// Valid types for `FloatLiteralType` are `Float`, `Double`, and `Float80`
   /// where available.
-  associatedtype FloatLiteralType : _ExpressibleByBuiltinFloatLiteral
+  associatedtype FloatLiteralType: _ExpressibleByBuiltinFloatLiteral
   
   /// Creates an instance initialized to the specified floating-point value.
   ///
@@ -350,16 +368,16 @@ public protocol _ExpressibleByBuiltinBooleanLiteral {
 /// A type that can be initialized with the Boolean literals `true` and
 /// `false`.
 ///
-/// Only three types provided by Swift---`Bool`, `DarwinBoolean`, and
-/// `ObjCBool`---are treated as Boolean values. Expanding this set to include
-/// types that represent more than simple Boolean values is discouraged.
+/// `Bool`, `DarwinBoolean`, `ObjCBool`, and `WindowsBool` are treated as
+/// Boolean values. Expanding this set to include types that represent more than
+/// simple Boolean values is discouraged.
 ///
 /// To add `ExpressibleByBooleanLiteral` conformance to your custom type,
 /// implement the `init(booleanLiteral:)` initializer that creates an instance
 /// of your type with the given Boolean value.
 public protocol ExpressibleByBooleanLiteral {
   /// A type that represents a Boolean literal, such as `Bool`.
-  associatedtype BooleanLiteralType : _ExpressibleByBuiltinBooleanLiteral
+  associatedtype BooleanLiteralType: _ExpressibleByBuiltinBooleanLiteral
 
   /// Creates an instance initialized to the given Boolean value.
   ///
@@ -402,7 +420,7 @@ public protocol ExpressibleByUnicodeScalarLiteral {
   ///
   /// Valid types for `UnicodeScalarLiteralType` are `Unicode.Scalar`,
   /// `Character`, `String`, and `StaticString`.
-  associatedtype UnicodeScalarLiteralType : _ExpressibleByBuiltinUnicodeScalarLiteral
+  associatedtype UnicodeScalarLiteralType: _ExpressibleByBuiltinUnicodeScalarLiteral
 
   /// Creates an instance initialized to the given value.
   ///
@@ -495,7 +513,7 @@ public protocol ExpressibleByStringLiteral
   /// A type that represents a string literal.
   ///
   /// Valid types for `StringLiteralType` are `String` and `StaticString`.
-  associatedtype StringLiteralType : _ExpressibleByBuiltinStringLiteral
+  associatedtype StringLiteralType: _ExpressibleByBuiltinStringLiteral
   
   /// Creates an instance initialized to the given string value.
   ///
@@ -747,14 +765,19 @@ public protocol ExpressibleByDictionaryLiteral {
 public protocol ExpressibleByStringInterpolation
   : ExpressibleByStringLiteral {
   
+#if !$Embedded
   /// The type each segment of a string literal containing interpolations
   /// should be appended to.
   ///
   /// The `StringLiteralType` of an interpolation type must match the
   /// `StringLiteralType` of the conforming type.
-  associatedtype StringInterpolation : StringInterpolationProtocol
+  associatedtype StringInterpolation: StringInterpolationProtocol
     = DefaultStringInterpolation
     where StringInterpolation.StringLiteralType == StringLiteralType
+#else
+  associatedtype StringInterpolation: StringInterpolationProtocol
+    where StringInterpolation.StringLiteralType == StringLiteralType
+#endif
 
   /// Creates an instance from a string interpolation.
   /// 
@@ -769,6 +792,7 @@ public protocol ExpressibleByStringInterpolation
   init(stringInterpolation: StringInterpolation)
 }
 
+#if !$Embedded
 extension ExpressibleByStringInterpolation
   where StringInterpolation == DefaultStringInterpolation {
   
@@ -791,6 +815,7 @@ extension ExpressibleByStringInterpolation
     self.init(stringLiteral: stringInterpolation.make())
   }
 }
+#endif
 
 /// Represents the contents of a string literal with interpolations while it's
 /// being built up.
@@ -869,7 +894,7 @@ extension ExpressibleByStringInterpolation
 /// `try` or one of its variants.
 public protocol StringInterpolationProtocol {
   /// The type that should be used for literal segments.
-  associatedtype StringLiteralType : _ExpressibleByBuiltinStringLiteral
+  associatedtype StringLiteralType: _ExpressibleByBuiltinStringLiteral
 
   /// Creates an empty instance ready to be filled with string literal content.
   /// 
@@ -922,6 +947,7 @@ public protocol _ExpressibleByColorLiteral {
 
 /// A type that can be initialized using an image literal (e.g.
 /// `#imageLiteral(resourceName: "hi.png")`).
+@_unavailableInEmbedded
 public protocol _ExpressibleByImageLiteral {
   /// Creates an instance initialized with the given resource name.
   ///
@@ -932,6 +958,7 @@ public protocol _ExpressibleByImageLiteral {
 
 /// A type that can be initialized using a file reference literal (e.g.
 /// `#fileLiteral(resourceName: "resource.txt")`).
+@_unavailableInEmbedded
 public protocol _ExpressibleByFileReferenceLiteral {
   /// Creates an instance initialized with the given resource name.
   ///

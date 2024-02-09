@@ -75,9 +75,9 @@ private:
   union {
    BeginAccessInst *Inst;
     struct {
-      SILAccessKind ClosureAccessKind;
-      SILLocation ClosureAccessLoc;
-    };
+      SILAccessKind AccessKind;
+      SILLocation AccessLoc;
+    } Closure;
   };
 
   const IndexTrieNode *SubPath;
@@ -89,7 +89,7 @@ public:
   RecordedAccess(SILAccessKind ClosureAccessKind,
                  SILLocation ClosureAccessLoc, const IndexTrieNode *SubPath) :
       RecordKind(RecordedAccessKind::NoescapeClosureCapture),
-      ClosureAccessKind(ClosureAccessKind), ClosureAccessLoc(ClosureAccessLoc),
+      Closure({ClosureAccessKind, ClosureAccessLoc}),
       SubPath(SubPath) { }
 
   RecordedAccessKind getRecordKind() const {
@@ -106,7 +106,7 @@ public:
       case RecordedAccessKind::BeginInstruction:
         return Inst->getAccessKind();
       case RecordedAccessKind::NoescapeClosureCapture:
-        return ClosureAccessKind;
+        return Closure.AccessKind;
     };
     llvm_unreachable("unhandled kind");
   }
@@ -116,7 +116,7 @@ public:
       case RecordedAccessKind::BeginInstruction:
         return Inst->getLoc();
       case RecordedAccessKind::NoescapeClosureCapture:
-        return ClosureAccessLoc;
+        return Closure.AccessLoc;
     };
     llvm_unreachable("unhandled kind");
   }
@@ -143,7 +143,7 @@ public:
 
   /// The instruction that began the first in-progress access to the storage
   /// location. Used for diagnostic purposes.
-  Optional<RecordedAccess> FirstAccess = None;
+  llvm::Optional<RecordedAccess> FirstAccess = llvm::None;
 
 public:
   /// Increment the count for given access.
@@ -154,22 +154,22 @@ public:
     }
 
     if (BAI->getAccessKind() == SILAccessKind::Read)
-      Reads++;
+      ++Reads;
     else
-      NonReads++;
+      ++NonReads;
   }
 
   /// Decrement the count for given access.
   void endAccess(EndAccessInst *EAI) {
     if (EAI->getBeginAccess()->getAccessKind() == SILAccessKind::Read)
-      Reads--;
+      --Reads;
     else
-      NonReads--;
+      --NonReads;
 
     // If all open accesses are now ended, forget the location of the
     // first access.
     if (Reads == 0 && NonReads == 0)
-      FirstAccess = None;
+      FirstAccess = llvm::None;
   }
 
   /// Returns true when there are any accesses to this location in progress.
@@ -246,11 +246,11 @@ class AccessInfo {
 public:
   // Returns the previous access when beginning an access of the given Kind will
   // result in a conflict with a previous access.
-  Optional<RecordedAccess>
+  llvm::Optional<RecordedAccess>
   conflictsWithAccess(SILAccessKind Kind, const IndexTrieNode *SubPath) const {
     auto I = findFirstSubPathWithConflict(Kind, SubPath);
     if (I == SubAccesses.end())
-      return None;
+      return llvm::None;
 
     return I->FirstAccess;
   }
@@ -297,16 +297,16 @@ enum class ExclusiveOrShared_t : unsigned {
 
 
 /// Tracks the in-progress accesses on per-storage-location basis.
-using StorageMap = llvm::SmallDenseMap<AccessedStorage, AccessInfo, 4>;
+using StorageMap = llvm::SmallDenseMap<AccessStorage, AccessInfo, 4>;
 
 /// Represents two accesses that conflict and their underlying storage.
 struct ConflictingAccess {
   /// Create a conflict for two begin_access instructions in the same function.
-  ConflictingAccess(const AccessedStorage &Storage, const RecordedAccess &First,
+  ConflictingAccess(const AccessStorage &Storage, const RecordedAccess &First,
                     const RecordedAccess &Second)
       : Storage(Storage), FirstAccess(First), SecondAccess(Second) {}
 
-  const AccessedStorage Storage;
+  const AccessStorage Storage;
   const RecordedAccess FirstAccess;
   const RecordedAccess SecondAccess;
 };
@@ -401,9 +401,9 @@ canReplaceWithCallToCollectionSwapAt(const BeginAccessInst *Access1,
 
     assert(isCallToStandardLibrarySwap(CE, Ctx));
     // swap() takes two arguments.
-    auto *ArgTuple = cast<TupleExpr>(CE->getArg());
-    const Expr *Arg1 = ArgTuple->getElement(0);
-    const Expr *Arg2 = ArgTuple->getElement(1);
+    auto *Args = CE->getArgs();
+    const Expr *Arg1 = Args->getExpr(0);
+    const Expr *Arg2 = Args->getExpr(1);
     if ((Arg1 == InOut1 && Arg2 == InOut2)) {
         FoundCall = CE;
       break;
@@ -463,17 +463,14 @@ canReplaceWithCallToCollectionSwapAt(const BeginAccessInst *Access1,
   if (Base1Text != Base2Text)
     return false;
 
-  auto *Index1Paren = dyn_cast<ParenExpr>(SE1->getIndex());
-  if (!Index1Paren)
+  if (!SE1->getArgs()->isUnlabeledUnary() ||
+      !SE2->getArgs()->isUnlabeledUnary()) {
     return false;
-
-  auto *Index2Paren = dyn_cast<ParenExpr>(SE2->getIndex());
-  if (!Index2Paren)
-    return false;
+  }
 
   Base = SE1->getBase();
-  Index1 = Index1Paren->getSubExpr();
-  Index2 = Index2Paren->getSubExpr();
+  Index1 = SE1->getArgs()->getExpr(0);
+  Index2 = SE2->getArgs()->getExpr(0);
   return true;
 }
 
@@ -499,12 +496,14 @@ static void addSwapAtFixit(InFlightDiagnostic &Diag, CallExpr *&FoundCall,
 /// and tuple elements.
 static std::string getPathDescription(DeclName BaseName, SILType BaseType,
                                       const IndexTrieNode *SubPath,
-                                      SILModule &M) {
+                                      SILModule &M,
+                                      TypeExpansionContext context) {
   std::string sbuf;
   llvm::raw_string_ostream os(sbuf);
 
   os << "'" << BaseName;
-  os << AccessSummaryAnalysis::getSubPathDescription(BaseType, SubPath, M);
+  os << AccessSummaryAnalysis::getSubPathDescription(BaseType, SubPath, M,
+                                                     context);
   os << "'";
 
   return os.str();
@@ -517,7 +516,7 @@ static void diagnoseExclusivityViolation(const ConflictingAccess &Violation,
                                          ArrayRef<ApplyInst *> CallsToSwap,
                                          ASTContext &Ctx) {
 
-  const AccessedStorage &Storage = Violation.Storage;
+  const AccessStorage &Storage = Violation.Storage;
   const RecordedAccess &FirstAccess = Violation.FirstAccess;
   const RecordedAccess &SecondAccess = Violation.SecondAccess;
   SILFunction *F = FirstAccess.getInstruction()->getFunction();
@@ -542,12 +541,19 @@ static void diagnoseExclusivityViolation(const ConflictingAccess &Violation,
   unsigned AccessKindForMain =
       static_cast<unsigned>(MainAccess.getAccessKind());
 
-  if (const ValueDecl *VD = Storage.getDecl(F)) {
+  SILType BaseType = FirstAccess.getInstruction()->getType().getAddressType();
+  SILModule &M = FirstAccess.getInstruction()->getModule();
+  TypeExpansionContext TypeExpansionCtx(
+      *FirstAccess.getInstruction()->getFunction());
+  SILType firstAccessType = AccessSummaryAnalysis::getSubPathType(
+      BaseType, MainAccess.getSubPath(), M, TypeExpansionCtx);
+  bool isMoveOnly = firstAccessType.isMoveOnly();
+
+  if (const ValueDecl *VD = Storage.getDecl()) {
     // We have a declaration, so mention the identifier in the diagnostic.
-    SILType BaseType = FirstAccess.getInstruction()->getType().getAddressType();
-    SILModule &M = FirstAccess.getInstruction()->getModule();
-    std::string PathDescription = getPathDescription(
-        VD->getBaseName(), BaseType, MainAccess.getSubPath(), M);
+    std::string PathDescription =
+        getPathDescription(VD->getBaseName(), BaseType, MainAccess.getSubPath(),
+                           M, TypeExpansionCtx);
 
     // Determine whether we can safely suggest replacing the violation with
     // a call to MutableCollection.swapAt().
@@ -562,39 +568,46 @@ static void diagnoseExclusivityViolation(const ConflictingAccess &Violation,
             CallsToSwap, Ctx, CallToReplace, Base, SwapIndex1, SwapIndex2);
     }
 
-    auto D =
-        diagnose(Ctx, MainAccess.getAccessLoc().getSourceLoc(),
-                 diag::exclusivity_access_required,
-                 PathDescription, AccessKindForMain, SuggestSwapAt);
-    D.highlight(RangeForMain);
-    if (SuggestSwapAt)
-      addSwapAtFixit(D, CallToReplace, Base, SwapIndex1, SwapIndex2,
-                     Ctx.SourceMgr);
+    if (isMoveOnly) {
+        auto D = diagnose(Ctx, MainAccess.getAccessLoc().getSourceLoc(),
+                          diag::exclusivity_access_required_moveonly,
+                          PathDescription, AccessKindForMain);
+        D.highlight(RangeForMain);
+        if (SuggestSwapAt)
+        addSwapAtFixit(D, CallToReplace, Base, SwapIndex1, SwapIndex2,
+                       Ctx.SourceMgr);
+    } else {
+        auto D = diagnose(Ctx, MainAccess.getAccessLoc().getSourceLoc(),
+                          diag::exclusivity_access_required, PathDescription,
+                          AccessKindForMain, SuggestSwapAt);
+        D.highlight(RangeForMain);
+        if (SuggestSwapAt)
+        addSwapAtFixit(D, CallToReplace, Base, SwapIndex1, SwapIndex2,
+                       Ctx.SourceMgr);
+    }
   } else {
-    diagnose(Ctx, MainAccess.getAccessLoc().getSourceLoc(),
-             diag::exclusivity_access_required_unknown_decl, AccessKindForMain)
-        .highlight(RangeForMain);
+    if (isMoveOnly) {
+        diagnose(Ctx, MainAccess.getAccessLoc().getSourceLoc(),
+                 diag::exclusivity_access_required_unknown_decl_moveonly,
+                 AccessKindForMain)
+            .highlight(RangeForMain);
+    } else {
+        diagnose(Ctx, MainAccess.getAccessLoc().getSourceLoc(),
+                 diag::exclusivity_access_required_unknown_decl,
+                 AccessKindForMain)
+            .highlight(RangeForMain);
+    }
   }
   diagnose(Ctx, NoteAccess.getAccessLoc().getSourceLoc(),
            diag::exclusivity_conflicting_access)
       .highlight(NoteAccess.getAccessLoc().getSourceRange());
 }
 
-/// Look through a value to find the underlying storage accessed.
-static AccessedStorage findValidAccessedStorage(SILValue Source) {
-  const AccessedStorage &Storage = findAccessedStorage(Source);
-  if (!Storage) {
-    llvm::dbgs() << "Bad memory access source: " << Source;
-    llvm_unreachable("Unexpected access source.");
-  }
-  return Storage;
-}
-
 /// Returns true when the apply calls the Standard Library swap().
 /// Used for fix-its to suggest replacing with Collection.swapAt()
 /// on exclusivity violations.
 static bool isCallToStandardLibrarySwap(ApplyInst *AI, ASTContext &Ctx) {
-  SILFunction *SF = AI->getReferencedFunction();
+  SILFunction *SF = AI->getReferencedFunctionOrNull();
   if (!SF)
     return false;
 
@@ -616,15 +629,15 @@ static llvm::cl::opt<bool> ShouldAssertOnFailure(
 
 /// If making an access of the given kind at the given subpath would
 /// would conflict, returns the first recorded access it would conflict
-/// with. Otherwise, returns None.
-static Optional<RecordedAccess>
-shouldReportAccess(const AccessInfo &Info,swift::SILAccessKind Kind,
+/// with. Otherwise, returns llvm::None.
+static llvm::Optional<RecordedAccess>
+shouldReportAccess(const AccessInfo &Info, swift::SILAccessKind Kind,
                    const IndexTrieNode *SubPath) {
   if (Info.alreadyHadConflict())
-    return None;
+    return llvm::None;
 
   auto result = Info.conflictsWithAccess(Kind, SubPath);
-  if (ShouldAssertOnFailure && result.hasValue())
+  if (ShouldAssertOnFailure && result.has_value())
     llvm_unreachable("Standard assertion routine.");
   return result;
 }
@@ -637,12 +650,12 @@ shouldReportAccess(const AccessInfo &Info,swift::SILAccessKind Kind,
 /// this will return the conflict for the aggregate. This approach guarantees
 /// determinism and makes it more  likely that we'll diagnose the most helpful
 /// conflict.
-static Optional<ConflictingAccess>
+static llvm::Optional<ConflictingAccess>
 findConflictingArgumentAccess(const AccessSummaryAnalysis::ArgumentSummary &AS,
-                              const AccessedStorage &AccessedStorage,
+                              const AccessStorage &AccessStorage,
                               const AccessInfo &InProgressInfo) {
-  Optional<RecordedAccess> BestInProgressAccess;
-  Optional<RecordedAccess> BestArgAccess;
+  llvm::Optional<RecordedAccess> BestInProgressAccess;
+  llvm::Optional<RecordedAccess> BestArgAccess;
 
   for (const auto &MapPair : AS.getSubAccesses()) {
     const IndexTrieNode *SubPath = MapPair.getFirst();
@@ -663,19 +676,16 @@ findConflictingArgumentAccess(const AccessSummaryAnalysis::ArgumentSummary &AS,
   }
 
   if (!BestArgAccess)
-    return None;
+    return llvm::None;
 
-  return ConflictingAccess(AccessedStorage, *BestInProgressAccess,
+  return ConflictingAccess(AccessStorage, *BestInProgressAccess,
                            *BestArgAccess);
 }
 
 // =============================================================================
 // The data flow algorithm that drives diagnostics.
 
-// Forward declare verification entry points.
-#ifndef NDEBUG
-static void checkNoEscapePartialApply(PartialApplyInst *PAI);
-#endif
+// Forward declare verification entry point.
 static void checkAccessedAddress(Operand *memOper, StorageMap &Accesses);
 
 namespace {
@@ -689,6 +699,16 @@ struct AccessState {
   // be suppressed.
   llvm::SmallVector<ConflictingAccess, 4> ConflictingAccesses;
 
+  void recordConflictingAccess(const ConflictingAccess &a) {
+    ConflictingAccesses.push_back(a);
+  }
+
+  void recordConflictingAccess(const AccessStorage &Storage,
+                               const RecordedAccess &First,
+                               const RecordedAccess &Second) {
+    ConflictingAccesses.emplace_back(Storage, First, Second);
+  }
+
   // Collects calls the Standard Library swap() for Fix-Its.
   llvm::SmallVector<ApplyInst *, 8> CallsToSwap;
 
@@ -698,18 +718,10 @@ struct AccessState {
 };
 } // namespace
 
-/// For each argument in the range of the callee arguments being applied at the
-/// given apply site, use the summary analysis to determine whether the
-/// arguments will be accessed in a way that conflicts with any currently in
-/// progress accesses. If so, diagnose.
-static void checkCaptureAccess(ApplySite Apply, AccessState &State) {
-  SILFunction *Callee = Apply.getCalleeFunction();
-  if (!Callee || Callee->empty())
-    return;
-
-  const AccessSummaryAnalysis::FunctionSummary &FS =
-      State.ASA->getOrCreateSummary(Callee);
-
+// Find conflicting access on each argument using AccessSummaryAnalysis.
+static void
+checkAccessSummary(ApplySite Apply, AccessState &State,
+                   const AccessSummaryAnalysis::FunctionSummary &FS) {
   for (unsigned ArgumentIndex : range(Apply.getNumArguments())) {
 
     unsigned CalleeIndex =
@@ -727,9 +739,10 @@ static void checkCaptureAccess(ApplySite Apply, AccessState &State) {
     SILValue Argument = Apply.getArgument(ArgumentIndex);
     assert(Argument->getType().isAddress());
 
-    // A valid AccessedStorage should alway sbe found because Unsafe accesses
+    // A valid AccessStorage should always be found because Unsafe accesses
     // are not tracked by AccessSummaryAnalysis.
-    const AccessedStorage &Storage = findValidAccessedStorage(Argument);
+    auto Storage = AccessStorage::computeInScope(Argument);
+    assert(Storage && "captured address must have valid storage");
     auto AccessIt = State.Accesses->find(Storage);
 
     // Are there any accesses in progress at the time of the call?
@@ -738,7 +751,52 @@ static void checkCaptureAccess(ApplySite Apply, AccessState &State) {
 
     const AccessInfo &Info = AccessIt->getSecond();
     if (auto Conflict = findConflictingArgumentAccess(AS, Storage, Info))
-      State.ConflictingAccesses.push_back(*Conflict);
+      State.recordConflictingAccess(*Conflict);
+  }
+}
+
+/// For each argument in the range of the callee arguments being applied at the
+/// given apply site, use the summary analysis to determine whether the
+/// arguments will be accessed in a way that conflicts with any currently in
+/// progress accesses. If so, diagnose.
+static void checkCaptureAccess(ApplySite Apply, AccessState &State) {
+  // A callee may be nullptr or empty for various reasons, such as being
+  // dynamically replaceable.
+  SILFunction *Callee = Apply.getCalleeFunction();
+  if (Callee && !Callee->empty()) {
+    checkAccessSummary(Apply, State, State.ASA->getOrCreateSummary(Callee));
+    return;
+  }
+  // In the absence of AccessSummaryAnalysis, conservatively assume by-address
+  // captures are fully accessed by the callee.
+  for (Operand &argOper : Apply.getArgumentOperands()) {
+    auto convention = Apply.getArgumentConvention(argOper);
+    if (convention != SILArgumentConvention::Indirect_InoutAliasable)
+      continue;
+
+    // A valid AccessStorage should always be found because Unsafe accesses
+    // are not tracked by AccessSummaryAnalysis.
+    auto Storage = AccessStorage::computeInScope(argOper.get());
+    assert(Storage && "captured address must have valid storage");
+
+    // Are there any accesses in progress at the time of the call?
+    auto AccessIt = State.Accesses->find(Storage);
+    if (AccessIt == State.Accesses->end())
+      continue;
+
+    // The unknown argument access is considered a modify of the root subpath.
+    auto argAccess = RecordedAccess(SILAccessKind::Modify, Apply.getLoc(),
+                                    Apply.getModule().getIndexTrieRoot());
+
+    // Construct a conflicting RecordedAccess if one doesn't already exist.
+    const AccessInfo &info = AccessIt->getSecond();
+    auto inProgressAccess =
+        shouldReportAccess(info, SILAccessKind::Modify, argAccess.getSubPath());
+    if (!inProgressAccess)
+      continue;
+
+    State.recordConflictingAccess(Storage, *inProgressAccess,
+                                  argAccess);
   }
 }
 
@@ -809,16 +867,16 @@ static void checkForViolationsAtInstruction(SILInstruction &I,
       return;
 
     SILAccessKind Kind = BAI->getAccessKind();
-    const AccessedStorage &Storage =
-      findValidAccessedStorage(BAI->getSource());
+    const AccessStorage &Storage = identifyFormalAccess(BAI);
+    assert(Storage && "unidentified formal access");
     // Storage may be associated with a nested access where the outer access is
     // "unsafe". That's ok because the outer access can itself be treated like a
     // valid source, as long as we don't ask for its source.
     AccessInfo &Info = (*State.Accesses)[Storage];
     const IndexTrieNode *SubPath = State.ASA->findSubPathAccessed(BAI);
     if (auto Conflict = shouldReportAccess(Info, Kind, SubPath)) {
-      State.ConflictingAccesses.emplace_back(Storage, *Conflict,
-                                             RecordedAccess(BAI, SubPath));
+      State.recordConflictingAccess(Storage, *Conflict,
+                                    RecordedAccess(BAI, SubPath));
     }
 
     Info.beginAccess(BAI, SubPath);
@@ -826,14 +884,15 @@ static void checkForViolationsAtInstruction(SILInstruction &I,
   }
 
   if (auto *EAI = dyn_cast<EndAccessInst>(&I)) {
-    if (EAI->getBeginAccess()->getEnforcement() == SILAccessEnforcement::Unsafe)
+    BeginAccessInst *BAI = EAI->getBeginAccess();
+    if (BAI->getEnforcement() == SILAccessEnforcement::Unsafe)
       return;
 
-    auto It =
-      State.Accesses->find(findValidAccessedStorage(EAI->getSource()));
+    const AccessStorage &Storage = identifyFormalAccess(BAI);
+    assert(Storage && "unidentified formal access");
+    auto It = State.Accesses->find(identifyFormalAccess(BAI));
     AccessInfo &Info = It->getSecond();
 
-    BeginAccessInst *BAI = EAI->getBeginAccess();
     const IndexTrieNode *SubPath = State.ASA->findSubPathAccessed(BAI);
     Info.endAccess(EAI, SubPath);
 
@@ -850,34 +909,19 @@ static void checkForViolationsAtInstruction(SILInstruction &I,
       });
   }
 
-  if (auto *AI = dyn_cast<ApplyInst>(&I)) {
-    // Record calls to swap() for potential Fix-Its.
-    if (isCallToStandardLibrarySwap(AI, I.getFunction()->getASTContext()))
-      State.CallsToSwap.push_back(AI);
-    else
-      checkForViolationAtApply(AI, State);
+  if (auto apply = FullApplySite::isa(&I)) {
+    if (auto *AI = dyn_cast<ApplyInst>(&I)) {
+      // Record calls to swap() for potential Fix-Its.
+      if (isCallToStandardLibrarySwap(AI, I.getFunction()->getASTContext())) {
+        State.CallsToSwap.push_back(AI);
+        return;
+      }
+    }
+    checkForViolationAtApply(apply, State);
     return;
   }
 
-  if (auto *TAI = dyn_cast<TryApplyInst>(&I)) {
-    checkForViolationAtApply(TAI, State);
-    return;
-  }
-#ifndef NDEBUG
-  // FIXME: Once AllocBoxToStack is fixed to correctly set noescape
-  // closure types, move this PartialApply verification into the
-  // SILVerifier to better pinpoint the offending pass.
-  if (auto *PAI = dyn_cast<PartialApplyInst>(&I)) {
-    ApplySite apply(PAI);
-    if (llvm::any_of(apply.getArgumentOperands(), [apply](Operand &oper) {
-          return apply.getArgumentConvention(oper)
-                 == SILArgumentConvention::Indirect_InoutAliasable;
-        })) {
-      checkNoEscapePartialApply(PAI);
-    }
-  }
-#endif
-  // Sanity check to make sure entries are properly removed.
+  // Soundness check to make sure entries are properly removed.
   assert((!isa<ReturnInst>(&I) || State.Accesses->empty())
          && "Entries were not properly removed?!");
 }
@@ -892,7 +936,7 @@ static void checkStaticExclusivity(SILFunction &Fn, PostOrderFunctionInfo *PO,
   //      accesses must have begun in the same order on all edges. This ensures
   //      consistent diagnostics across changes to the exploration of the CFG.
   //    - On return from a function there are no in-progress accesses. This
-  //      enables a sanity check for lean analysis state at function exit.
+  //      enables a soundness check for lean analysis state at function exit.
   //    - Each end_access instruction corresponds to exactly one begin access
   //      instruction. (This is encoded in the EndAccessInst itself)
   //    - begin_access arguments cannot be basic block arguments.
@@ -906,13 +950,13 @@ static void checkStaticExclusivity(SILFunction &Fn, PostOrderFunctionInfo *PO,
 
   // For each basic block, track the stack of current accesses on
   // exit from that block.
-  llvm::SmallDenseMap<SILBasicBlock *, Optional<StorageMap>, 32>
+  llvm::SmallDenseMap<SILBasicBlock *, llvm::Optional<StorageMap>, 32>
       BlockOutAccesses;
 
   BlockOutAccesses[Fn.getEntryBlock()] = StorageMap();
 
   for (auto *BB : PO->getReversePostOrder()) {
-    Optional<StorageMap> &BBState = BlockOutAccesses[BB];
+    llvm::Optional<StorageMap> &BBState = BlockOutAccesses[BB];
 
     // Because we use a reverse post-order traversal, unless this is the entry
     // at least one of its predecessors must have been reached. Use the out
@@ -923,7 +967,7 @@ static void checkStaticExclusivity(SILFunction &Fn, PostOrderFunctionInfo *PO,
       if (it == BlockOutAccesses.end())
         continue;
 
-      const Optional<StorageMap> &PredAccesses = it->getSecond();
+      const llvm::Optional<StorageMap> &PredAccesses = it->getSecond();
       if (PredAccesses) {
         BBState = PredAccesses;
         break;
@@ -933,7 +977,7 @@ static void checkStaticExclusivity(SILFunction &Fn, PostOrderFunctionInfo *PO,
     // The in-progress accesses for the current program point, represented
     // as map from storage locations to the accesses in progress for the
     // location.
-    State.Accesses = BBState.getPointer();
+    State.Accesses = &*BBState;
     for (auto &I : *BB)
       checkForViolationsAtInstruction(I, State);
   }
@@ -949,173 +993,35 @@ static void checkStaticExclusivity(SILFunction &Fn, PostOrderFunctionInfo *PO,
 // =============================================================================
 // Verification
 
-#ifndef NDEBUG
-// This must handle exactly the same SIL patterns as
-// swift::funcClosureForAppliedArg but in forward order.
-template <typename FollowUse>
-static void checkNoEscapePartialApplyUse(Operand *oper, FollowUse followUses) {
-  SILInstruction *user = oper->getUser();
-
-  // Ignore uses that are totally uninteresting. partial_apply [stack] is
-  // terminated by a dealloc_stack instruction.
-  if (isIncidentalUse(user) || onlyAffectsRefCount(user) ||
-      isa<DeallocStackInst>(user))
-    return;
-
-  // Before checking conversions in general below (getSingleValueCopyOrCast),
-  // check for convert_function to [without_actually_escaping]. Assume such
-  // conversion are not actually escaping without following their uses.
-  if (auto *CFI = dyn_cast<ConvertFunctionInst>(user)) {
-    if (CFI->withoutActuallyEscaping())
-      return;
-  }
-
-  // Look through copies, borrows, and conversions.
-  if (SingleValueInstruction *copy = getSingleValueCopyOrCast(user)) {
-    // Only follow the copied operand. Other operands are incidental,
-    // as in the second operand of mark_dependence.
-    if (oper->getOperandNumber() == 0)
-      followUses(copy);
-
-    return;
-  }
-
-  switch (user->getKind()) {
-  default:
-    break;
-
-  // Look through Optionals.
-  case SILInstructionKind::EnumInst:
-    // @noescape block storage can be passed as an Optional (Nullable).
-    followUses(cast<EnumInst>(user));
-    return;
-
-  // Look through Phis.
-  case SILInstructionKind::BranchInst: {
-    const SILPhiArgument *arg = cast<BranchInst>(user)->getArgForOperand(oper);
-    followUses(arg);
-    return;
-  }
-  case SILInstructionKind::CondBranchInst: {
-    const SILPhiArgument *arg =
-        cast<CondBranchInst>(user)->getArgForOperand(oper);
-    if (arg) // If the use isn't the branch condition, follow it.
-      followUses(arg);
-    return;
-  }
-  // Look through ObjC closures.
-  case SILInstructionKind::StoreInst:
-    if (oper->getOperandNumber() == StoreInst::Src) {
-      if (auto *PBSI = dyn_cast<ProjectBlockStorageInst>(
-            cast<StoreInst>(user)->getDest())) {
-        SILValue storageAddr = PBSI->getOperand();
-        // The closure is stored to block storage. Recursively visit all
-        // uses of any initialized block storage values derived from this
-        // storage address..
-        for (Operand *oper : storageAddr->getUses()) {
-          if (auto *IBS = dyn_cast<InitBlockStorageHeaderInst>(oper->getUser()))
-            followUses(IBS);
-        }
-        return;
-      }
-    }
-    break;
-
-  case SILInstructionKind::IsEscapingClosureInst:
-    // May be generated by withoutActuallyEscaping.
-    return;
-
-  case SILInstructionKind::PartialApplyInst: {
-    // Recurse through partial_apply to handle special cases before handling
-    // ApplySites in general below.
-    PartialApplyInst *PAI = cast<PartialApplyInst>(user);
-    // Use the same logic as checkForViolationAtApply applied to a def-use
-    // traversal.
-    //
-    // checkForViolationAtApply recurses through partial_apply chains.
-    if (oper->get() == PAI->getCallee()) {
-      followUses(PAI);
-      return;
-    }
-    // checkForViolationAtApply also uses findClosuresForAppliedArg which in
-    // turn checks isPartialApplyOfReabstractionThunk.
-    //
-    // A closure with @inout_aliasable arguments may be applied to a
-    // thunk as "escaping", but as long as the thunk is only used as a
-    // '@noescape" type then it is safe.
-    if (isPartialApplyOfReabstractionThunk(PAI)) {
-      // Don't follow thunks that were generated by withoutActuallyEscaping.
-      SILFunction *thunkDef = PAI->getReferencedFunction();
-      if (!thunkDef->isWithoutActuallyEscapingThunk())
-        followUses(PAI);
-      return;
-    }
-    // Handle this use like a normal applied argument.
-    break;
-  }
-  };
-
-  // Handle ApplySites in general after checking PartialApply above.
-  if (isa<ApplySite>(user)) {
-    SILValue arg = oper->get();
-    auto argumentFnType = getSILFunctionTypeForValue(arg);
-    if (argumentFnType && argumentFnType->isNoEscape()) {
-      // Verify that the inverse operation, finding a partial_apply from a
-      // @noescape argument, is consistent.
-      TinyPtrVector<PartialApplyInst *> partialApplies;
-      findClosuresForFunctionValue(arg, partialApplies);
-      assert(!partialApplies.empty()
-             && "cannot find partial_apply from @noescape function argument");
-      return;
-    }
-    llvm::dbgs() << "Applied argument must be @noescape function type: " << *arg;
-  }
-  else
-    llvm::dbgs() << "Unexpected partial_apply use: " << *user;
-
-  llvm_unreachable("A partial_apply with @inout_aliasable may only be "
-                   "used as a @noescape function type argument.");
-}
-
-// If a partial apply has @inout_aliasable arguments, it may only be used as
-// a @noescape function type in a way that is recognized by
-// DiagnoseStaticExclusivity.
-static void checkNoEscapePartialApply(PartialApplyInst *PAI) {
-  SmallVector<Operand *, 8> uses;
-  // Avoid exponential path exploration.
-  llvm::SmallDenseSet<Operand *, 8> visited;
-  auto uselistInsert = [&](Operand *operand) {
-    if (visited.insert(operand).second)
-      uses.push_back(operand);
-  };
-
-  for (Operand *use : PAI->getUses())
-    uselistInsert(use);
-
-  while (!uses.empty()) {
-    Operand *oper = uses.pop_back_val();
-    checkNoEscapePartialApplyUse(oper, [&](SILValue V) {
-      for (Operand *use : V->getUses())
-        uselistInsert(use);
-    });
-  }
-}
-#endif
-
 // Check that the given address-type operand is guarded by begin/end access
 // markers.
 static void checkAccessedAddress(Operand *memOper, StorageMap &Accesses) {
-  SILValue address = memOper->get();
+  SILValue accessBegin = getAccessScope(memOper->get());
   SILInstruction *memInst = memOper->getUser();
 
-  auto error = [address, memInst]() {
+  auto error = [accessBegin, memInst]() {
     llvm::dbgs() << "Memory access not protected by begin_access:\n";
     memInst->printInContext(llvm::dbgs());
-    llvm::dbgs() << "Accessing: " << address;
+    llvm::dbgs() << "Accessing: " << accessBegin;
     llvm::dbgs() << "In function:\n";
     memInst->getFunction()->print(llvm::dbgs());
     abort();
   };
+
+  // Check if this address is guarded by an access.
+  if (auto *BAI = dyn_cast<BeginAccessInst>(accessBegin)) {
+    if (BAI->getEnforcement() == SILAccessEnforcement::Unsafe)
+      return;
+
+    const AccessStorage &Storage = identifyFormalAccess(BAI);
+    assert(Storage && "unidentified formal access");
+    AccessInfo &Info = Accesses[Storage];
+    if (Info.hasAccessesInProgress())
+      return;
+
+    error();
+  }
+  // --- This address is not guarded by a begin_access.
 
   // If the memory instruction is only used for initialization, it doesn't need
   // an access marker.
@@ -1126,7 +1032,7 @@ static void checkAccessedAddress(Operand *memOper, StorageMap &Accesses) {
     SILArgumentConvention conv = apply.getArgumentConvention(*memOper);
     // Captured addresses currently use the @inout_aliasable convention. They
     // are considered an access at any call site that uses the closure. However,
-    // those accesses are never explictly protected by access markers. Instead,
+    // those accesses are never explicitly protected by access markers. Instead,
     // exclusivity uses AccessSummaryAnalysis to check for conflicts. Here, we
     // can simply ignore any @inout_aliasable arguments.
     if (conv == SILArgumentConvention::Indirect_InoutAliasable)
@@ -1143,47 +1049,33 @@ static void checkAccessedAddress(Operand *memOper, StorageMap &Accesses) {
       return;
   }
 
-  // Strip off address projections, but not ref_element_addr.
-  const AccessedStorage &storage = findAccessedStorage(address);
-  // findAccessedStorage may return an invalid storage object if the address
-  // producer is not recognized by its whitelist. For the purpose of
-  // verification, we assume that this can only happen for local
-  // initialization, not a formal memory access. The strength of
-  // verification rests on the completeness of the opcode list inside
-  // findAccessedStorage.
+  auto storage = AccessStorage::compute(accessBegin);
+  // AccessStorage::compute may return an invalid storage object if the
+  // address producer is not recognized by its allowlist. For the purpose of
+  // verification, we assume that this can only happen for local initialization,
+  // not a formal memory access. The strength of verification rests on the
+  // completeness of the opcode list inside AccessStorage::compute.
   //
   // For the purpose of verification, an unidentified access is
   // unenforced. These occur in cases like global addressors and local buffers
   // that make use of RawPointers.
-  if (!storage || storage.getKind() == AccessedStorage::Unidentified)
+  if (!storage || storage.getKind() == AccessStorage::Unidentified)
     return;
 
   // Some identifiable addresses can also be recognized as local initialization
   // or other patterns that don't qualify as formal access.
-  if (!isPossibleFormalAccessBase(storage, memInst->getFunction()))
+  if (!isPossibleFormalAccessStorage(storage, memInst->getFunction()))
     return;
 
   // A box or stack variable may represent lvalues, but they can only conflict
   // with call sites in the same scope. Some initialization patters (stores to
   // the local value) aren't protected by markers, so we need this check.
   if (!isa<ApplySite>(memInst)
-      && (storage.getKind() == AccessedStorage::Box
-          || storage.getKind() == AccessedStorage::Stack)) {
+      && (storage.getKind() == AccessStorage::Box
+          || storage.getKind() == AccessStorage::Stack)) {
     return;
   }
 
-  // Otherwise, the address base should be an in-scope begin_access.
-  if (storage.getKind() == AccessedStorage::Nested) {
-    auto *BAI = cast<BeginAccessInst>(storage.getValue());
-    if (BAI->getEnforcement() == SILAccessEnforcement::Unsafe)
-      return;
-
-    const AccessedStorage &Storage = findValidAccessedStorage(BAI->getSource());
-    AccessInfo &Info = Accesses[Storage];
-    if (!Info.hasAccessesInProgress())
-      error();
-    return;
-  }
   error();
 }
 
@@ -1192,25 +1084,39 @@ static void checkAccessedAddress(Operand *memOper, StorageMap &Accesses) {
 
 namespace {
 
-class DiagnoseStaticExclusivity : public SILFunctionTransform {
+/// TODO: This is currently a module transform to ensure that source-level
+/// diagnostics, like DiagnoseInvalidCaptures run on closures (in addition to
+/// other callees) before this pass processes their parent functions. Otherwise,
+/// AccessSummaryAnalysis may crash on invalid SIL. Fix the pass manager to
+/// ensure that closures are always diagnosed before their parent. Then add an
+/// SCC transform to ensure that the previous diagnostic pass runs on all
+/// functions in the SCC before the next diagnostic pass. This will handle
+/// closures that call back into their parent. Then this can be converted to an
+/// SCC transform.
+class DiagnoseStaticExclusivity : public SILModuleTransform {
 public:
   DiagnoseStaticExclusivity() {}
 
 private:
   void run() override {
-    // Don't rerun diagnostics on deserialized functions.
-    if (getFunction()->wasDeserializedCanonical())
-      return;
+    for (auto &function : *getModule()) {
+      if (!function.isDefinition())
+        continue;
 
-    SILFunction *Fn = getFunction();
-    // This is a staging flag. Eventually the ability to turn off static
-    // enforcement will be removed.
-    if (!Fn->getModule().getOptions().EnforceExclusivityStatic)
-      return;
+      // Don't rerun diagnostics on deserialized functions.
+      if (function.wasDeserializedCanonical())
+        continue;
 
-    PostOrderFunctionInfo *PO = getAnalysis<PostOrderAnalysis>()->get(Fn);
-    auto *ASA = getAnalysis<AccessSummaryAnalysis>();
-    checkStaticExclusivity(*Fn, PO, ASA);
+      // This is a staging flag. Eventually the ability to turn off static
+      // enforcement will be removed.
+      if (!function.getModule().getOptions().EnforceExclusivityStatic)
+        continue;
+
+      PostOrderFunctionInfo *PO =
+        getAnalysis<PostOrderAnalysis>()->get(&function);
+      auto *ASA = getAnalysis<AccessSummaryAnalysis>();
+      checkStaticExclusivity(function, PO, ASA);
+    }
   }
 };
 

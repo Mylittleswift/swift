@@ -129,11 +129,11 @@ struct XProp0b : PropertyP0 { // expected-error{{type 'XProp0b' does not conform
 // Inference from subscripts
 protocol SubscriptP0 {
   associatedtype Index
-  // expected-note@-1 2 {{protocol requires nested type 'Index'; do you want to add it?}}
+  // expected-note@-1 2 {{protocol requires nested type 'Index'; add nested type 'Index' for conformance}}
 
   associatedtype Element : PSimple
   // expected-note@-1 {{unable to infer associated type 'Element' for protocol 'SubscriptP0'}}
-  // expected-note@-2 2 {{protocol requires nested type 'Element'; do you want to add it?}}
+  // expected-note@-2 2 {{protocol requires nested type 'Element'; add nested type 'Element' for conformance}}
 
   subscript (i: Index) -> Element { get }
 }
@@ -150,7 +150,6 @@ struct XSubP0b : SubscriptP0 {
 struct XSubP0c : SubscriptP0 {
 // expected-error@-1 {{type 'XSubP0c' does not conform to protocol 'SubscriptP0'}}
   subscript (i: Index) -> Element { get { } }
-  // expected-error@-1 {{reference to invalid associated type 'Element' of type 'XSubP0c'}}
 }
 
 struct XSubP0d : SubscriptP0 {
@@ -161,9 +160,9 @@ struct XSubP0d : SubscriptP0 {
 // Inference from properties and subscripts
 protocol CollectionLikeP0 {
   associatedtype Index
-  // expected-note@-1 {{protocol requires nested type 'Index'; do you want to add it?}}
+  // expected-note@-1 {{protocol requires nested type 'Index'; add nested type 'Index' for conformance}}
   associatedtype Element
-  // expected-note@-1 {{protocol requires nested type 'Element'; do you want to add it?}}
+  // expected-note@-1 {{protocol requires nested type 'Element'; add nested type 'Element' for conformance}}
 
   var startIndex: Index { get }
   var endIndex: Index { get }
@@ -359,7 +358,7 @@ struct X12 : P12 {
 // the associated type
 protocol Cookie {
   associatedtype Dough
-  // expected-note@-1 {{protocol requires nested type 'Dough'; do you want to add it?}}
+  // expected-note@-1 {{protocol requires nested type 'Dough'; add nested type 'Dough' for conformance}}
 
   init(t: Dough)
 }
@@ -383,9 +382,10 @@ struct Int8Vector : Vector {
   func process(elements: [Int8]) { }
 }
 
-// SR-4486
+// https://github.com/apple/swift/issues/47063
+
 protocol P13 {
-  associatedtype Arg // expected-note{{protocol requires nested type 'Arg'; do you want to add it?}}
+  associatedtype Arg // expected-note{{protocol requires nested type 'Arg'; add nested type 'Arg' for conformance}}
   func foo(arg: Arg)
 }
 
@@ -432,7 +432,7 @@ protocol P15f {
 }
 
 protocol P15g: P15c, P15f {
-  associatedtype A // expected-note{{protocol requires nested type 'A'; do you want to add it?}}
+  associatedtype A // expected-note{{protocol requires nested type 'A'; add nested type 'A' for conformance}}
 }
 
 
@@ -503,7 +503,7 @@ struct Foo: RefinesAssocWithDefault {
 }
 
 protocol P20 {
-  associatedtype T // expected-note{{protocol requires nested type 'T'; do you want to add it?}}
+  associatedtype T // expected-note{{protocol requires nested type 'T'; add nested type 'T' for conformance}}
   typealias TT = T?
 }
 struct S19 : P20 {  // expected-error{{type 'S19' does not conform to protocol 'P20'}}
@@ -528,3 +528,187 @@ extension S30 {
     T.bar()
   }
 }
+
+protocol P32 {
+  associatedtype A
+  associatedtype B
+  associatedtype C
+
+  func foo(arg: A) -> C
+  var bar: B { get }
+}
+protocol P33 {
+  associatedtype A // expected-note {{protocol requires nested type 'A'; add nested type 'A' for conformance}}
+
+  var baz: A { get }
+}
+protocol P34 {
+  associatedtype A  // expected-note {{protocol requires nested type 'A'; add nested type 'A' for conformance}}
+
+  func boo() -> A
+}
+struct S31<T> {}
+extension S31: P32 where T == Int {} // OK
+extension S31 where T == Int {
+  func foo(arg: Never) {}
+}
+extension S31 where T: Equatable {
+  var bar: Bool { true }
+}
+extension S31: P33 where T == Never {} // expected-error {{type 'S31<T>' does not conform to protocol 'P33'}}
+extension S31 where T == String {
+  var baz: Bool { true }
+}
+extension S31: P34 {} // expected-error {{type 'S31<T>' does not conform to protocol 'P34'}}
+extension S31 where T: P32 {
+  func boo() -> Void {}
+}
+
+/** References to type parameters in type witnesses. */
+
+// Circular reference through a fixed type witness.
+protocol P35a {
+  associatedtype A = Array<B> // expected-note {{protocol requires nested type 'A'}}
+  associatedtype B // expected-note {{protocol requires nested type 'B'}}
+}
+protocol P35b: P35a where B == A {}
+// expected-error@+1 {{type 'S35' does not conform to protocol 'P35a'}}
+struct S35: P35b {}
+
+// Circular reference through a value witness.
+protocol P36a {
+  associatedtype A // expected-note {{protocol requires nested type 'A'}}
+
+  func foo(arg: A)
+}
+protocol P36b: P36a {
+  associatedtype B = (Self) -> A // expected-note {{protocol requires nested type 'B'}}
+}
+// expected-error@+2 {{type 'S36' does not conform to protocol 'P36a'}}
+// expected-error@+1 {{type 'S36' does not conform to protocol 'P36b'}}
+struct S36: P36b {
+  func foo(arg: Array<B>) {}
+}
+
+// Test that we can resolve abstract type witnesses that reference
+// other abstract type witnesses.
+protocol P37 {
+  associatedtype A = Array<B>
+  associatedtype B: Equatable = Never
+}
+struct S37: P37 {}
+
+protocol P38a {
+  associatedtype A = Never
+  associatedtype B: Equatable
+}
+protocol P38b: P38a where B == Array<A> {}
+struct S38: P38b {}
+
+protocol P39 where A: Sequence {
+  associatedtype A = Array<B>
+  associatedtype B
+}
+struct S39<B>: P39 {}
+
+// Test that we can handle an analogous complex case involving all kinds of
+// type witness resolution.
+//
+// FIXME: Except there's too much circularity here, and this really can't
+// work. The problem is that S40 conforms to P40c, and we can't check the
+// conformance without computing the requirement signature of P40c, but the
+// requirement signature computation depends on the conformance, via the
+// 'D == S40<Never>' requirement.
+protocol P40a {
+  associatedtype A
+  associatedtype B: P40a
+
+  func foo(arg: A)
+}
+protocol P40b: P40a {
+  associatedtype C = (A, B.A, D.D, E) -> Self // expected-note {{protocol requires nested type 'C'; add nested type 'C' for conformance}}
+  associatedtype D: P40b // expected-note {{protocol requires nested type 'D'; add nested type 'D' for conformance}}
+  associatedtype E: Equatable // expected-note {{protocol requires nested type 'E'; add nested type 'E' for conformance}}
+}
+protocol P40c: P40b where D == S40<Never> {}
+struct S40<E: Equatable>: P40c {
+  // expected-error@-1 {{type 'S40<E>' does not conform to protocol 'P40b'}}
+  func foo(arg: Never) {}
+
+  typealias B = Self
+}
+
+protocol P41a {
+  associatedtype A
+  associatedtype B
+
+  func bar(_: B) -> A?
+}
+protocol P42b: P41a {
+  associatedtype A
+  associatedtype B
+
+  func foo(_: A, _: B)
+}
+extension P42b {
+  func bar(_: B) -> A? {}
+}
+do {
+  class Conformer: P42b {
+    func foo(_: Bool, _: String) {}
+  }
+}
+
+// https://github.com/apple/swift/issues/55151
+
+class GenClass<T> {}
+
+// Inference in the adoptee
+protocol P43a {
+  associatedtype A
+  associatedtype B: GenClass<(A, Self)>
+
+  func foo(arg: B)
+}
+struct S43a: P43a {
+  typealias A = Never
+
+  func foo(arg: GenClass<(A, S43a)>) {}
+}
+
+// Inference in protocol extension
+protocol P43b: P43a {}
+extension P43b {
+  func foo(arg: GenClass<(A, Self)>) {}
+}
+struct S43b: P43b {
+  typealias A = Never
+}
+
+// https://github.com/apple/swift/issues/55614
+// Inference when witness is an enum case
+
+protocol P44 {
+  associatedtype Bar
+  static func bar(_ value: Bar) -> Self
+}
+enum E44: P44 {
+  case bar(String) // Okay
+}
+
+protocol P45 {
+  associatedtype Bar
+  static var bar: Bar { get }
+}
+enum E45: P45 {
+  case bar // Okay
+}
+
+// Fails to find the fixed type witness B == FIXME_S1<A>.
+protocol FIXME_P1a {
+  associatedtype A: Equatable = Never // expected-note {{protocol requires nested type 'A'}}
+  associatedtype B: FIXME_P1a // expected-note {{protocol requires nested type 'B'}}
+}
+protocol FIXME_P1b: FIXME_P1a where B == FIXME_S1<A> {}
+// expected-error@+1 {{type 'FIXME_S1<T>' does not conform to protocol 'FIXME_P1a'}}
+struct FIXME_S1<T: Equatable>: FIXME_P1b {}

@@ -12,12 +12,16 @@
 
 import SwiftPrivate
 import SwiftPrivateLibcExtras
-#if os(macOS) || os(iOS)
+#if canImport(Darwin)
 import Darwin
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
+#elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif os(WASI)
+import WASILibc
 #elseif os(Windows)
-import MSVCRT
+import CRT
 #endif
 
 #if _runtime(_ObjC)
@@ -128,14 +132,14 @@ public struct TypeIdentifier : Hashable, Comparable {
   internal var objectID : ObjectIdentifier {
     return ObjectIdentifier(value)
   }
-}
 
-public func < (lhs: TypeIdentifier, rhs: TypeIdentifier) -> Bool {
-  return lhs.objectID < rhs.objectID
-}
+  public static func < (lhs: TypeIdentifier, rhs: TypeIdentifier) -> Bool {
+    return lhs.objectID < rhs.objectID
+  }
 
-public func == (lhs: TypeIdentifier, rhs: TypeIdentifier) -> Bool {
-  return lhs.objectID == rhs.objectID
+  public static func == (lhs: TypeIdentifier, rhs: TypeIdentifier) -> Bool {
+    return lhs.objectID == rhs.objectID
+  }
 }
 
 extension TypeIdentifier
@@ -268,7 +272,15 @@ public func _isStdlibDebugConfiguration() -> Bool {
 #endif
 }
 
-@_fixed_layout
+// Return true if the Swift runtime available is at least 5.1
+public func _hasSwift_5_1() -> Bool {
+  if #available(SwiftStdlib 5.1, *) {
+    return true
+  }
+  return false
+}
+
+@frozen
 public struct LinearCongruentialGenerator: RandomNumberGenerator {
 
   @usableFromInline
@@ -286,3 +298,24 @@ public struct LinearCongruentialGenerator: RandomNumberGenerator {
     return _state
   }
 }
+
+#if !SWIFT_ENABLE_REFLECTION
+
+public func dump<T, TargetStream: TextOutputStream>(_ value: T, to target: inout TargetStream) {
+  target.write("(reflection not available)")
+}
+
+#endif
+
+#if SWIFT_STDLIB_STATIC_PRINT
+
+public func print(_ s: Any, terminator: String = "\n") {
+  let data = Array("\(s)\(terminator)".utf8)
+  write(STDOUT_FILENO, data, data.count)
+}
+
+public func print<Target>(_ s: Any, terminator: String = "\n", to output: inout Target) where Target : TextOutputStream {
+  output.write("\(s)\(terminator)")
+}
+
+#endif

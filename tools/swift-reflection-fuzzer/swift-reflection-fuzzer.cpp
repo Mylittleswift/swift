@@ -20,16 +20,22 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/Reflection/ReflectionContext.h"
-#include "swift/Reflection/TypeRef.h"
-#include "swift/Reflection/TypeRefBuilder.h"
+#include "swift/RemoteInspection/ReflectionContext.h"
+#include "swift/RemoteInspection/TypeRef.h"
+#include "swift/RemoteInspection/TypeRefBuilder.h"
 #include "llvm/Object/Archive.h"
 #include "llvm/Object/ELF.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Object/MachOUniversal.h"
 #include "llvm/Support/CommandLine.h"
-#include <stddef.h>
-#include <stdint.h>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <iostream>
+
+#if defined(__APPLE__) && defined(__MACH__)
+#include <TargetConditionals.h>
+#endif
 
 using namespace llvm::object;
 
@@ -38,7 +44,7 @@ using namespace swift::reflection;
 using namespace swift::remote;
 
 using NativeReflectionContext = swift::reflection::ReflectionContext<
-    External<RuntimeTarget<sizeof(uintptr_t)>>>;
+  External<WithObjCInterop<RuntimeTarget<sizeof(uintptr_t)>>>>;
 
 template <typename T> static T unwrap(llvm::Expected<T> value) {
   if (value)
@@ -52,15 +58,60 @@ public:
 
   bool queryDataLayout(DataLayoutQueryType type, void *inBuffer,
                        void *outBuffer) override {
+#if defined(__APPLE__) && __APPLE__
+    auto applePlatform = true;
+#else
+    auto applePlatform = false;
+#endif
+#if defined(__APPLE__) && __APPLE__ && ((defined(TARGET_OS_IOS) && TARGET_OS_IOS) || (defined(TARGET_OS_IOS) && TARGET_OS_WATCH) || (defined(TARGET_OS_TV) && TARGET_OS_TV) || defined(__arm64__))
+    auto iosDerivedPlatform = true;
+#else
+    auto iosDerivedPlatform = false;
+#endif
+
     switch (type) {
     case DLQ_GetPointerSize: {
       auto result = static_cast<uint8_t *>(outBuffer);
       *result = sizeof(void *);
       return true;
     }
+    case DLQ_GetPtrAuthMask: {
+      auto result = static_cast<uintptr_t *>(outBuffer);
+#if __has_feature(ptrauth_calls)
+      *result = static_cast<uintptr_t>(
+          ptrauth_strip(static_cast<void *>(0x0007ffffffffffff), 0));
+#else
+      *result = ~uintptr_t(0);
+#endif
+      return true;
+    }
     case DLQ_GetSizeSize: {
       auto result = static_cast<uint8_t *>(outBuffer);
       *result = sizeof(size_t);
+      return true;
+    }
+    case DLQ_GetObjCReservedLowBits: {
+      auto result = static_cast<uint8_t *>(outBuffer);
+      if (applePlatform && !iosDerivedPlatform && (sizeof(void *) == 8)) {
+        // Obj-C reserves low bit on 64-bit macOS only.
+        // Other Apple platforms don't reserve this bit (even when
+        // running on x86_64-based simulators).
+        *result = 1;
+      } else {
+        *result = 0;
+      }
+      return true;
+    }
+    case DLQ_GetLeastValidPointerValue: {
+      auto result = static_cast<uint64_t *>(outBuffer);
+      if (applePlatform && (sizeof(void *) == 8)) {
+        // Swift reserves the first 4GiB on Apple 64-bit platforms
+        *result = 0x100000000;
+        return 1;
+      } else {
+        // Swift reserves the first 4KiB everywhere else
+        *result = 0x1000;
+      }
       return true;
     }
     }
@@ -92,6 +143,6 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
   auto reader = std::make_shared<ObjectMemoryReader>();
   NativeReflectionContext context(std::move(reader));
   context.addImage(RemoteAddress(Data));
-  context.getBuilder().dumpAllSections(std::cout);
+  context.getBuilder().dumpAllSections<WithObjCInterop, sizeof(uintptr_t)>(std::cout);
   return 0; // Non-zero return values are reserved for future use.
 }

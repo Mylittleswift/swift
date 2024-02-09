@@ -32,13 +32,13 @@ func owl3() {
   Owl<Spoon>().eat(Mince(), with:Spoon())
 }
 
-// "Can't access associated types through class-constrained generic parameters"
-// (https://bugs.swift.org/browse/SR-726)
+// https://github.com/apple/swift/issues/43341
+// Can't access associated types through class-constrained generic parameters
 func spoon<S: Spoon>(_ s: S) {
   let _: S.Runcee?
 }
 
-// SR-4143
+// https://github.com/apple/swift/issues/46726
 
 protocol SameTypedDefault {
     associatedtype X
@@ -62,8 +62,8 @@ protocol XReqt {}
 protocol YReqt {}
 
 protocol SameTypedDefaultWithReqts {
-    associatedtype X: XReqt // expected-note{{protocol requires nested type 'X'; do you want to add it?}}
-    associatedtype Y: YReqt // expected-note{{protocol requires nested type 'Y'; do you want to add it?}}
+    associatedtype X: XReqt // expected-note{{protocol requires nested type 'X'; add nested type 'X' for conformance}}
+    associatedtype Y: YReqt // expected-note{{protocol requires nested type 'Y'; add nested type 'Y' for conformance}}
     static var x: X { get }
     static var y: Y { get }
 }
@@ -86,7 +86,7 @@ struct UsesSameTypedDefaultWithoutSatisfyingReqts: SameTypedDefaultWithReqts {
 }
 
 protocol SameTypedDefaultBaseWithReqts {
-    associatedtype X: XReqt // expected-note{{protocol requires nested type 'X'; do you want to add it?}}
+    associatedtype X: XReqt // expected-note{{protocol requires nested type 'X'; add nested type 'X' for conformance}}
     static var x: X { get }
 }
 protocol SameTypedDefaultDerivedWithReqts: SameTypedDefaultBaseWithReqts {
@@ -109,3 +109,15 @@ struct UsesSameTypedDefaultDerivedWithoutSatisfyingReqts: SameTypedDefaultDerive
     static var y: YType { return YType() }
 }
 
+// https://github.com/apple/swift/issues/54624
+
+protocol P1_54624 {
+  associatedtype Assoc // expected-note {{'Assoc' declared here}}
+}
+
+enum E_54624 {}
+
+protocol P2_54624: P1_54624 where Assoc == E_54624 {
+  associatedtype Assoc: E_54624 // expected-error {{type 'Self.Assoc' constrained to non-protocol, non-class type 'E_54624'}}
+  // expected-warning@-1 {{redeclaration of associated type 'Assoc' from protocol 'P1_54624' is better expressed as a 'where' clause on the protocol}}
+}

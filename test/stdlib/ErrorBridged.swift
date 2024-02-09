@@ -1,5 +1,6 @@
 // RUN: %empty-directory(%t)
 // RUN: %target-build-swift -o %t/ErrorBridged -DPTR_SIZE_%target-ptrsize -module-name main %s
+// RUN: %target-codesign %t/ErrorBridged
 // RUN: %target-run %t/ErrorBridged
 // REQUIRES: executable_test
 // REQUIRES: objc_interop
@@ -21,7 +22,7 @@ protocol OtherProtocol {
   var otherProperty: String { get }
 }
 
-protocol OtherClassProtocol : class {
+protocol OtherClassProtocol : AnyObject {
   var otherClassProperty: String { get }
 }
 
@@ -684,9 +685,9 @@ ErrorBridgingTests.test("Wrapped NSError identity") {
 }
 
 extension Error {
-	func asNSError() -> NSError {
-		return self as NSError
-	}
+  func asNSError() -> NSError {
+    return self as NSError
+  }
 }
 
 func unconditionalCast<T>(_ x: Any, to: T.Type) -> T {
@@ -697,7 +698,7 @@ func conditionalCast<T>(_ x: Any, to: T.Type) -> T? {
   return x as? T
 }
 
-// SR-1562
+// https://github.com/apple/swift/issues/44171
 ErrorBridgingTests.test("Error archetype identity") {
   let myError = NSError(domain: "myErrorDomain", code: 0,
                         userInfo: [ "one" : 1 ])
@@ -722,7 +723,8 @@ ErrorBridgingTests.test("Error archetype identity") {
     === nsError)
 }
 
-// SR-9389
+// https://github.com/apple/swift/issues/51855
+
 class ParentA: NSObject {
   @objc(ParentAError) enum Error: Int, Swift.Error {
     case failed
@@ -765,6 +767,141 @@ ErrorBridgingTests.test("@objc error domains for nested types") {
               String(reflecting: NonPrintAsObjCClass.Error.self))
   expectEqual(NonPrintAsObjCError.bar._domain,
               String(reflecting: NonPrintAsObjCError.self))
+}
+
+ErrorBridgingTests.test("error-to-NSObject casts") {
+  let error = MyCustomizedError(code: 12345)
+
+  if #available(SwiftStdlib 5.2, *) {
+    // Unconditional cast
+    let nsErrorAsObject1 = unconditionalCast(error, to: NSObject.self)
+    let nsError1 = unconditionalCast(nsErrorAsObject1, to: NSError.self)
+    expectEqual("custom", nsError1.domain)
+    expectEqual(12345, nsError1.code)
+
+    // Conditional cast
+    let nsErrorAsObject2 = conditionalCast(error, to: NSObject.self)!
+    let nsError2 = unconditionalCast(nsErrorAsObject2, to: NSError.self)
+    expectEqual("custom", nsError2.domain)
+    expectEqual(12345, nsError2.code)
+
+    // "is" check
+    expectTrue(error is NSObject)
+
+    // Unconditional cast to a dictionary.
+    let dict = ["key" : NoisyError()]
+    let anyOfDict = dict as AnyObject
+    let dict2 = anyOfDict as! [String: NSObject]
+  }
+}
+
+// https://github.com/apple/swift-corelibs-foundation/issues/3701
+// Casting 'CFError' or 'NSError' to 'Error' results in a memory leak
+ErrorBridgingTests.test("NSError-to-Error casts") {
+  func should_not_leak_nserror() {
+    let something: Any? = NSError(domain: "Foo", code: 1)
+    expectTrue(something is Error)
+  }
+
+  if #available(SwiftStdlib 5.2, *) {
+    // TODO: Wrap some leak checking around this
+    // Until then, this is a helpful debug tool
+		should_not_leak_nserror()
+  }
+}
+
+ErrorBridgingTests.test("CFError-to-Error casts") {
+  func should_not_leak_cferror() {
+    let something: Any? = CFErrorCreate(kCFAllocatorDefault, kCFErrorDomainCocoa, 1, [:] as CFDictionary)
+    expectTrue(something is Error)
+  }
+
+  if #available(SwiftStdlib 5.2, *) {
+    // TODO: Wrap some leak checking around this
+    // Until then, this is a helpful debug tool
+		should_not_leak_cferror()
+  }
+}
+
+// https://github.com/apple/swift/issues/51697
+
+enum MyError: Error {
+  case someThing
+}
+
+ErrorBridgingTests.test("Crash in failed cast to 'NSError'") {
+
+  if #available(SwiftStdlib 5.2, *) {
+    let error = MyError.someThing
+    let foundationError = error as NSError
+
+    if let urlError = foundationError as? URLError {
+      expectUnreachable()
+    }
+  }
+}
+
+// https://github.com/apple/swift/issues/50193
+
+enum SwiftError: Error, CustomStringConvertible {
+  case something
+  var description: String { return "Something" }
+}
+
+ErrorBridgingTests.test("Swift Error bridged to NSError description") {
+  func checkDescription() {
+    let bridgedError = SwiftError.something as NSError
+    expectEqual("Something", bridgedError.description)
+  }
+
+  if #available(SwiftStdlib 5.3, *) {
+    checkDescription()
+  }
+}
+
+struct SwiftError2: Error, CustomStringConvertible {
+  var description: String
+}
+
+struct SwiftErrorLarge: Error, CustomStringConvertible {
+  var description: String
+  var makeItLarge = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+}
+
+ErrorBridgingTests.test("Swift Error description memory management") {
+  func checkDescription() {
+    // Generate a non-small, non-constant NSString bridged to String.
+    let str = (["""
+      There once was a gigantic genie
+      Who turned out to be a real meanie
+      I wished for flight
+      And with all his might
+      He gave me a propellor beanie
+    """] as NSArray).description
+    let error = SwiftError2(description: str)
+    let bridgedError = error as NSError
+
+    // Ensure that the bridged NSError description method doesn't overrelease
+    // the error value.
+    for _ in 0 ..< 10 {
+      autoreleasepool {
+        expectEqual(str, bridgedError.description)
+      }
+    }
+
+    // Make sure large structs also work.
+    let largeError = SwiftErrorLarge(description: str)
+    let largeBridgedError = largeError as NSError
+    for _ in 0 ..< 10 {
+      autoreleasepool {
+        expectEqual(str, largeBridgedError.description)
+      }
+    }
+  }
+
+  if #available(SwiftStdlib 5.3, *) {
+    checkDescription()
+  }
 }
 
 runAllTests()

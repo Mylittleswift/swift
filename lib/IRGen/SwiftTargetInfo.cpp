@@ -17,7 +17,7 @@
 
 #include "SwiftTargetInfo.h"
 #include "IRGenModule.h"
-#include "llvm/ADT/Triple.h"
+#include "llvm/TargetParser/Triple.h"
 #include "llvm/IR/DataLayout.h"
 #include "swift/ABI/System.h"
 #include "swift/AST/ASTContext.h"
@@ -36,10 +36,17 @@ static void setToMask(SpareBitVector &bits, unsigned size, uint64_t mask) {
 /// Configures target-specific information for arm64 platforms.
 static void configureARM64(IRGenModule &IGM, const llvm::Triple &triple,
                            SwiftTargetInfo &target) {
-  setToMask(target.PointerSpareBits, 64,
-            SWIFT_ABI_ARM64_SWIFT_SPARE_BITS_MASK);
-  setToMask(target.ObjCPointerReservedBits, 64,
-            SWIFT_ABI_ARM64_OBJC_RESERVED_BITS_MASK);
+  if (triple.isAndroid()) {
+    setToMask(target.PointerSpareBits, 64,
+              SWIFT_ABI_ANDROID_ARM64_SWIFT_SPARE_BITS_MASK);
+    setToMask(target.ObjCPointerReservedBits, 64,
+              SWIFT_ABI_ANDROID_ARM64_OBJC_RESERVED_BITS_MASK);
+  } else {
+    setToMask(target.PointerSpareBits, 64,
+              SWIFT_ABI_ARM64_SWIFT_SPARE_BITS_MASK);
+    setToMask(target.ObjCPointerReservedBits, 64,
+              SWIFT_ABI_ARM64_OBJC_RESERVED_BITS_MASK);
+  }
   setToMask(target.IsObjCPointerBit, 64, SWIFT_ABI_ARM64_IS_OBJC_BIT);
 
   if (triple.isOSDarwin()) {
@@ -60,6 +67,26 @@ static void configureARM64(IRGenModule &IGM, const llvm::Triple &triple,
   // arm64 tops out at 56 effective bits of address space and reserves the high
   // half for the kernel.
   target.SwiftRetainIgnoresNegativeValues = true;
+
+  target.UsableSwiftAsyncContextAddrIntrinsic = true;
+}
+
+/// Configures target-specific information for arm64_32 platforms.
+static void configureARM64_32(IRGenModule &IGM, const llvm::Triple &triple,
+                              SwiftTargetInfo &target) {
+  setToMask(target.PointerSpareBits, 32,
+            SWIFT_ABI_ARM_SWIFT_SPARE_BITS_MASK);
+
+  // arm64_32 has no special objc_msgSend variants, not even stret.
+  target.ObjCUseStret = false;
+
+  // arm64_32 requires marker assembly for objc_retainAutoreleasedReturnValue.
+  target.ObjCRetainAutoreleasedReturnValueMarker =
+    "mov\tfp, fp\t\t// marker for objc_retainAutoreleaseReturnValue";
+
+  setToMask(target.IsObjCPointerBit, 32, SWIFT_ABI_ARM_IS_OBJC_BIT);
+
+  target.ObjCHasOpaqueISAs = true;
 }
 
 /// Configures target-specific information for x86-64 platforms.
@@ -69,7 +96,7 @@ static void configureX86_64(IRGenModule &IGM, const llvm::Triple &triple,
             SWIFT_ABI_X86_64_SWIFT_SPARE_BITS_MASK);
   setToMask(target.IsObjCPointerBit, 64, SWIFT_ABI_X86_64_IS_OBJC_BIT);
 
-  if (tripleIsAnySimulator(triple)) {
+  if (triple.isSimulatorEnvironment()) {
     setToMask(target.ObjCPointerReservedBits, 64,
               SWIFT_ABI_X86_64_SIMULATOR_OBJC_RESERVED_BITS_MASK);
   } else {
@@ -92,6 +119,8 @@ static void configureX86_64(IRGenModule &IGM, const llvm::Triple &triple,
   // x86-64 only has 48 effective bits of address space and reserves the high
   // half for the kernel.
   target.SwiftRetainIgnoresNegativeValues = true;
+
+  target.UsableSwiftAsyncContextAddrIntrinsic = true;
 }
 
 /// Configures target-specific information for 32-bit x86 platforms.
@@ -122,6 +151,13 @@ static void configureARM(IRGenModule &IGM, const llvm::Triple &triple,
   setToMask(target.IsObjCPointerBit, 32, SWIFT_ABI_ARM_IS_OBJC_BIT);
 }
 
+/// Configures target-specific information for powerpc platforms.
+static void configurePowerPC(IRGenModule &IGM, const llvm::Triple &triple,
+                               SwiftTargetInfo &target) {
+  setToMask(target.PointerSpareBits, 32,
+            SWIFT_ABI_POWERPC_SWIFT_SPARE_BITS_MASK);
+}
+
 /// Configures target-specific information for powerpc64 platforms.
 static void configurePowerPC64(IRGenModule &IGM, const llvm::Triple &triple,
                                SwiftTargetInfo &target) {
@@ -134,6 +170,17 @@ static void configureSystemZ(IRGenModule &IGM, const llvm::Triple &triple,
                              SwiftTargetInfo &target) {
   setToMask(target.PointerSpareBits, 64,
             SWIFT_ABI_S390X_SWIFT_SPARE_BITS_MASK);
+  setToMask(target.ObjCPointerReservedBits, 64,
+            SWIFT_ABI_S390X_OBJC_RESERVED_BITS_MASK);
+  setToMask(target.IsObjCPointerBit, 64, SWIFT_ABI_S390X_IS_OBJC_BIT);
+  target.SwiftRetainIgnoresNegativeValues = true;
+}
+
+/// Configures target-specific information for wasm32 platforms.
+static void configureWasm32(IRGenModule &IGM, const llvm::Triple &triple,
+                            SwiftTargetInfo &target) {
+  target.LeastValidPointerValue =
+    SWIFT_ABI_WASM32_LEAST_VALID_POINTER;
 }
 
 /// Configure a default target.
@@ -150,6 +197,13 @@ SwiftTargetInfo::SwiftTargetInfo(
             SWIFT_ABI_DEFAULT_OBJC_RESERVED_BITS_MASK);
   setToMask(FunctionPointerSpareBits, numPointerBits,
             SWIFT_ABI_DEFAULT_FUNCTION_SPARE_BITS_MASK);
+  if (numPointerBits == 64) {
+    ReferencePoisonDebugValue =
+      SWIFT_ABI_DEFAULT_REFERENCE_POISON_DEBUG_VALUE_64;
+  } else {
+    ReferencePoisonDebugValue =
+      SWIFT_ABI_DEFAULT_REFERENCE_POISON_DEBUG_VALUE_32;
+  }
 }
 
 SwiftTargetInfo SwiftTargetInfo::get(IRGenModule &IGM) {
@@ -181,7 +235,15 @@ SwiftTargetInfo SwiftTargetInfo::get(IRGenModule &IGM) {
     break;
 
   case llvm::Triple::aarch64:
-    configureARM64(IGM, triple, target);
+  case llvm::Triple::aarch64_32:
+    if (triple.getArchName() == "arm64_32")
+      configureARM64_32(IGM, triple, target);
+    else
+      configureARM64(IGM, triple, target);
+    break;
+  
+  case llvm::Triple::ppc:
+    configurePowerPC(IGM, triple, target);
     break;
 
   case llvm::Triple::ppc64:
@@ -191,6 +253,9 @@ SwiftTargetInfo SwiftTargetInfo::get(IRGenModule &IGM) {
 
   case llvm::Triple::systemz:
     configureSystemZ(IGM, triple, target);
+    break;
+  case llvm::Triple::wasm32:
+    configureWasm32(IGM, triple, target);
     break;
 
   default:

@@ -3,6 +3,7 @@
 
 // REQUIRES: objc_interop
 // REQUIRES: swift_stdlib_no_asserts,optimized_stdlib
+// REQUIRES: rdar114110966
 
 import Foundation
 
@@ -28,7 +29,7 @@ public class InClass {
   var t: Test?
   var v: Test?
 
-// CHECK-LABEL: sil @$s20objc_bridged_results7InClassC20testOptionalShortCutyyF
+// CHECK-LABEL: sil {{.*}}@$s20objc_bridged_results7InClassC20testOptionalShortCutyyF
 // CHECK: bb0
 // CHECK:  switch_enum
 // CHECK: bb1
@@ -43,17 +44,17 @@ public class InClass {
     t?.other = v?.other
   }
 
-// CHECK-LABEL: sil @$s20objc_bridged_results7InClassC21testOptionalShortCut2yyF
+// CHECK-LABEL: sil {{.*}}@$s20objc_bridged_results7InClassC21testOptionalShortCut2yyF
 // CHECK: bb0
 // CHECK:  switch_enum
 // CHECK: bb1
 // CHECK:  br bb5
-// CHECK: bb2:
+// CHECK: bb2({{.*}}):
 // CHECK:  apply
 // CHECK:  switch_enum
 // CHECK: bb3:
 // CHECK:  br bb5
-// CHECK: bb4:
+// CHECK: bb4({{.*}}):
 // CHECK:  objc_method
 // CHECK:  apply
 // CHECK:  objc_method

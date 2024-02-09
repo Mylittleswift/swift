@@ -10,9 +10,13 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ImageInspectionCOFF.h"
+#include "ImageInspectionCommon.h"
+#include "swift/shims/MetadataSections.h"
 
 #include <cstdint>
+#include <new>
+
+extern "C" const char __ImageBase[];
 
 #define PASTE_EXPANDED(a,b) a##b
 #define PASTE(a,b) PASTE_EXPANDED(a,b)
@@ -27,10 +31,12 @@
 #define DECLARE_SWIFT_SECTION(name)                                            \
   PRAGMA(section("." #name "$A", long, read))                                  \
   __declspec(allocate("." #name "$A"))                                         \
+  __declspec(align(1))                                                         \
   static uintptr_t __start_##name = 0;                                         \
                                                                                \
   PRAGMA(section("." #name "$C", long, read))                                  \
   __declspec(allocate("." #name "$C"))                                         \
+  __declspec(align(1))                                                         \
   static uintptr_t __stop_##name = 0;
 
 extern "C" {
@@ -43,6 +49,12 @@ DECLARE_SWIFT_SECTION(sw5rfst)
 DECLARE_SWIFT_SECTION(sw5flmd)
 DECLARE_SWIFT_SECTION(sw5asty)
 DECLARE_SWIFT_SECTION(sw5repl)
+DECLARE_SWIFT_SECTION(sw5reps)
+DECLARE_SWIFT_SECTION(sw5bltn)
+DECLARE_SWIFT_SECTION(sw5cptr)
+DECLARE_SWIFT_SECTION(sw5mpen)
+DECLARE_SWIFT_SECTION(sw5acfn)
+DECLARE_SWIFT_SECTION(sw5ratt)
 }
 
 namespace {
@@ -54,9 +66,9 @@ static void swift_image_constructor() {
   { reinterpret_cast<uintptr_t>(&__start_##name) + sizeof(__start_##name),     \
     reinterpret_cast<uintptr_t>(&__stop_##name) - reinterpret_cast<uintptr_t>(&__start_##name) - sizeof(__start_##name) }
 
-  sections = {
+  ::new (&sections) swift::MetadataSections {
       swift::CurrentSectionMetadataVersion,
-      0,
+      { __ImageBase },
 
       nullptr,
       nullptr,
@@ -70,6 +82,12 @@ static void swift_image_constructor() {
       SWIFT_SECTION_RANGE(sw5flmd),
       SWIFT_SECTION_RANGE(sw5asty),
       SWIFT_SECTION_RANGE(sw5repl),
+      SWIFT_SECTION_RANGE(sw5reps),
+      SWIFT_SECTION_RANGE(sw5bltn),
+      SWIFT_SECTION_RANGE(sw5cptr),
+      SWIFT_SECTION_RANGE(sw5mpen),
+      SWIFT_SECTION_RANGE(sw5acfn),
+      SWIFT_SECTION_RANGE(sw5ratt),
   };
 
 #undef SWIFT_SECTION_RANGE

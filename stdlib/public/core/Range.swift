@@ -14,7 +14,7 @@
 ///
 /// A type that conforms to `RangeExpression` can convert itself to a
 /// `Range<Bound>` of indices within a given collection.
-public protocol RangeExpression {
+public protocol RangeExpression<Bound> {
   /// The type for which the expression describes a range.
   associatedtype Bound: Comparable
 
@@ -74,6 +74,25 @@ public protocol RangeExpression {
 }
 
 extension RangeExpression {
+
+  /// Returns a Boolean value indicating whether a value is included in a
+  /// range.
+  ///
+  /// You can use the pattern-matching operator (`~=`) to test whether a value
+  /// is included in a range. The pattern-matching operator is used
+  /// internally in `case` statements for pattern matching. The following
+  /// example uses the `~=` operator to test whether an integer is included in
+  /// a range of single-digit numbers:
+  ///
+  ///     let chosenNumber = 3
+  ///     if 0..<10 ~= chosenNumber {
+  ///         print("\(chosenNumber) is a single digit.")
+  ///     }
+  ///     // Prints "3 is a single digit."
+  ///
+  /// - Parameters:
+  ///   - pattern: A range.
+  ///   - bound: A value to match against `pattern`.
   @inlinable
   public static func ~= (pattern: Self, value: Bound) -> Bool {
     return pattern.contains(value)
@@ -125,8 +144,8 @@ extension RangeExpression {
 /// `Stride` types, they cannot be used as the bounds of a countable range. If
 /// you need to iterate over consecutive floating-point values, see the
 /// `stride(from:to:by:)` function.
-@_fixed_layout
-public struct Range<Bound : Comparable> {
+@frozen
+public struct Range<Bound: Comparable> {
   /// The range's lower bound.
   ///
   /// In an empty range, `lowerBound` is equal to `upperBound`.
@@ -138,6 +157,14 @@ public struct Range<Bound : Comparable> {
   /// instance does not contain its upper bound.
   public let upperBound: Bound
 
+  // This works around _debugPrecondition() impacting the performance of
+  // optimized code. (rdar://72246338)
+  @_alwaysEmitIntoClient @inline(__always)
+  internal init(_uncheckedBounds bounds: (lower: Bound, upper: Bound)) {
+    self.lowerBound = bounds.lower
+    self.upperBound = bounds.upper
+  }
+
   /// Creates an instance with the given bounds.
   ///
   /// Because this initializer does not perform any checks, it should be used
@@ -148,8 +175,9 @@ public struct Range<Bound : Comparable> {
   /// - Parameter bounds: A tuple of the lower and upper bounds of the range.
   @inlinable
   public init(uncheckedBounds bounds: (lower: Bound, upper: Bound)) {
-    self.lowerBound = bounds.lower
-    self.upperBound = bounds.upper
+    _debugPrecondition(bounds.lower <= bounds.upper,
+      "Range requires lowerBound <= upperBound")
+    self.init(_uncheckedBounds: (lower: bounds.lower, upper: bounds.upper))
   }
 
   /// Returns a Boolean value indicating whether the given element is contained
@@ -181,13 +209,13 @@ public struct Range<Bound : Comparable> {
 }
 
 extension Range: Sequence
-where Bound: Strideable, Bound.Stride : SignedInteger {
+where Bound: Strideable, Bound.Stride: SignedInteger {
   public typealias Element = Bound
   public typealias Iterator = IndexingIterator<Range<Bound>>
 }
 
 extension Range: Collection, BidirectionalCollection, RandomAccessCollection
-where Bound : Strideable, Bound.Stride : SignedInteger
+where Bound: Strideable, Bound.Stride: SignedInteger
 {
   /// A type that represents a position in the range.
   public typealias Index = Bound
@@ -201,6 +229,7 @@ where Bound : Strideable, Bound.Stride : SignedInteger
   public var endIndex: Index { return upperBound }
 
   @inlinable
+  @inline(__always)
   public func index(after i: Index) -> Index {
     _failEarlyRangeCheck(i, bounds: startIndex..<endIndex)
 
@@ -278,7 +307,7 @@ where Bound : Strideable, Bound.Stride : SignedInteger
   }
 }
 
-extension Range where Bound: Strideable, Bound.Stride : SignedInteger {  
+extension Range where Bound: Strideable, Bound.Stride: SignedInteger {
   /// Creates an instance equivalent to the given `ClosedRange`.
   ///
   /// - Parameter other: A closed range to convert to a `Range` instance.
@@ -287,9 +316,11 @@ extension Range where Bound: Strideable, Bound.Stride : SignedInteger {
   /// For example, passing a closed range with an upper bound of `Int.max`
   /// triggers a runtime error, because the resulting half-open range would
   /// require an upper bound of `Int.max + 1`, which is not representable as
+  /// an `Int`.
+  @inlinable // trivial-implementation
   public init(_ other: ClosedRange<Bound>) {
     let upperBound = other.upperBound.advanced(by: 1)
-    self.init(uncheckedBounds: (lower: other.lowerBound, upper: upperBound))
+    self.init(_uncheckedBounds: (lower: other.lowerBound, upper: upperBound))
   }
 }
 
@@ -306,7 +337,7 @@ extension Range: RangeExpression {
   @inlinable // trivial-implementation
   public func relative<C: Collection>(to collection: C) -> Range<Bound>
   where C.Index == Bound {
-    return Range(uncheckedBounds: (lower: lowerBound, upper: upperBound))
+    self
   }
 }
 
@@ -340,11 +371,12 @@ extension Range {
       limits.upperBound < self.upperBound ? limits.upperBound
           : limits.lowerBound > self.upperBound ? limits.lowerBound
           : self.upperBound
-    return Range(uncheckedBounds: (lower: lower, upper: upper))
+    return Range(_uncheckedBounds: (lower: lower, upper: upper))
   }
 }
 
-extension Range : CustomStringConvertible {
+@_unavailableInEmbedded
+extension Range: CustomStringConvertible {
   /// A textual representation of the range.
   @inlinable // trivial-implementation
   public var description: String {
@@ -352,7 +384,8 @@ extension Range : CustomStringConvertible {
   }
 }
 
-extension Range : CustomDebugStringConvertible {
+@_unavailableInEmbedded
+extension Range: CustomDebugStringConvertible {
   /// A textual representation of the range, suitable for debugging.
   public var debugDescription: String {
     return "Range(\(String(reflecting: lowerBound))"
@@ -360,12 +393,14 @@ extension Range : CustomDebugStringConvertible {
   }
 }
 
-extension Range : CustomReflectable {
+#if SWIFT_ENABLE_REFLECTION
+extension Range: CustomReflectable {
   public var customMirror: Mirror {
     return Mirror(
       self, children: ["lowerBound": lowerBound, "upperBound": upperBound])
   }
 }
+#endif
 
 extension Range: Equatable {
   /// Returns a Boolean value indicating whether two ranges are equal.
@@ -405,6 +440,7 @@ extension Range: Hashable where Bound: Hashable {
   }
 }
 
+@_unavailableInEmbedded
 extension Range: Decodable where Bound: Decodable {
   public init(from decoder: Decoder) throws {
     var container = try decoder.unkeyedContainer()
@@ -416,10 +452,11 @@ extension Range: Decodable where Bound: Decodable {
           codingPath: decoder.codingPath,
           debugDescription: "Cannot initialize \(Range.self) with a lowerBound (\(lowerBound)) greater than upperBound (\(upperBound))"))
     }
-    self.init(uncheckedBounds: (lower: lowerBound, upper: upperBound))
+    self.init(_uncheckedBounds: (lower: lowerBound, upper: upperBound))
   }
 }
 
+@_unavailableInEmbedded
 extension Range: Encodable where Bound: Encodable {
   public func encode(to encoder: Encoder) throws {
     var container = encoder.unkeyedContainer()
@@ -449,7 +486,7 @@ extension Range: Encodable where Bound: Encodable {
 ///     let numbers = [10, 20, 30, 40, 50, 60, 70]
 ///     print(numbers[..<3])
 ///     // Prints "[10, 20, 30]"
-@_fixed_layout
+@frozen
 public struct PartialRangeUpTo<Bound: Comparable> {
   public let upperBound: Bound
   
@@ -470,6 +507,7 @@ extension PartialRangeUpTo: RangeExpression {
   }
 }
 
+@_unavailableInEmbedded
 extension PartialRangeUpTo: Decodable where Bound: Decodable {
   public init(from decoder: Decoder) throws {
     var container = try decoder.unkeyedContainer()
@@ -477,6 +515,7 @@ extension PartialRangeUpTo: Decodable where Bound: Decodable {
   }
 }
 
+@_unavailableInEmbedded
 extension PartialRangeUpTo: Encodable where Bound: Encodable {
   public func encode(to encoder: Encoder) throws {
     var container = encoder.unkeyedContainer()
@@ -505,7 +544,7 @@ extension PartialRangeUpTo: Encodable where Bound: Encodable {
 ///     let numbers = [10, 20, 30, 40, 50, 60, 70]
 ///     print(numbers[...3])
 ///     // Prints "[10, 20, 30, 40]"
-@_fixed_layout
+@frozen
 public struct PartialRangeThrough<Bound: Comparable> {  
   public let upperBound: Bound
   
@@ -525,6 +564,7 @@ extension PartialRangeThrough: RangeExpression {
   }
 }
 
+@_unavailableInEmbedded
 extension PartialRangeThrough: Decodable where Bound: Decodable {
   public init(from decoder: Decoder) throws {
     var container = try decoder.unkeyedContainer()
@@ -532,6 +572,7 @@ extension PartialRangeThrough: Decodable where Bound: Decodable {
   }
 }
 
+@_unavailableInEmbedded
 extension PartialRangeThrough: Encodable where Bound: Encodable {
   public func encode(to encoder: Encoder) throws {
     var container = encoder.unkeyedContainer()
@@ -620,7 +661,7 @@ extension PartialRangeThrough: Encodable where Bound: Encodable {
 /// `Bound`. For example, iterating over an instance of
 /// `PartialRangeFrom<Int>` traps when the sequence's next value would be
 /// above `Int.max`.
-@_fixed_layout
+@frozen
 public struct PartialRangeFrom<Bound: Comparable> {
   public let lowerBound: Bound
 
@@ -642,12 +683,12 @@ extension PartialRangeFrom: RangeExpression {
 }
 
 extension PartialRangeFrom: Sequence
-  where Bound : Strideable, Bound.Stride : SignedInteger
+  where Bound: Strideable, Bound.Stride: SignedInteger
 {
   public typealias Element = Bound
 
   /// The iterator for a `PartialRangeFrom` instance.
-  @_fixed_layout
+  @frozen
   public struct Iterator: IteratorProtocol {
     @usableFromInline
     internal var _current: Bound
@@ -675,6 +716,7 @@ extension PartialRangeFrom: Sequence
   }
 }
 
+@_unavailableInEmbedded
 extension PartialRangeFrom: Decodable where Bound: Decodable {
   public init(from decoder: Decoder) throws {
     var container = try decoder.unkeyedContainer()
@@ -682,6 +724,7 @@ extension PartialRangeFrom: Decodable where Bound: Decodable {
   }
 }
 
+@_unavailableInEmbedded
 extension PartialRangeFrom: Encodable where Bound: Encodable {
   public func encode(to encoder: Encoder) throws {
     var container = encoder.unkeyedContainer()
@@ -704,11 +747,13 @@ extension Comparable {
   /// - Parameters:
   ///   - minimum: The lower bound for the range.
   ///   - maximum: The upper bound for the range.
+  ///
+  /// - Precondition: `minimum <= maximum`.
   @_transparent
   public static func ..< (minimum: Self, maximum: Self) -> Range<Self> {
     _precondition(minimum <= maximum,
-      "Can't form Range with upperBound < lowerBound")
-    return Range(uncheckedBounds: (lower: minimum, upper: maximum))
+      "Range requires lowerBound <= upperBound")
+    return Range(_uncheckedBounds: (lower: minimum, upper: maximum))
   }
 
   /// Returns a partial range up to, but not including, its upper bound.
@@ -733,8 +778,12 @@ extension Comparable {
   ///     // Prints "[10, 20, 30]"
   ///
   /// - Parameter maximum: The upper bound for the range.
+  ///
+  /// - Precondition: `maximum` must compare equal to itself (i.e. cannot be NaN).
   @_transparent
   public static prefix func ..< (maximum: Self) -> PartialRangeUpTo<Self> {
+    _precondition(maximum == maximum,
+      "Range cannot have an unordered upper bound.")
     return PartialRangeUpTo(maximum)
   }
 
@@ -760,8 +809,12 @@ extension Comparable {
   ///     // Prints "[10, 20, 30, 40]"
   ///
   /// - Parameter maximum: The upper bound for the range.
+  ///
+  /// - Precondition: `maximum` must compare equal to itself (i.e. cannot be NaN).
   @_transparent
   public static prefix func ... (maximum: Self) -> PartialRangeThrough<Self> {
+    _precondition(maximum == maximum,
+      "Range cannot have an unordered upper bound.")
     return PartialRangeThrough(maximum)
   }
 
@@ -787,8 +840,12 @@ extension Comparable {
   ///     // Prints "[40, 50, 60, 70]"
   ///
   /// - Parameter minimum: The lower bound for the range.
+  ///
+  /// - Precondition: `minimum` must compare equal to itself (i.e. cannot be NaN).
   @_transparent
   public static postfix func ... (minimum: Self) -> PartialRangeFrom<Self> {
+    _precondition(minimum == minimum,
+      "Range cannot have an unordered lower bound.")
     return PartialRangeFrom(minimum)
   }
 }
@@ -827,7 +884,7 @@ extension Comparable {
 ///     let word2 = "grisly"
 ///     let changes = countLetterChanges(word1[...], word2[...])
 ///     // changes == 2
-@_frozen // namespace
+@frozen // namespace
 public enum UnboundedRange_ {
   // FIXME: replace this with a computed var named `...` when the language makes
   // that possible.
@@ -943,23 +1000,54 @@ extension Range {
   ///   common; otherwise, `false`.
   @inlinable
   public func overlaps(_ other: Range<Bound>) -> Bool {
-    return (!other.isEmpty && self.contains(other.lowerBound))
-        || (!self.isEmpty && other.contains(self.lowerBound))
+    // Disjoint iff the other range is completely before or after our range.
+    // Additionally either `Range` (unlike a `ClosedRange`) could be empty, in
+    // which case it is disjoint with everything as overlap is defined as having
+    // an element in common.
+    let isDisjoint = other.upperBound <= self.lowerBound
+      || self.upperBound <= other.lowerBound
+      || self.isEmpty || other.isEmpty
+    return !isDisjoint
   }
 
   @inlinable
   public func overlaps(_ other: ClosedRange<Bound>) -> Bool {
-    return self.contains(other.lowerBound)
-        || (!self.isEmpty && other.contains(self.lowerBound))
+    // Disjoint iff the other range is completely before or after our range.
+    // Additionally the `Range` (unlike the `ClosedRange`) could be empty, in
+    // which case it is disjoint with everything as overlap is defined as having
+    // an element in common.
+    let isDisjoint = other.upperBound < self.lowerBound
+      || self.upperBound <= other.lowerBound
+      || self.isEmpty
+    return !isDisjoint
   }
 }
 
 // Note: this is not for compatibility only, it is considered a useful
 // shorthand. TODO: Add documentation
 public typealias CountableRange<Bound: Strideable> = Range<Bound>
-  where Bound.Stride : SignedInteger
+  where Bound.Stride: SignedInteger
 
 // Note: this is not for compatibility only, it is considered a useful
 // shorthand. TODO: Add documentation
 public typealias CountablePartialRangeFrom<Bound: Strideable> = PartialRangeFrom<Bound>
-  where Bound.Stride : SignedInteger
+  where Bound.Stride: SignedInteger
+
+extension Range: Sendable where Bound: Sendable { }
+extension PartialRangeUpTo: Sendable where Bound: Sendable { }
+extension PartialRangeThrough: Sendable where Bound: Sendable { }
+extension PartialRangeFrom: Sendable where Bound: Sendable { }
+extension PartialRangeFrom.Iterator: Sendable where Bound: Sendable { }
+
+#if !$Embedded
+extension Range where Bound == String.Index {
+  @_alwaysEmitIntoClient // Swift 5.7
+  internal var _encodedOffsetRange: Range<Int> {
+    _internalInvariant(
+      (lowerBound._canBeUTF8 && upperBound._canBeUTF8)
+      || (lowerBound._canBeUTF16 && upperBound._canBeUTF16))
+    return Range<Int>(
+      _uncheckedBounds: (lowerBound._encodedOffset, upperBound._encodedOffset))
+  }
+}
+#endif

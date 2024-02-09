@@ -1,12 +1,8 @@
 // RUN: %empty-directory(%t)
 //
 // RUN: %gyb %s -o %t/main.swift
-// RUN: if [ %target-runtime == "objc" ]; then \
-// RUN:   %target-clang -fobjc-arc %S/Inputs/SlurpFastEnumeration/SlurpFastEnumeration.m -c -o %t/SlurpFastEnumeration.o; \
-// RUN:   %line-directive %t/main.swift -- %target-build-swift %S/Inputs/DictionaryKeyValueTypes.swift %S/Inputs/DictionaryKeyValueTypesObjC.swift %t/main.swift -I %S/Inputs/SlurpFastEnumeration/ -Xlinker %t/SlurpFastEnumeration.o -o %t/Dictionary -Xfrontend -disable-access-control; \
-// RUN: else \
-// RUN:   %line-directive %t/main.swift -- %target-build-swift %S/Inputs/DictionaryKeyValueTypes.swift %t/main.swift -o %t/Dictionary -Xfrontend -disable-access-control; \
-// RUN: fi
+// RUN: %target-clang -fobjc-arc %S/Inputs/SlurpFastEnumeration/SlurpFastEnumeration.m -c -o %t/SlurpFastEnumeration.o
+// RUN: %line-directive %t/main.swift -- %target-build-swift %S/Inputs/DictionaryKeyValueTypes.swift %S/Inputs/DictionaryKeyValueTypesObjC.swift %t/main.swift -I %S/Inputs/SlurpFastEnumeration/ -Xlinker %t/SlurpFastEnumeration.o -o %t/Dictionary -Xfrontend -disable-access-control
 //
 // RUN: %target-codesign %t/Dictionary && %line-directive %t/main.swift -- %target-run %t/Dictionary
 // REQUIRES: executable_test
@@ -65,7 +61,7 @@ DictionaryTestSuite.test("AssociatedTypes") {
 
 DictionaryTestSuite.test("sizeof") {
   var dict = [1: "meow", 2: "meow"]
-#if arch(i386) || arch(arm)
+#if _pointerBitWidth(_32)
   expectEqual(4, MemoryLayout.size(ofValue: dict))
 #else
   expectEqual(8, MemoryLayout.size(ofValue: dict))
@@ -2017,6 +2013,19 @@ DictionaryTestSuite.test("mapValues(_:)") {
   }
 }
 
+DictionaryTestSuite.test("filter(_:)") {
+  let d1 = [1: 1, 2: 2, 3: 100, 4: 4, 5: 100, 6: 6]
+  let d2 = d1.filter() {key, value in key == value}
+
+  expectEqual(d2.count, 4)
+  for (key, value) in d2 {
+    expectEqual(key, value)
+  }
+
+  expectNil(d2[3])
+  expectNil(d2[5])
+}
+
 DictionaryTestSuite.test("capacity/init(minimumCapacity:)") {
   let d0 = Dictionary<String, Int>(minimumCapacity: 0)
   expectGE(d0.capacity, 0)
@@ -3004,7 +3013,9 @@ DictionaryTestSuite.test("BridgedFromObjC.Verbatim.RemoveAll") {
 }
 
 DictionaryTestSuite.test("BridgedFromObjC.Nonverbatim.RemoveAll") {
-  do {
+  if #available(macOS 15.0, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
+    // Identity of empty dictionaries changed in
+    // https://github.com/apple/swift/pull/22527
     var d = getBridgedNonverbatimDictionary([:])
     assert(isNativeDictionary(d))
     assert(d.count == 0)
@@ -3087,7 +3098,6 @@ DictionaryTestSuite.test("BridgedFromObjC.Nonverbatim.RemoveAll") {
     assert(d2[TestBridgedKeyTy(10)] == nil)
   }
 }
-
 
 DictionaryTestSuite.test("BridgedFromObjC.Verbatim.Count") {
   let d = getBridgedVerbatimDictionary()
@@ -3298,6 +3308,12 @@ DictionaryTestSuite.test("BridgedFromObjC.Verbatim.EqualityTest_Empty") {
 }
 
 DictionaryTestSuite.test("BridgedFromObjC.Nonverbatim.EqualityTest_Empty") {
+  guard #available(macOS 15.0, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else {
+    // Identity of empty dictionaries changed in
+    // https://github.com/apple/swift/pull/22527
+    return
+  }
+
   let d1 = getBridgedNonverbatimEquatableDictionary([:])
   let identity1 = d1._rawIdentifier()
   assert(isNativeDictionary(d1))
@@ -3319,7 +3335,6 @@ DictionaryTestSuite.test("BridgedFromObjC.Nonverbatim.EqualityTest_Empty") {
   assert(identity1 == d1._rawIdentifier())
   assert(identity2 != d2._rawIdentifier())
 }
-
 
 DictionaryTestSuite.test("BridgedFromObjC.Verbatim.EqualityTest_Small") {
   func helper(_ nd1: Dictionary<Int, Int>, _ nd2: Dictionary<Int, Int>, _ expectedEq: Bool) {
@@ -3472,6 +3487,21 @@ DictionaryTestSuite.test("BridgedFromObjC.Nonverbatim.StringEqualityMismatch") {
   let v = d["Café"]
   expectTrue(v == 42 || v == 23)
 }
+
+DictionaryTestSuite.test("Upcast.StringEqualityMismatch") {
+  // Upcasting from NSString to String keys changes their concept of equality,
+  // resulting in two equal keys, one of which should be discarded by the
+  // downcast. (Along with its associated value.)
+  // rdar://problem/35995647
+  let d: Dictionary<NSString, NSObject> = [
+    "cafe\u{301}": 1 as NSNumber,
+    "café": 2 as NSNumber,
+  ]
+  expectEqual(d.count, 2)
+  let d2 = d as Dictionary<String, NSObject>
+  expectEqual(d2.count, 1)
+}
+
 
 DictionaryTestSuite.test("BridgedFromObjC.Verbatim.OptionalDowncastFailure") {
   let nsd = NSDictionary(
@@ -3870,6 +3900,8 @@ func checkGetObjectsAndKeys(
   values.deinitialize(count: storageSize) // noop
   values.deallocate()
   withExtendedLifetime(canary) {}
+  // [NSArray getObjects] does not retain the objects, so keep the dictionary alive.
+  withExtendedLifetime(dictionary) {}
 }
 
 DictionaryTestSuite.test("BridgedToObjC.Verbatim.getObjects:andKeys:count:") {
@@ -5063,6 +5095,8 @@ DictionaryTestSuite.test("getObjects:andKeys:count:") {
   d.available_getObjects(vp, andKeys: kp, count: 2)
   expectEqual(expectedKeys, Array(keys))
   expectEqual(expectedValues, Array(values))
+  // [NSArray getObjects] does not retain the objects, so keep the dictionary alive.
+  withExtendedLifetime(d) {}
 }
 #endif
 
@@ -5142,7 +5176,7 @@ DictionaryTestSuite.test("updateValue") {
 
 DictionaryTestSuite.test("localHashSeeds") {
   // With global hashing, copying elements in hash order between hash tables
-  // can become quadratic. (See https://bugs.swift.org/browse/SR-3268)
+  // can become quadratic (see https://github.com/apple/swift/issues/45856).
   //
   // We defeat this by mixing the local storage capacity into the global hash
   // seed, thereby breaking the correlation between bucket indices across
@@ -5700,14 +5734,14 @@ DictionaryTestSuite.test("BulkLoadingInitializer.Unique") {
     let d1 = Dictionary<TestKeyTy, TestEquatableValueTy>(
       _unsafeUninitializedCapacity: c,
       allowingDuplicates: false
-    ) { keys, values, count in
+    ) { keys, values in
       let k = keys.baseAddress!
       let v = values.baseAddress!
       for i in 0 ..< c {
         (k + i).initialize(to: TestKeyTy(i))
         (v + i).initialize(to: TestEquatableValueTy(i))
-        count += 1
       }
+      return c
     }
 
     let d2 = Dictionary(
@@ -5727,14 +5761,14 @@ DictionaryTestSuite.test("BulkLoadingInitializer.Nonunique") {
     let d1 = Dictionary<TestKeyTy, TestEquatableValueTy>(
       _unsafeUninitializedCapacity: c,
       allowingDuplicates: true
-    ) { keys, values, count in
+    ) { keys, values in
       let k = keys.baseAddress!
       let v = values.baseAddress!
       for i in 0 ..< c {
         (k + i).initialize(to: TestKeyTy(i / 2))
         (v + i).initialize(to: TestEquatableValueTy(i / 2))
-        count += 1
       }
+      return c
     }
 
     let d2 = Dictionary(

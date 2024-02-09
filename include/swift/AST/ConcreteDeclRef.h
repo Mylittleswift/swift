@@ -17,10 +17,10 @@
 #ifndef SWIFT_AST_CONCRETEDECLREF_H
 #define SWIFT_AST_CONCRETEDECLREF_H
 
+#include "swift/Basic/Debug.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/AST/SubstitutionMap.h"
 #include "swift/AST/TypeAlignments.h"
-#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/PointerUnion.h"
 #include "llvm/Support/Compiler.h"
 #include <cstring>
@@ -68,6 +68,9 @@ public:
   /// Retrieve a reference to the declaration this one overrides.
   ConcreteDeclRef getOverriddenDecl() const;
 
+  /// Retrieve a reference to the given declaration that this one overrides.
+  ConcreteDeclRef getOverriddenDecl(ValueDecl *overriddenDecl) const;
+
   /// Determine whether this reference specializes the declaration to which
   /// it refers.
   bool isSpecialized() const { return !substitutions.empty(); }
@@ -81,8 +84,8 @@ public:
   }
   
   /// Dump a debug representation of this reference.
-  void dump(raw_ostream &os);
-  void dump() LLVM_ATTRIBUTE_USED;
+  void dump(raw_ostream &os) const;
+  SWIFT_DEBUG_DUMP;
 };
 
 } // end namespace swift

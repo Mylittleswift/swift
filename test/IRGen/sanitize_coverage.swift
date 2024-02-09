@@ -1,3 +1,4 @@
+// REQUIRES: asan_runtime
 // RUN: %target-swift-frontend -emit-ir -sanitize=address -sanitize-coverage=func %s | %FileCheck %s -check-prefix=SANCOV
 // RUN: %target-swift-frontend -emit-ir -sanitize=address -sanitize-coverage=bb %s | %FileCheck %s -check-prefix=SANCOV
 // RUN: %target-swift-frontend -emit-ir -sanitize=address -sanitize-coverage=edge %s | %FileCheck %s -check-prefix=SANCOV
@@ -7,13 +8,15 @@
 // RUN: %target-swift-frontend -emit-ir -sanitize=address -sanitize-coverage=edge,indirect-calls %s | %FileCheck %s -check-prefix=SANCOV -check-prefix=SANCOV_INDIRECT_CALLS
 // RUN: %target-swift-frontend -emit-ir -sanitize=address -sanitize-coverage=edge,8bit-counters %s | %FileCheck %s -check-prefix=SANCOV -check-prefix=SANCOV_8BIT_COUNTERS
 // RUN: %target-swift-frontend -emit-ir -sanitize=fuzzer %s | %FileCheck %s -check-prefix=SANCOV -check-prefix=SANCOV_TRACE_CMP
+// These sanitizers aren't supported when targeting Wasm.
+// UNSUPPORTED: wasm
 
-#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+#if canImport(Darwin)
   import Darwin
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
+#elseif canImport(Glibc)
   import Glibc
 #elseif os(Windows)
-  import MSVCRT
+  import CRT
 #else
 #error("Unsupported platform")
 #endif
@@ -22,7 +25,7 @@
 // LLVM IR generated from this code.
 func test() {
   // Use random numbers so the compiler can't constant fold
-#if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
+#if canImport(Darwin)
   let x = arc4random()
   let y = arc4random()
 #else
@@ -39,6 +42,6 @@ test()
 // FIXME: We need a way to distinguish the different types of coverage instrumentation
 // that isn't really fragile. For now just check there's at least one call to the function
 // used to increment coverage count at a particular PC.
-// SANCOV: call void @__sanitizer_cov
-
 // SANCOV_TRACE_CMP: call void @__sanitizer_cov_trace_cmp
+
+// SANCOV: call void @__sanitizer_cov

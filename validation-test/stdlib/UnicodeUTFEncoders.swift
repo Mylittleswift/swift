@@ -5,6 +5,9 @@
 // REQUIRES: executable_test
 // REQUIRES: objc_interop
 
+// With a non-optimized stdlib the test takes very long.
+// REQUIRES: optimized_stdlib
+
 import SwiftPrivate
 import StdlibUnittest
 
@@ -81,14 +84,17 @@ func nsEncode<CodeUnit>(
     length: 4,
     encoding: String.Encoding.utf32LittleEndian.rawValue)!
 
-  s.getBytes(
-    &buffer,
-    maxLength: buffer.count,
-    usedLength: &used,
-    encoding: encoding.rawValue,
-    options: [],
-    range: NSRange(location: 0, length: s.length),
-    remaining: nil)
+  let count = buffer.count
+  _ = buffer.withUnsafeMutableBytes { bufferBytes in
+    s.getBytes(
+      bufferBytes.baseAddress,
+      maxLength: count,
+      usedLength: &used,
+      encoding: encoding.rawValue,
+      options: [],
+      range: NSRange(location: 0, length: s.length),
+      remaining: nil)
+  }
 }
 
 final class CodecTest<Codec : TestableUnicodeCodec> {

@@ -1,5 +1,6 @@
 // RUN: %target-run-simple-swift
 // REQUIRES: executable_test
+// REQUIRES: reflection
 
 import StdlibUnittest
 import Swift
@@ -304,12 +305,14 @@ OptionalTests.test("Casting Optional") {
   expectTrue(anyToAny(x, Optional<Optional<C>>.self)!! === x)
   expectTrue(anyToAnyOrNil(ni, Int.self) == nil)
 
-  // Test for SR-459: Weakened optionals don't zero.
+  // https://github.com/apple/swift/issues/43076
+  // Weakened optionals don't zero
   var t = LifetimeTracked(0)
   _ = anyToAny(Optional(t), CustomDebugStringConvertible.self)
   expectTrue(anyToAnyIs(Optional(t), CustomDebugStringConvertible.self))
 
-  // Test for SR-912: Runtime exception casting an Any nil to an Optional.
+  // https://github.com/apple/swift/issues/43524
+  // Runtime exception casting an 'Any' nil to an 'Optional'
   let oi: Int? = nil
   expectTrue(anyToAny(oi as Any, Optional<Int>.self) == nil)
   expectTrue(anyToAnyIs(oi as Any, Optional<Int>.self))
@@ -338,6 +341,8 @@ OptionalTests.test("Casting Optional") {
   expectTrue(anyToAnyIsOptional(Optional<(String, String)>.none, Bool.self))
 }
 
+#if !os(WASI)
+// Trap tests aren't available on WASI.
 OptionalTests.test("Casting Optional Traps") {
   let nx: C? = nil
   expectCrash { _blackHole(anyToAny(nx, Int.self)) }
@@ -346,6 +351,7 @@ OptionalTests.test("Casting Optional Any Traps") {
   let nx: X? = X()
   expectCrash { _blackHole(anyToAny(nx as Any, Optional<Int>.self)) }
 }
+#endif
 
 class TestNoString {}
 class TestString : CustomStringConvertible, CustomDebugStringConvertible {
@@ -407,6 +413,8 @@ OptionalTests.test("unsafelyUnwrapped") {
   expectEqual(3, nonEmpty.unsafelyUnwrapped)
 }
 
+#if !os(WASI)
+// Trap tests aren't available on WASI.
 OptionalTests.test("unsafelyUnwrapped nil")
   .xfail(.custom(
     { !_isDebugAssertConfiguration() },
@@ -416,5 +424,6 @@ OptionalTests.test("unsafelyUnwrapped nil")
   expectCrashLater()
   _blackHole(empty.unsafelyUnwrapped)
 }
+#endif
 
 runAllTests()

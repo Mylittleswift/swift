@@ -1,5 +1,6 @@
 // RUN: %target-run-simple-swift %t
 // REQUIRES: executable_test
+// UNSUPPORTED: freestanding
 
 import StdlibUnittest
 
@@ -22,7 +23,7 @@ UnicodeScalarPropertiesTests.test("properties.booleanProperties") {
       falseScalar.properties[keyPath: keyPath], message, file: file, line: line)
   }
 
-  // Some sanity checks for basic properties. Not intended to be comprehensive.
+  // Some soundness checks for basic properties. Not intended to be comprehensive.
   expectBooleanProperty(\.isAlphabetic, trueFor: "A", falseFor: "5")
   expectBooleanProperty(\.isASCIIHexDigit, trueFor: "F", falseFor: "G")
   // U+200E LEFT-TO-RIGHT MARK
@@ -82,7 +83,7 @@ UnicodeScalarPropertiesTests.test("properties.booleanProperties") {
   expectBooleanProperty(\.changesWhenCaseMapped, trueFor: "A", falseFor: "!")
   expectBooleanProperty(\.changesWhenNFKCCaseFolded, trueFor: "A", falseFor: "!")
 
-#if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
+#if canImport(Darwin)
   if #available(macOS 10.12.2, iOS 10.2, tvOS 10.1, watchOS 3.1.1, *) {
     // U+2708 AIRPLANE
     expectBooleanProperty(\.isEmoji, trueFor: "\u{2708}", falseFor: "A")

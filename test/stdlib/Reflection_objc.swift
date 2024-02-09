@@ -3,14 +3,14 @@
 // RUN: %target-clang %S/Inputs/Mirror/Mirror.mm -c -o %t/Mirror.mm.o -g
 // RUN: %target-build-swift -parse-stdlib %s -module-name Reflection -I %S/Inputs/Mirror/ -Xlinker %t/Mirror.mm.o -o %t/a.out
 // RUN: %target-codesign %t/a.out
-// RUN: %{python} %S/timeout.py 360 %target-run %t/a.out %S/Inputs/shuffle.jpg | %FileCheck %s
+// RUN: %{python} %S/../Inputs/timeout.py 360 %target-run %t/a.out %S/Inputs/shuffle.jpg | %FileCheck %s
 // FIXME: timeout wrapper is necessary because the ASan test runs for hours
 
 // REQUIRES: executable_test
 // REQUIRES: objc_interop
 
-// Requires swift-version 4
-// UNSUPPORTED: swift_test_mode_optimize_none_with_implicit_dynamic
+// UNSUPPORTED: use_os_stdlib
+// UNSUPPORTED: back_deployment_runtime
 
 //
 // DO NOT add more tests to this file.  Add them to test/1_stdlib/Runtime.swift.
@@ -21,20 +21,20 @@ import Swift
 import Foundation
 import simd
 
-#if os(macOS)
+#if canImport(AppKit)
 import AppKit
 
 typealias OSImage = NSImage
 typealias OSColor = NSColor
 typealias OSBezierPath = NSBezierPath
-#endif
-
-#if os(iOS) || os(tvOS) || os(watchOS)
+#elseif canImport(UIKit)
 import UIKit
 
 typealias OSImage = UIImage
 typealias OSColor = UIColor
 typealias OSBezierPath = UIBezierPath
+#else
+#error("Platform does not support UIKit or AppKit!")
 #endif
 
 // Check ObjC mirror implementation.
@@ -69,8 +69,8 @@ print("ObjC quick look objects:")
 // CHECK-LABEL: ObjC enums:
 print("ObjC enums:")
 
-// CHECK-NEXT: We cannot reflect NSComparisonResult yet
-print("We cannot reflect \(ComparisonResult.orderedAscending) yet")
+// CHECK-NEXT: We cannot properly reflect NSComparisonResult(rawValue: -1) yet
+print("We cannot properly reflect \(ComparisonResult.orderedAscending) yet")
 
 // Don't crash when introspecting framework types such as NSURL.
 // <rdar://problem/16592777>

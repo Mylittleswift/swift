@@ -34,12 +34,13 @@ class Traversal : public TypeVisitor<Traversal, bool>
 
   bool visitErrorType(ErrorType *ty) { return false; }
   bool visitUnresolvedType(UnresolvedType *ty) { return false; }
+  bool visitPlaceholderType(PlaceholderType *ty) { return false; }
   bool visitBuiltinType(BuiltinType *ty) { return false; }
   bool visitTypeAliasType(TypeAliasType *ty) {
     if (auto parent = ty->getParent())
       if (doIt(parent)) return true;
 
-    for (auto arg : ty->getInnermostGenericArgs())
+    for (const auto &arg : ty->getDirectGenericArgs())
       if (doIt(arg))
         return true;
     
@@ -47,6 +48,31 @@ class Traversal : public TypeVisitor<Traversal, bool>
 
   }
   bool visitSILTokenType(SILTokenType *ty) { return false; }
+
+  bool visitPackType(PackType *ty) {
+    for (auto elementTy : ty->getElementTypes())
+      if (doIt(elementTy))
+        return true;
+    return false;
+  }
+
+  bool visitSILPackType(SILPackType *ty) {
+    for (auto elementTy : ty->getElementTypes())
+      if (doIt(elementTy))
+        return true;
+    return false;
+  }
+
+  bool visitPackExpansionType(PackExpansionType *ty) {
+    if (doIt(ty->getCountType()))
+      return true;
+
+    return doIt(ty->getPatternType());
+  }
+
+  bool visitPackElementType(PackElementType *ty) {
+    return doIt(ty->getPackType());
+  }
 
   bool visitParenType(ParenType *ty) {
     return doIt(ty->getUnderlyingType());
@@ -89,6 +115,11 @@ class Traversal : public TypeVisitor<Traversal, bool>
         return true;
     }
 
+    if (Type thrownError = ty->getThrownError()) {
+      if (doIt(thrownError))
+        return true;
+    }
+
     return doIt(ty->getResult());
   }
 
@@ -102,6 +133,7 @@ class Traversal : public TypeVisitor<Traversal, bool>
         return true;
 
       switch (req.getKind()) {
+      case RequirementKind::SameShape:
       case RequirementKind::SameType:
       case RequirementKind::Conformance:
       case RequirementKind::Superclass:
@@ -117,14 +149,32 @@ class Traversal : public TypeVisitor<Traversal, bool>
   }
 
   bool visitSILFunctionType(SILFunctionType *ty) {
+    // TODO: Should this be the only kind of walk we allow?
+    if (auto subs = ty->getInvocationSubstitutions()) {
+      for (auto paramTy : subs.getReplacementTypes()) {
+        if (doIt(paramTy))
+          return true;
+      }
+
+      return false;
+    }
+    if (auto subs = ty->getPatternSubstitutions()) {
+      for (auto paramTy : subs.getReplacementTypes()) {
+        if (doIt(paramTy))
+          return true;
+      }
+
+      return false;
+    }
+    
     for (auto param : ty->getParameters())
-      if (doIt(param.getType()))
+      if (doIt(param.getInterfaceType()))
         return true;
     for (auto result : ty->getResults())
-      if (doIt(result.getType()))
+      if (doIt(result.getInterfaceType()))
         return true;
     if (ty->hasErrorResult())
-      if (doIt(ty->getErrorResult().getType()))
+      if (doIt(ty->getErrorResult().getInterfaceType()))
         return true;
     return false;
   }
@@ -142,6 +192,21 @@ class Traversal : public TypeVisitor<Traversal, bool>
       if (doIt(member))
         return true;
     return false;
+  }
+
+  bool visitParameterizedProtocolType(ParameterizedProtocolType *ty) {
+    if (doIt(ty->getBaseType()))
+      return true;
+
+    for (auto arg : ty->getArgs())
+      if (doIt(arg))
+        return true;
+
+    return false;
+  }
+
+  bool visitExistentialType(ExistentialType *ty) {
+    return doIt(ty->getConstraintType());
   }
 
   bool visitLValueType(LValueType *ty) {
@@ -169,11 +234,35 @@ class Traversal : public TypeVisitor<Traversal, bool>
 
     return false;
   }
+  
+  bool visitArchetypeType(ArchetypeType *ty) {
+    // If the root is an opaque archetype, visit its substitution replacement
+    // types.
+    if (auto opaque = dyn_cast<OpaqueTypeArchetypeType>(ty)) {
+      for (auto arg : opaque->getSubstitutions().getReplacementTypes()) {
+        if (doIt(arg)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
 
   bool visitTypeVariableType(TypeVariableType *ty) { return false; }
   
+  bool visitErrorUnionType(ErrorUnionType *ty) {
+    for (auto term : ty->getTerms())
+      if (doIt(term))
+        return true;
+    return false;
+  }
+
   bool visitSILBlockStorageType(SILBlockStorageType *ty) {
     return doIt(ty->getCaptureType());
+  }
+
+  bool visitSILMoveOnlyWrappedType(SILMoveOnlyWrappedType *ty) {
+    return doIt(ty->getInnerType());
   }
 
   bool visitSILBoxType(SILBoxType *ty) {
@@ -194,7 +283,7 @@ public:
     switch (Walker.walkToTypePre(ty)) {
     case TypeWalker::Action::Continue:
       break;
-    case TypeWalker::Action::SkipChildren:
+    case TypeWalker::Action::SkipNode:
       return false;
     case TypeWalker::Action::Stop:
       return true;
@@ -208,7 +297,7 @@ public:
     switch (Walker.walkToTypePost(ty)) {
     case TypeWalker::Action::Continue:
       return false;
-    case TypeWalker::Action::SkipChildren:
+    case TypeWalker::Action::SkipNode:
       llvm_unreachable("SkipChildren is not valid for a post-visit check");
     case TypeWalker::Action::Stop:
       return true;

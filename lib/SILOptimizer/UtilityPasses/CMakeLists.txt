@@ -1,7 +1,9 @@
-silopt_register_sources(
+target_sources(swiftSILOptimizer PRIVATE
   AADumper.cpp
   AccessSummaryDumper.cpp
-  AccessedStorageDumper.cpp
+  AccessPathVerification.cpp
+  AccessStorageAnalysisDumper.cpp
+  AccessStorageDumper.cpp
   BasicCalleePrinter.cpp
   BasicInstructionPropertyDumper.cpp
   BugReducerTester.cpp
@@ -9,23 +11,25 @@ silopt_register_sources(
   CallerAnalysisPrinter.cpp
   ComputeDominanceInfo.cpp
   ComputeLoopInfo.cpp
+  ConstantEvaluatorTester.cpp
+  ConstantEvaluableSubsetChecker.cpp
   EpilogueARCMatcherDumper.cpp
   EpilogueRetainReleaseMatcherDumper.cpp
-  EscapeAnalysisDumper.cpp
   FunctionOrderPrinter.cpp
   IVInfoPrinter.cpp
   InstCount.cpp
-  LSLocationPrinter.cpp
   Link.cpp
   LoopCanonicalizer.cpp
   LoopInfoPrinter.cpp
   LoopRegionPrinter.cpp
-  MemBehaviorDumper.cpp
+  ModulePrinter.cpp
   RCIdentityDumper.cpp
   SerializeSILPass.cpp
   SILDebugInfoGenerator.cpp
-  SideEffectsDumper.cpp
+  SILSkippingChecker.cpp
   SimplifyUnreachableContainingBlocks.cpp
   StripDebugInfo.cpp
-  ValueOwnershipKindDumper.cpp
-)
+  TestRunner.cpp
+  OwnershipDumper.cpp
+  OwnershipVerifierTextualErrorDumper.cpp)
+  

@@ -357,7 +357,7 @@ struct TestExplicitReturn {
       if flag {
         stored = 2
       }
-      return // expected-error {{accessor must yield before returning}}
+      return; // expected-error {{accessor must yield before returning}}
 
       if !flag { // expected-warning {{code after 'return' will never be executed}}
         stored = 3
@@ -503,7 +503,7 @@ enum Binary {
   case two
 }
 
-struct TestMutipleTries {
+struct TestMultipleTries {
   var stored: Int
   var computed: Int {
     _read {
@@ -590,7 +590,7 @@ struct TestMutipleTries {
   }
 }
 
-struct TestMutipleCatches {
+struct TestMultipleCatches {
   enum NumError: Error {
     case One
     case Two
@@ -601,7 +601,7 @@ struct TestMutipleCatches {
   var computed: Int {
     _read {
       // This is a very interesting test, where the error is on the try.
-      // It could have been been better if it is on the switch case in the
+      // It could have been better if it is on the switch case in the
       // error case.
       do {
         try aThrowingFunction() // expected-note {{missing yield when error is thrown}}

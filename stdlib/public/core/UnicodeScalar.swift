@@ -29,18 +29,18 @@ extension Unicode {
   /// You can also create Unicode scalar values directly from their numeric
   /// representation.
   ///
-  ///     let airplane = Unicode.Scalar(9992)
+  ///     let airplane = Unicode.Scalar(9992)!
   ///     print(airplane)
   ///     // Prints "✈︎"
-  @_fixed_layout
-  public struct Scalar {
+  @frozen
+  public struct Scalar: Sendable {
+    @usableFromInline
+    internal var _value: UInt32
+
     @inlinable
     internal init(_value: UInt32) {
       self._value = _value
     }
-
-    @usableFromInline
-    internal var _value: UInt32
   }
 }
 
@@ -171,7 +171,7 @@ extension Unicode.Scalar :
   /// Scalar values representing characters that are normally unprintable or
   /// that otherwise require escaping are escaped with a backslash.
   ///
-  ///     let tab = Unicode.Scalar(9)
+  ///     let tab = Unicode.Scalar(9)!
   ///     print(tab)
   ///     // Prints " "
   ///     print(tab.escaped(asASCII: false))
@@ -182,7 +182,7 @@ extension Unicode.Scalar :
   /// value; otherwise, non-ASCII characters are represented using their
   /// typical string value.
   ///
-  ///     let bap = Unicode.Scalar(48165)
+  ///     let bap = Unicode.Scalar(48165)!
   ///     print(bap.escaped(asASCII: false))
   ///     // Prints "밥"
   ///     print(bap.escaped(asASCII: true))
@@ -191,7 +191,13 @@ extension Unicode.Scalar :
   /// - Parameter forceASCII: Pass `true` if you need the result to use only
   ///   ASCII characters; otherwise, pass `false`.
   /// - Returns: A string representation of the scalar.
+  @_unavailableInEmbedded
   public func escaped(asASCII forceASCII: Bool) -> String {
+    _escaped(asASCII: forceASCII) ?? String(self)
+  }
+
+  @_unavailableInEmbedded
+  internal func _escaped(asASCII forceASCII: Bool) -> String? {
     func lowNibbleAsHex(_ v: UInt32) -> String {
       let nibble = v & 15
       if nibble < 10 {
@@ -208,7 +214,7 @@ extension Unicode.Scalar :
     } else if self == "\"" {
       return "\\\""
     } else if _isPrintableASCII {
-      return String(self)
+      return nil
     } else if self == "\0" {
       return "\\0"
     } else if self == "\n" {
@@ -222,7 +228,7 @@ extension Unicode.Scalar :
         + lowNibbleAsHex(UInt32(self) >> 4)
         + lowNibbleAsHex(UInt32(self)) + "}"
     } else if !forceASCII {
-      return String(self)
+      return nil
     } else if UInt32(self) <= 0xFFFF {
       var result = "\\u{"
       result += lowNibbleAsHex(UInt32(self) >> 12)
@@ -274,7 +280,8 @@ extension Unicode.Scalar :
   }
 }
 
-extension Unicode.Scalar : CustomStringConvertible, CustomDebugStringConvertible {
+@_unavailableInEmbedded
+extension Unicode.Scalar: CustomStringConvertible, CustomDebugStringConvertible {
   /// A textual representation of the Unicode scalar.
   @inlinable
   public var description: String {
@@ -288,7 +295,8 @@ extension Unicode.Scalar : CustomStringConvertible, CustomDebugStringConvertible
   }
 }
 
-extension Unicode.Scalar : LosslessStringConvertible {
+#if !$Embedded
+extension Unicode.Scalar: LosslessStringConvertible {
   @inlinable
   public init?(_ description: String) {
     let scalars = description.unicodeScalars
@@ -298,8 +306,9 @@ extension Unicode.Scalar : LosslessStringConvertible {
     self = v
   }
 }
+#endif
 
-extension Unicode.Scalar : Hashable {
+extension Unicode.Scalar: Hashable {
   /// Hashes the essential components of this value by feeding them into the
   /// given hasher.
   ///
@@ -323,7 +332,7 @@ extension Unicode.Scalar {
   /// with a value of an emoji character:
   ///
   ///     let codepoint = 127881
-  ///     let emoji = Unicode.Scalar(codepoint)
+  ///     let emoji = Unicode.Scalar(codepoint)!
   ///     print(emoji)
   ///     // Prints "🎉"
   ///
@@ -337,8 +346,8 @@ extension Unicode.Scalar {
   ///     }
   @inlinable
   public init?(_ v: Int) {
-    if let us = Unicode.Scalar(UInt32(v)) {
-      self = us
+    if let exact = UInt32(exactly: v) {
+      self.init(exact)
     } else {
       return nil
     }
@@ -371,14 +380,14 @@ extension UInt64 {
   }
 }
 
-extension Unicode.Scalar : Equatable {
+extension Unicode.Scalar: Equatable {
   @inlinable
   public static func == (lhs: Unicode.Scalar, rhs: Unicode.Scalar) -> Bool {
     return lhs.value == rhs.value
   }
 }
 
-extension Unicode.Scalar : Comparable {
+extension Unicode.Scalar: Comparable {
   @inlinable
   public static func < (lhs: Unicode.Scalar, rhs: Unicode.Scalar) -> Bool {
     return lhs.value < rhs.value
@@ -386,14 +395,15 @@ extension Unicode.Scalar : Comparable {
 }
 
 extension Unicode.Scalar {
-  @_fixed_layout
-  public struct UTF16View {
+  @frozen
+  public struct UTF16View: Sendable {
+    @usableFromInline
+    internal var value: Unicode.Scalar
+
     @inlinable
     internal init(value: Unicode.Scalar) {
       self.value = value
     }
-    @usableFromInline
-    internal var value: Unicode.Scalar
   }
 
   @inlinable
@@ -402,7 +412,9 @@ extension Unicode.Scalar {
   }
 }
 
-extension Unicode.Scalar.UTF16View : RandomAccessCollection {
+#if !$Embedded
+
+extension Unicode.Scalar.UTF16View: RandomAccessCollection {
 
   public typealias Indices = Range<Int>
 
@@ -428,9 +440,55 @@ extension Unicode.Scalar.UTF16View : RandomAccessCollection {
   ///   `endIndex` property.
   @inlinable
   public subscript(position: Int) -> UTF16.CodeUnit {
-    return position == 0 ? (
-      endIndex == 1 ? UTF16.CodeUnit(value.value) : UTF16.leadSurrogate(value)
-    ) : UTF16.trailSurrogate(value)
+    if position == 1 { return UTF16.trailSurrogate(value) }
+    if endIndex == 1 { return UTF16.CodeUnit(value.value) }
+    return UTF16.leadSurrogate(value)
+  }
+}
+
+extension Unicode.Scalar {
+  @available(SwiftStdlib 5.1, *)
+  @frozen
+  public struct UTF8View: Sendable {
+    @usableFromInline
+    internal var value: Unicode.Scalar
+
+    @inlinable
+    internal init(value: Unicode.Scalar) {
+      self.value = value
+    }
+  }
+
+  @available(SwiftStdlib 5.1, *)
+  @inlinable
+  public var utf8: UTF8View { return UTF8View(value: self) }
+}
+
+@available(SwiftStdlib 5.1, *)
+extension Unicode.Scalar.UTF8View: RandomAccessCollection {
+  public typealias Indices = Range<Int>
+
+  /// The position of the first code unit.
+  @inlinable
+  public var startIndex: Int { return 0 }
+
+  /// The "past the end" position---that is, the position one
+  /// greater than the last valid subscript argument.
+  ///
+  /// If the collection is empty, `endIndex` is equal to `startIndex`.
+  @inlinable
+  public var endIndex: Int { return 0 + UTF8.width(value) }
+
+  /// Accesses the code unit at the specified position.
+  ///
+  /// - Parameter position: The position of the element to access. `position`
+  ///   must be a valid index of the collection that is not equal to the
+  ///   `endIndex` property.
+  @inlinable
+  public subscript(position: Int) -> UTF8.CodeUnit {
+    _precondition(position >= startIndex && position < endIndex,
+      "Unicode.Scalar.UTF8View index is out of bounds")
+    return value.withUTF8CodeUnits { $0[position] }
   }
 }
 
@@ -477,7 +535,7 @@ extension Unicode.Scalar {
 
     // The first code unit is in the least significant byte of codeUnits.
     codeUnits = codeUnits.littleEndian
-    return try Swift.withUnsafePointer(to: &codeUnits) {
+    return try Swift._withUnprotectedUnsafePointer(to: &codeUnits) {
       return try $0.withMemoryRebound(to: UInt8.self, capacity: 4) {
         return try body(UnsafeBufferPointer(start: $0, count: utf8Count))
       }
@@ -485,3 +543,4 @@ extension Unicode.Scalar {
   }
 }
 
+#endif

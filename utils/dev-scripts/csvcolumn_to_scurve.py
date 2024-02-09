@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # This is a simple script that reads in a csv file, selects a column, and then
 # forms an "s-curve" graph of that column.
@@ -14,7 +14,10 @@ def get_data(input_file, before_column, after_column):
         for row in csv.DictReader(input_file):
             before = float(row[before_column])
             after = float(row[after_column])
-            delta = after / before
+            if before > 0:
+                delta = after / before
+            else:
+                delta = 1
             yield delta
 
     def f(input_data):

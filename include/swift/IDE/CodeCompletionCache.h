@@ -13,8 +13,11 @@
 #ifndef SWIFT_IDE_CODE_COMPLETIONCACHE_H
 #define SWIFT_IDE_CODE_COMPLETIONCACHE_H
 
-#include "swift/IDE/CodeCompletion.h"
 #include "swift/Basic/ThreadSafeRefCounted.h"
+#include "swift/IDE/CodeCompletion.h"
+#include "swift/IDE/CodeCompletionResult.h"
+#include "swift/IDE/CodeCompletionString.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/Support/Chrono.h"
 #include <system_error>
@@ -42,22 +45,39 @@ public:
     bool ResultsHaveLeadingDot;
     bool ForTestableLookup;
     bool ForPrivateImportLookup;
-    bool CodeCompleteInitsInPostfixExpr;
+    /// Must be sorted alphabetically for stable identity.
+    llvm::SmallVector<std::string, 2> SpiGroups;
+    bool AddInitsInToplevel;
+    bool AddCallWithNoDefaultArgs;
+    bool Annotated;
 
     friend bool operator==(const Key &LHS, const Key &RHS) {
       return LHS.ModuleFilename == RHS.ModuleFilename &&
-        LHS.ModuleName == RHS.ModuleName &&
-        LHS.AccessPath == RHS.AccessPath &&
-        LHS.ResultsHaveLeadingDot == RHS.ResultsHaveLeadingDot &&
-        LHS.ForTestableLookup == RHS.ForTestableLookup &&
-        LHS.ForPrivateImportLookup == RHS.ForPrivateImportLookup &&
-        LHS.CodeCompleteInitsInPostfixExpr == RHS.CodeCompleteInitsInPostfixExpr;
+             LHS.ModuleName == RHS.ModuleName &&
+             LHS.AccessPath == RHS.AccessPath &&
+             LHS.ResultsHaveLeadingDot == RHS.ResultsHaveLeadingDot &&
+             LHS.ForTestableLookup == RHS.ForTestableLookup &&
+             LHS.ForPrivateImportLookup == RHS.ForPrivateImportLookup &&
+             LHS.SpiGroups == RHS.SpiGroups &&
+             LHS.AddInitsInToplevel == RHS.AddInitsInToplevel &&
+             LHS.AddCallWithNoDefaultArgs == RHS.AddCallWithNoDefaultArgs &&
+             LHS.Annotated == RHS.Annotated;
     }
   };
 
   struct Value : public llvm::ThreadSafeRefCountedBase<Value> {
+    /// The allocator used to allocate the results stored in this cache.
+    std::shared_ptr<llvm::BumpPtrAllocator> Allocator;
+
     llvm::sys::TimePoint<> ModuleModificationTime;
-    CodeCompletionResultSink Sink;
+
+    std::vector<const ContextFreeCodeCompletionResult *> Results;
+
+    /// The arena that contains the \c USRBasedTypes of the
+    /// \c ContextFreeCodeCompletionResult in this cache value.
+    USRBasedTypeArena USRTypeArena;
+
+    Value() : Allocator(std::make_shared<llvm::BumpPtrAllocator>()) {}
   };
   using ValueRefCntPtr = llvm::IntrusiveRefCntPtr<Value>;
 
@@ -65,7 +85,7 @@ public:
   ~CodeCompletionCache();
 
   static ValueRefCntPtr createValue();
-  Optional<ValueRefCntPtr> get(const Key &K);
+  llvm::Optional<ValueRefCntPtr> get(const Key &K);
   void set(const Key &K, ValueRefCntPtr V) { setImpl(K, V, /*setChain*/ true); }
 
 private:
@@ -87,17 +107,16 @@ public:
   OnDiskCodeCompletionCache(Twine cacheDirectory);
   ~OnDiskCodeCompletionCache();
 
-  Optional<ValueRefCntPtr> get(const Key &K);
+  llvm::Optional<ValueRefCntPtr> get(const Key &K);
   std::error_code set(const Key &K, ValueRefCntPtr V);
 
-  static Optional<ValueRefCntPtr> getFromFile(StringRef filename);
+  static llvm::Optional<ValueRefCntPtr> getFromFile(StringRef filename);
 };
 
 struct RequestedCachedModule {
   CodeCompletionCache::Key Key;
   const ModuleDecl *TheModule;
-  bool OnlyTypes;
-  bool OnlyPrecedenceGroups;
+  CodeCompletionFilter Filter;
 };
 
 } // end namespace ide
@@ -108,21 +127,37 @@ template<>
 struct DenseMapInfo<swift::ide::CodeCompletionCache::Key> {
   using KeyTy = swift::ide::CodeCompletionCache::Key;
   static inline KeyTy getEmptyKey() {
-    return KeyTy{"", "", {}, false, false, false, false};
+    return KeyTy{/*ModuleFilename=*/"",
+                 /*ModuleName=*/"",
+                 /*AccessPath=*/{},
+                 /*ResultsHaveLeadingDot=*/false,
+                 /*ForTestableLookup=*/false,
+                 /*ForPrivateImportLookup=*/false,
+                 /*SpiGroups=*/{},
+                 /*AddInitsInToplevel=*/false,
+                 /*AddCallWithNoDefaultArgs=*/false,
+                 /*Annotated=*/false};
   }
   static inline KeyTy getTombstoneKey() {
-    return KeyTy{"", "", {}, true, false, false, false};
+    return KeyTy{/*ModuleFilename=*/"",
+                 /*ModuleName=*/"",
+                 /*AccessPath=*/{},
+                 /*ResultsHaveLeadingDot=*/true,
+                 /*ForTestableLookup=*/false,
+                 /*ForPrivateImportLookup=*/false,
+                 /*SpiGroups=*/{},
+                 /*AddInitsInToplevel=*/false,
+                 /*AddCallWithNoDefaultArgs=*/false,
+                 /*Annotated=*/false};
   }
   static unsigned getHashValue(const KeyTy &Val) {
-    size_t H = 0;
-    H ^= std::hash<std::string>()(Val.ModuleFilename);
-    H ^= std::hash<std::string>()(Val.ModuleName);
-    for (auto Piece : Val.AccessPath)
-      H ^= std::hash<std::string>()(Piece);
-    H ^= std::hash<bool>()(Val.ResultsHaveLeadingDot);
-    H ^= std::hash<bool>()(Val.ForTestableLookup);
-    H ^= std::hash<bool>()(Val.ForPrivateImportLookup);
-    return static_cast<unsigned>(H);
+    return llvm::hash_combine(
+        Val.ModuleFilename, Val.ModuleName,
+        llvm::hash_combine_range(Val.AccessPath.begin(), Val.AccessPath.end()),
+        Val.ResultsHaveLeadingDot, Val.ForTestableLookup,
+        llvm::hash_combine_range(Val.SpiGroups.begin(), Val.SpiGroups.end()),
+        Val.ForPrivateImportLookup, Val.AddInitsInToplevel,
+        Val.AddCallWithNoDefaultArgs, Val.Annotated);
   }
   static bool isEqual(const KeyTy &LHS, const KeyTy &RHS) {
     return LHS == RHS;

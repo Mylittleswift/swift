@@ -13,6 +13,9 @@
 module ucrt [system] {
   module C {
     module complex {
+      /* disallow the header in C++ mode as it forwards to `ccomplex`.  */
+      requires !cplusplus
+
       header "complex.h"
       export *
     }
@@ -29,6 +32,11 @@ module ucrt [system] {
 
     module fenv {
       header "fenv.h"
+      export *
+    }
+
+    module float {
+      header "float.h"
       export *
     }
 
@@ -95,6 +103,12 @@ module ucrt [system] {
 
         module stat {
           header "sys/stat.h"
+          header "direct.h"
+          export *
+        }
+
+        module timeb {
+          header "sys/timeb.h"
           export *
         }
 
@@ -111,30 +125,92 @@ module ucrt [system] {
     }
   }
 
+  module conio {
+    header "conio.h"
+    export *
+  }
+
+  module dos {
+    header "dos.h"
+    export *
+  }
+
+  module malloc {
+    header "malloc.h"
+    export *
+  }
+
+  module minmax {
+    header "minmax.h"
+    export *
+  }
+
+  module multibyte {
+    header "mbstring.h"
+    export *
+  }
+
   module process {
     header "process.h"
     export *
   }
 
-  module corecrt {
-    header "corecrt.h"
-    header "corecrt_stdio_config.h"
+  module wchar {
+    header "wchar.h"
     export *
+  }
+}
 
-    module io {
-      header "corecrt_io.h"
-      export *
-    }
+module corecrt [system] {
+  use vcruntime
 
-    module math {
-      header "corecrt_math.h"
-      export *
-    }
+  header "corecrt.h"
+  header "corecrt_stdio_config.h"
+  export *
 
-    module stdio {
-      header "corecrt_wstdio.h"
-      export *
-    }
+  module conio {
+    header "corecrt_wconio.h"
+    export *
+  }
+
+  module io {
+    header "corecrt_io.h"
+    export *
+  }
+
+  module malloc {
+    header "corecrt_malloc.h"
+    export *
+  }
+
+  module math {
+    header "corecrt_math.h"
+    export *
+  }
+
+  module share {
+    header "corecrt_share.h"
+    export *
+  }
+
+  module stdio {
+    header "corecrt_wstdio.h"
+    export *
+  }
+
+  module stdlib {
+    header "corecrt_wstdlib.h"
+    export *
+  }
+
+  module string {
+    header "corecrt_wstring.h"
+    export *
+  }
+
+  module time {
+    header "corecrt_wtime.h"
+    export *
   }
 }
 

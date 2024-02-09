@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2018 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2022 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -51,7 +51,7 @@ static bool isSinkable(SILInstruction &inst) {
 static bool isBarrier(SILInstruction *inst) {
   // Calls hide many dangers, from checking reference counts, to beginning
   // keypath access, to forcing memory to be live. Checking for these and other
-  // possible barries at ever call is certainly not worth it.
+  // possible barriers at ever call is certainly not worth it.
   if (FullApplySite::isa(inst) != FullApplySite())
     return true;
 
@@ -75,7 +75,7 @@ static bool isBarrier(SILInstruction *inst) {
     // Whitelist the safe builtin categories. Builtins should generally be
     // treated conservatively, because introducing a new builtin does not
     // require updating all passes to be aware of it.
-    switch (kind.getValue()) {
+    switch (kind.value()) {
     case BuiltinValueKind::None:
       llvm_unreachable("Builtin must has a non-empty kind.");
 
@@ -89,8 +89,7 @@ static bool isBarrier(SILInstruction *inst) {
 #define BUILTIN_CAST_OPERATION(Id, Name, Attrs) BUILTIN_NO_BARRIER(Id)
 #define BUILTIN_CAST_OR_BITCAST_OPERATION(Id, Name, Attrs)                     \
   BUILTIN_NO_BARRIER(Id)
-#define BUILTIN_BINARY_OPERATION(Id, Name, Attrs, Overload)                    \
-  BUILTIN_NO_BARRIER(Id)
+#define BUILTIN_BINARY_OPERATION(Id, Name, Attrs) BUILTIN_NO_BARRIER(Id)
 #define BUILTIN_BINARY_OPERATION_WITH_OVERFLOW(Id, Name, UncheckedID, Attrs,   \
                                                Overload)                       \
   BUILTIN_NO_BARRIER(Id)
@@ -105,16 +104,23 @@ static bool isBarrier(SILInstruction *inst) {
   case BuiltinValueKind::Id:                                                   \
     return true; // A runtime call could be anything.
 
+#define BUILTIN_SANITIZER_OPERATION(Id, Name, Attrs) BUILTIN_NO_BARRIER(Id)
+#define BUILTIN_TYPE_CHECKER_OPERATION(Id, Name) BUILTIN_NO_BARRIER(Id)
+#define BUILTIN_TYPE_TRAIT_OPERATION(Id, Name) BUILTIN_NO_BARRIER(Id)
+#include "swift/AST/Builtins.def"
+
     // Handle BUILTIN_MISC_OPERATIONs individually.
     case BuiltinValueKind::Sizeof:
     case BuiltinValueKind::Strideof:
     case BuiltinValueKind::IsPOD:
+    case BuiltinValueKind::IsConcrete:
     case BuiltinValueKind::IsBitwiseTakable:
     case BuiltinValueKind::IsSameMetatype:
     case BuiltinValueKind::Alignof:
     case BuiltinValueKind::OnFastPath:
     case BuiltinValueKind::ExtractElement:
     case BuiltinValueKind::InsertElement:
+    case BuiltinValueKind::ShuffleVector:
     case BuiltinValueKind::StaticReport:
     case BuiltinValueKind::AssertConf:
     case BuiltinValueKind::StringObjectOr:
@@ -123,13 +129,35 @@ static bool isBarrier(SILInstruction *inst) {
     case BuiltinValueKind::SToSCheckedTrunc:
     case BuiltinValueKind::UToUCheckedTrunc:
     case BuiltinValueKind::IntToFPWithOverflow:
+    case BuiltinValueKind::BitWidth:
+    case BuiltinValueKind::IsNegative:
+    case BuiltinValueKind::WordAtIndex:
     case BuiltinValueKind::ZeroInitializer:
     case BuiltinValueKind::Once:
     case BuiltinValueKind::OnceWithContext:
     case BuiltinValueKind::GetObjCTypeEncoding:
-    case BuiltinValueKind::Swift3ImplicitObjCEntrypoint:
     case BuiltinValueKind::WillThrow:
+    case BuiltinValueKind::CondFailMessage:
     case BuiltinValueKind::PoundAssert:
+    case BuiltinValueKind::TypePtrAuthDiscriminator:
+    case BuiltinValueKind::TargetOSVersionAtLeast:
+    case BuiltinValueKind::GlobalStringTablePointer:
+    case BuiltinValueKind::COWBufferForReading:
+    case BuiltinValueKind::GetCurrentAsyncTask:
+    case BuiltinValueKind::GetCurrentExecutor:
+    case BuiltinValueKind::AutoDiffCreateLinearMapContextWithType:
+    case BuiltinValueKind::EndAsyncLet:
+    case BuiltinValueKind::EndAsyncLetLifetime:
+    case BuiltinValueKind::CreateTaskGroup:
+    case BuiltinValueKind::CreateTaskGroupWithFlags:
+    case BuiltinValueKind::DestroyTaskGroup:
+    case BuiltinValueKind::StackAlloc:
+    case BuiltinValueKind::UnprotectedStackAlloc:
+    case BuiltinValueKind::StackDealloc:
+    case BuiltinValueKind::AllocVector:
+    case BuiltinValueKind::AssumeAlignment:
+    case BuiltinValueKind::GetEnumTag:
+    case BuiltinValueKind::InjectEnumTag:
       return false;
 
     // Handle some rare builtins that may be sensitive to object lifetime
@@ -137,6 +165,7 @@ static bool isBarrier(SILInstruction *inst) {
     case BuiltinValueKind::AllocRaw:
     case BuiltinValueKind::DeallocRaw:
     case BuiltinValueKind::Fence:
+    case BuiltinValueKind::Ifdef:
     case BuiltinValueKind::AtomicLoad:
     case BuiltinValueKind::AtomicStore:
     case BuiltinValueKind::AtomicRMW:
@@ -152,15 +181,36 @@ static bool isBarrier(SILInstruction *inst) {
     case BuiltinValueKind::AssignCopyArrayFrontToBack:
     case BuiltinValueKind::AssignCopyArrayBackToFront:
     case BuiltinValueKind::AssignTakeArray:
-    case BuiltinValueKind::UnsafeGuaranteed:
-    case BuiltinValueKind::UnsafeGuaranteedEnd:
+    case BuiltinValueKind::Copy:
+    case BuiltinValueKind::CancelAsyncTask:
+    case BuiltinValueKind::StartAsyncLet:
+    case BuiltinValueKind::CreateAsyncTask:
+    case BuiltinValueKind::CreateAsyncTaskInGroup:
+    case BuiltinValueKind::CreateAsyncDiscardingTaskInGroup:
+    case BuiltinValueKind::CreateAsyncTaskWithExecutor:
+    case BuiltinValueKind::CreateAsyncTaskInGroupWithExecutor:
+    case BuiltinValueKind::CreateAsyncDiscardingTaskInGroupWithExecutor:
+    case BuiltinValueKind::TaskRunInline:
+    case BuiltinValueKind::StartAsyncLetWithLocalBuffer:
+    case BuiltinValueKind::ConvertTaskToJob:
+    case BuiltinValueKind::InitializeDefaultActor:
+    case BuiltinValueKind::DestroyDefaultActor:
+    case BuiltinValueKind::InitializeDistributedRemoteActor:
+    case BuiltinValueKind::InitializeNonDefaultDistributedActor:
+    case BuiltinValueKind::BuildOrdinaryTaskExecutorRef:
+    case BuiltinValueKind::BuildOrdinarySerialExecutorRef:
+    case BuiltinValueKind::BuildComplexEqualitySerialExecutorRef:
+    case BuiltinValueKind::BuildDefaultActorExecutorRef:
+    case BuiltinValueKind::BuildMainActorExecutorRef:
+    case BuiltinValueKind::ResumeNonThrowingContinuationReturning:
+    case BuiltinValueKind::ResumeThrowingContinuationReturning:
+    case BuiltinValueKind::ResumeThrowingContinuationThrowing:
+    case BuiltinValueKind::AutoDiffProjectTopLevelSubcontext:
+    case BuiltinValueKind::AutoDiffAllocateSubcontextWithType:
+    case BuiltinValueKind::AddressOfBorrowOpaque:
+    case BuiltinValueKind::UnprotectedAddressOfBorrowOpaque:
+    case BuiltinValueKind::DistributedActorAsAnyActor:
       return true;
-
-#define BUILTIN_SANITIZER_OPERATION(Id, Name, Attrs) BUILTIN_NO_BARRIER(Id)
-#define BUILTIN_TYPE_CHECKER_OPERATION(Id, Name) BUILTIN_NO_BARRIER(Id)
-#define BUILTIN_TYPE_TRAIT_OPERATION(Id, Name) BUILTIN_NO_BARRIER(Id)
-
-#include "swift/AST/Builtins.def"
     }
   }
   return false;

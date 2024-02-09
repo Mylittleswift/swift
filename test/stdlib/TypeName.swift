@@ -1,5 +1,15 @@
-// RUN: %target-run-simple-swift
+// RUN: %empty-directory(%t)
+// RUN: %target-build-swift -O -module-name=main %s -o %t/O.out
+// RUN: %target-codesign %t/O.out
+// RUN: %target-run %t/O.out
+// RUN: %target-build-swift -Onone -module-name=main %s -o %t/Onone.out
+// RUN: %target-codesign %t/Onone.out
+// RUN: %target-run %t/Onone.out
+
 // REQUIRES: executable_test
+
+// Freestanding/minimal runtime does not support printing type names at runtime.
+// UNSUPPORTED: freestanding
 
 import StdlibUnittest
 

@@ -123,9 +123,15 @@ bool ArrayAllocation::recursivelyCollectUses(ValueBase *Def) {
   for (auto *Opd : Def->getUses()) {
     auto *User = Opd->getUser();
     // Ignore reference counting and debug instructions.
-    if (isa<RefCountingInst>(User) ||
+    if (isa<RefCountingInst>(User) || isa<DestroyValueInst>(User) ||
         isa<DebugValueInst>(User))
       continue;
+
+    if (auto *MDI = dyn_cast<MarkDependenceInst>(User)) {
+      if (Def == MDI->getBase()) {
+        continue;
+      }
+    }
 
     // Array value projection.
     if (auto *SEI = dyn_cast<StructExtractInst>(User)) {
@@ -135,13 +141,24 @@ bool ArrayAllocation::recursivelyCollectUses(ValueBase *Def) {
     }
 
     // Check array semantic calls.
-    if (auto apply = dyn_cast<ApplyInst>(User)) {
+    if (auto *apply = dyn_cast<ApplyInst>(User)) {
       ArraySemanticsCall ArrayOp(apply);
-      if (ArrayOp && ArrayOp.doesNotChangeArray()) {
-        if (ArrayOp.getKind() == ArrayCallKind::kGetCount)
+      switch (ArrayOp.getKind()) {
+        case ArrayCallKind::kNone:
+          return false;
+        case ArrayCallKind::kGetCount:
           CountCalls.insert(ArrayOp);
-        continue;
+          break;
+        case ArrayCallKind::kArrayFinalizeIntrinsic:
+          if (!recursivelyCollectUses(apply))
+            return false;
+          break;
+        default:
+          if (!ArrayOp.doesNotChangeArray())
+            return false;
+          break;
       }
+      continue;
     }
 
     // An operation that escapes or modifies the array value.
@@ -184,11 +201,6 @@ public:
 
   void run() override {
     auto &Fn = *getFunction();
-
-    // FIXME: Add ownership support.
-    if (Fn.hasOwnership())
-      return;
-
     bool Changed = false;
     SmallVector<ApplyInst *, 16> DeadArrayCountCalls;
     // Propagate the count of array allocations to array.count users.

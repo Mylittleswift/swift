@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2022 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -16,9 +16,12 @@
 
 #include "GenIntegerLiteral.h"
 
+#include "swift/ABI/MetadataValues.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalVariable.h"
-#include "swift/ABI/MetadataValues.h"
+
+#include "BitPatternBuilder.h"
 #include "Explosion.h"
 #include "ExtraInhabitants.h"
 #include "GenType.h"
@@ -34,13 +37,13 @@ namespace {
 
 /// A TypeInfo implementation for Builtin.IntegerLiteral.
 class IntegerLiteralTypeInfo :
-  public ScalarPairTypeInfo<IntegerLiteralTypeInfo, LoadableTypeInfo> {
+  public TrivialScalarPairTypeInfo<IntegerLiteralTypeInfo, LoadableTypeInfo> {
 
 public:
   IntegerLiteralTypeInfo(llvm::StructType *storageType,
                          Size size, Alignment align, SpareBitVector &&spareBits)
-      : ScalarPairTypeInfo(storageType, size, std::move(spareBits), align,
-                           IsPOD, IsFixedSize) {}
+      : TrivialScalarPairTypeInfo(storageType, size, std::move(spareBits), align,
+                            IsTriviallyDestroyable, IsCopyable, IsFixedSize) {}
 
   static Size getFirstElementSize(IRGenModule &IGM) {
     return IGM.getPointerSize();
@@ -48,16 +51,16 @@ public:
   static StringRef getFirstElementLabel() {
     return ".data";
   }
-  static bool isFirstElementTrivial() {
-    return true;
-  }
-  void emitRetainFirstElement(IRGenFunction &IGF, llvm::Value *fn,
-                              Optional<Atomicity> atomicity = None) const {}
-  void emitReleaseFirstElement(IRGenFunction &IGF, llvm::Value *fn,
-                               Optional<Atomicity> atomicity = None) const {}
-  void emitAssignFirstElement(IRGenFunction &IGF, llvm::Value *fn,
-                              Address fnAddr) const {
-    IGF.Builder.CreateStore(fn, fnAddr);
+
+  TypeLayoutEntry
+  *buildTypeLayoutEntry(IRGenModule &IGM,
+                        SILType T,
+                        bool useStructLayouts) const override {
+    if (!useStructLayouts) {
+      return IGM.typeLayoutCache.getOrCreateTypeInfoBasedEntry(*this, T);
+    }
+    return IGM.typeLayoutCache.getOrCreateScalarEntry(*this, T,
+                                            ScalarKind::TriviallyDestroyable);
   }
 
   static Size getSecondElementOffset(IRGenModule &IGM) {
@@ -68,17 +71,6 @@ public:
   }
   static StringRef getSecondElementLabel() {
     return ".flags";
-  }
-  bool isSecondElementTrivial() const {
-    return true;
-  }
-  void emitRetainSecondElement(IRGenFunction &IGF, llvm::Value *data,
-                               Optional<Atomicity> atomicity = None) const {}
-  void emitReleaseSecondElement(IRGenFunction &IGF, llvm::Value *data,
-                                Optional<Atomicity> atomicity = None) const {}
-  void emitAssignSecondElement(IRGenFunction &IGF, llvm::Value *context,
-                               Address dataAddr) const {
-    IGF.Builder.CreateStore(context, dataAddr);
   }
 
   // The data pointer isn't a heap object, but it is an aligned pointer.
@@ -100,10 +92,11 @@ public:
     return getHeapObjectExtraInhabitantIndex(IGF, src);
   }
   APInt getFixedExtraInhabitantMask(IRGenModule &IGM) const override {
-    auto pointerSize = IGM.getPointerSize().getValueInBits();
-    APInt bits = APInt::getAllOnesValue(pointerSize);
-    bits = bits.zext(pointerSize * 2);
-    return bits;
+    auto pointerSize = IGM.getPointerSize();
+    auto mask = BitPatternBuilder(IGM.Triple.isLittleEndian());
+    mask.appendSetBits(pointerSize.getValueInBits());
+    mask.appendClearBits(pointerSize.getValueInBits());
+    return mask.build().value();
   }
   void storeExtraInhabitant(IRGenFunction &IGF, llvm::Value *index,
                             Address dest, SILType T,
@@ -118,7 +111,7 @@ public:
 llvm::StructType *IRGenModule::getIntegerLiteralTy() {
   if (!IntegerLiteralTy) {
     IntegerLiteralTy =
-      llvm::StructType::create(LLVMContext, {
+      llvm::StructType::create(getLLVMContext(), {
                                  SizeTy->getPointerTo(),
                                  SizeTy
                                }, "swift.int_literal");
@@ -161,7 +154,7 @@ ConstantIntegerLiteralMap::get(IRGenModule &IGM, APInt &&value) {
   auto &entry = map[value];
   if (entry.Data) return entry;
 
-  assert(value.getMinSignedBits() == value.getBitWidth() &&
+  assert(value.getSignificantBits() == value.getBitWidth() &&
          "expected IntegerLiteral value to be maximally compact");
 
   // We're going to break the value down into pointer-sized chunks.
@@ -191,12 +184,12 @@ ConstantIntegerLiteralMap::get(IRGenModule &IGM, APInt &&value) {
   // TODO: make this shared within the image
   auto arrayTy = llvm::ArrayType::get(IGM.SizeTy, numChunks);
   auto initV = llvm::ConstantArray::get(arrayTy, chunks);
-  auto globalArray =
-    new llvm::GlobalVariable(*IGM.getModule(), arrayTy, /*constant*/ true,
-                             llvm::GlobalVariable::PrivateLinkage, initV,
-                             IGM.EnableValueNames
-                               ? Twine("intliteral.") + value.toString(10, true)
-                               : "");
+  auto globalArray = new llvm::GlobalVariable(
+      *IGM.getModule(), arrayTy, /*constant*/ true,
+      llvm::GlobalVariable::PrivateLinkage, initV,
+      IGM.EnableValueNames
+          ? Twine("intliteral.") + llvm::toString(value, 10, true)
+          : "");
   globalArray->setUnnamedAddr(llvm::GlobalVariable::UnnamedAddr::Global);
 
   // Various clients expect this to be a i64*, not an [N x i64]*, so cast down.
@@ -215,12 +208,12 @@ ConstantIntegerLiteralMap::get(IRGenModule &IGM, APInt &&value) {
   return entry;
 }
 
-void irgen::emitIntegerLiteralCheckedTrunc(IRGenFunction &IGF,
-                                           Explosion &in,
+void irgen::emitIntegerLiteralCheckedTrunc(IRGenFunction &IGF, Explosion &in,
+                                           llvm::Type *FromTy,
                                            llvm::IntegerType *resultTy,
                                            bool resultIsSigned,
                                            Explosion &out) {
-  Address data(in.claimNext(), IGF.IGM.getPointerAlignment());
+  Address data(in.claimNext(), FromTy, IGF.IGM.getPointerAlignment());
   auto flags = in.claimNext();
 
   size_t chunkWidth = IGF.IGM.getPointerSize().getValueInBits();
@@ -368,8 +361,8 @@ static llvm::Value *emitIntegerLiteralToFloatCall(IRGenFunction &IGF,
                                                   llvm::Value *flags,
                                                   unsigned bitWidth) {
   assert(bitWidth == 32 || bitWidth == 64);
-  auto fn = bitWidth == 32 ? IGF.IGM.getIntToFloat32Fn()
-                           : IGF.IGM.getIntToFloat64Fn();
+  auto fn = bitWidth == 32 ? IGF.IGM.getIntToFloat32FunctionPointer()
+                           : IGF.IGM.getIntToFloat64FunctionPointer();
   auto call = IGF.Builder.CreateCall(fn, {data, flags});
   call->setCallingConv(IGF.IGM.SwiftCC);
   call->setDoesNotThrow();
@@ -409,4 +402,46 @@ llvm::Value *irgen::emitIntegerLiteralToFP(IRGenFunction &IGF,
   default:
     llvm_unreachable("not a floating-point type");
   }
+}
+
+llvm::Value *irgen::emitIntLiteralBitWidth(
+  IRGenFunction &IGF,
+  Explosion &in
+) {
+  auto data = in.claimNext();
+  auto flags = in.claimNext();
+  (void)data; // [[maybe_unused]]
+  return IGF.Builder.CreateLShr(
+    flags,
+    IGF.IGM.getSize(Size(IntegerLiteralFlags::BitWidthShift))
+  );
+}
+
+llvm::Value *irgen::emitIntLiteralIsNegative(
+  IRGenFunction &IGF,
+  Explosion &in
+) {
+  auto data = in.claimNext();
+  auto flags = in.claimNext();
+  (void)data; // [[maybe_unused]]
+  static_assert(
+    IntegerLiteralFlags::IsNegativeFlag == 1,
+    "hardcoded in this truncation"
+  );
+  return IGF.Builder.CreateTrunc(flags, IGF.IGM.Int1Ty);
+}
+
+llvm::Value *irgen::emitIntLiteralWordAtIndex(
+  IRGenFunction &IGF,
+  Explosion &in
+) {
+  auto data = in.claimNext();
+  auto flags = in.claimNext();
+  auto index = in.claimNext();
+  (void)flags; // [[maybe_unused]]
+  return IGF.Builder.CreateLoad(
+    IGF.Builder.CreateInBoundsGEP(IGF.IGM.SizeTy, data, index),
+    IGF.IGM.SizeTy,
+    IGF.IGM.getPointerAlignment()
+  );
 }

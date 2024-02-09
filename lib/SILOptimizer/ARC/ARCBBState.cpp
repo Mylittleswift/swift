@@ -31,7 +31,7 @@ using ARCBBState = ARCSequenceDataflowEvaluator::ARCBBState;
 void ARCBBState::mergeSuccBottomUp(ARCBBState &SuccBBState) {
   // For each [(SILValue, BottomUpState)] that we are tracking...
   for (auto &Pair : getBottomupStates()) {
-    if (!Pair.hasValue())
+    if (!Pair.has_value())
       continue;
 
     SILValue RefCountedValue = Pair->first;
@@ -85,7 +85,7 @@ void ARCBBState::initSuccBottomUp(ARCBBState &SuccBBState) {
 void ARCBBState::mergePredTopDown(ARCBBState &PredBBState) {
   // For each [(SILValue, TopDownState)] that we are tracking...
   for (auto &Pair : getTopDownStates()) {
-    if (!Pair.hasValue())
+    if (!Pair.has_value())
       continue;
 
     SILValue RefCountedValue = Pair->first;
@@ -137,6 +137,34 @@ void ARCBBState::initPredTopDown(ARCBBState &PredBBState) {
   PtrToTopDownState = PredBBState.PtrToTopDownState;
 }
 
+void ARCBBState::dumpBottomUpState() {
+  for (auto state : getBottomupStates()) {
+    if (!state.has_value())
+      continue;
+    auto elem = state.value();
+    if (!elem.first)
+      continue;
+    llvm::dbgs() << "SILValue: ";
+    elem.first->dump();
+    llvm::dbgs() << "RefCountState: ";
+    elem.second.dump();
+  }
+}
+
+void ARCBBState::dumpTopDownState() {
+  for (auto state : getTopDownStates()) {
+    if (!state.has_value())
+      continue;
+    auto elem = state.value();
+    if (!elem.first)
+      continue;
+    llvm::dbgs() << "SILValue: ";
+    elem.first->dump();
+    llvm::dbgs() << "RefCountState: ";
+    elem.second.dump();
+  }
+}
+
 //===----------------------------------------------------------------------===//
 //                               ARCBBStateInfo
 //===----------------------------------------------------------------------===//
@@ -174,10 +202,10 @@ ARCBBStateInfo::ARCBBStateInfo(SILFunction *F, PostOrderAnalysis *POA,
 llvm::Optional<ARCBBStateInfoHandle>
 ARCBBStateInfo::getBottomUpBBHandle(SILBasicBlock *BB) {
   auto OptID = getBBID(BB);
-  if (!OptID.hasValue())
-    return None;
+  if (!OptID.has_value())
+    return llvm::None;
 
-  unsigned ID = OptID.getValue();
+  unsigned ID = OptID.value();
 
   auto BackedgeIter = BackedgeMap.find(BB);
   if (BackedgeIter == BackedgeMap.end())
@@ -189,10 +217,10 @@ ARCBBStateInfo::getBottomUpBBHandle(SILBasicBlock *BB) {
 llvm::Optional<ARCBBStateInfoHandle>
 ARCBBStateInfo::getTopDownBBHandle(SILBasicBlock *BB) {
   auto MaybeID = getBBID(BB);
-  if (!MaybeID.hasValue())
-    return None;
+  if (!MaybeID.has_value())
+    return llvm::None;
 
-  unsigned ID = MaybeID.getValue();
+  unsigned ID = MaybeID.value();
 
   auto BackedgeIter = BackedgeMap.find(BB);
   if (BackedgeIter == BackedgeMap.end())
@@ -204,7 +232,7 @@ ARCBBStateInfo::getTopDownBBHandle(SILBasicBlock *BB) {
 llvm::Optional<unsigned> ARCBBStateInfo::getBBID(SILBasicBlock *BB) const {
   auto Iter = BBToBBIDMap.find(BB);
   if (Iter == BBToBBIDMap.end())
-    return None;
+    return llvm::None;
   return Iter->second;
 }
 

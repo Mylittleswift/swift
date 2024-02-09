@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -module-name access_enforcement_noescape -enforce-exclusivity=checked -Onone -emit-sil -swift-version 4 -parse-as-library %s | %FileCheck %s
+// RUN: %target-swift-frontend -enable-copy-propagation=requested-passes-only -enable-lexical-lifetimes=false -module-name access_enforcement_noescape -enforce-exclusivity=checked -Onone -emit-sil -swift-version 4 -parse-as-library %s | %FileCheck %s
 
 // This tests SILGen and AccessEnforcementSelection as a single set of tests.
 // (Some static/dynamic enforcement selection is done in SILGen, and some is
@@ -25,7 +25,7 @@ func doTwo(_: ()->(), _: ()->()) {}
 func doOneInout(_: ()->(), _: inout Int) {}
 
 // Error: Cannot capture nonescaping closure.
-// This triggers an early diagnostics, so it's handled in inout_capture_disgnostics.swift.
+// This triggers an early diagnostics, so it's handled in inout_capture_diagnostics.swift.
 // func reentrantCapturedNoescape(fn: (() -> ()) -> ()) {
 //   let c = { fn {} }
 //   fn(c)
@@ -296,7 +296,7 @@ func readBoxWriteInout() {
 // CHECK-LABEL: } // end sil function '$s27access_enforcement_noescape17readBoxWriteInoutyyFyycfU_'
 
 // Error: inout cannot be captured.
-// This triggers an early diagnostics, so it's handled in inout_capture_disgnostics.swift.
+// This triggers an early diagnostics, so it's handled in inout_capture_diagnostics.swift.
 // func inoutReadBoxWriteInout(x: inout Int) {
 //   let c = { _ = x }
 //   doOneInout(c, &x)
@@ -442,7 +442,7 @@ func writeBoxWriteInout() {
 // CHECK-LABEL: } // end sil function '$s27access_enforcement_noescape18writeBoxWriteInoutyyFyycfU_'
 
 // Error: Cannot capture inout
-// This triggers an early diagnostics, so it's handled in inout_capture_disgnostics.swift.
+// This triggers an early diagnostics, so it's handled in inout_capture_diagnostics.swift.
 // func inoutWriteBoxWriteInout(x: inout Int) {
 //   let c = { x = 42 }
 //   doOneInout(c, &x)

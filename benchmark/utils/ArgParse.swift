@@ -10,7 +10,15 @@
 //
 //===----------------------------------------------------------------------===//
 
-import Foundation
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif os(Windows)
+import MSVCRT
+#else
+import Darwin
+#endif
 
 enum ArgumentError: Error {
   case missingValue(String)
@@ -73,7 +81,7 @@ class ArgumentParser<U> {
     private var optionalArgsMap = [String : String]()
 
     /// Argument holds the name of the command line parameter, its help
-    /// desciption and a rule that's applied to process it.
+    /// description and a rule that's applied to process it.
     ///
     /// The the rule is typically a value processing closure used to convert it
     /// into given type and storing it in the parsing result.
@@ -106,7 +114,8 @@ class ArgumentParser<U> {
           .split(separator: "\n")
           .joined(separator: "\n" + padded(""))
        }
-      let positional = f("TEST", "name or number of the benchmark to measure")
+      let positional = f("TEST", "name or number of the benchmark to measure;\n"
+                         + "use +/- prefix to filter by substring match")
       let optional =  arguments.filter { $0.name != nil }
                                 .map { f($0.name!, $0.help ?? "") }
                                 .joined(separator: "\n")
@@ -146,7 +155,6 @@ class ArgumentParser<U> {
     /// We assume that optional switch args are of the form:
     ///
     ///     --opt-name[=opt-value]
-    ///     -opt-name[=opt-value]
     ///
     /// with `opt-name` and `opt-value` not containing any '=' signs. Any
     /// other option passed in is assumed to be a positional argument.
@@ -159,7 +167,7 @@ class ArgumentParser<U> {
       for arg in CommandLine.arguments[1..<CommandLine.arguments.count] {
         // If the argument doesn't match the optional argument pattern. Add
         // it to the positional argument list and continue...
-        if !arg.starts(with: "-") {
+        if !arg.starts(with: "--") {
           positionalArgs.append(arg)
           continue
         }

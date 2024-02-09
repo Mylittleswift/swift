@@ -18,7 +18,7 @@ class C : B, A { } // expected-error{{multiple inheritance from classes 'B' and 
 // Superclass in the wrong position
 class D : P, A { } // expected-error{{superclass 'A' must appear first in the inheritance clause}}{{12-15=}}{{11-11=A, }}
 
-// SR-8160
+// https://github.com/apple/swift/issues/50692
 class D1 : Any, A { } // expected-error{{superclass 'A' must appear first in the inheritance clause}}{{15-18=}}{{12-12=A, }}
 
 class D2 : P & P1, A { } // expected-error{{superclass 'A' must appear first in the inheritance clause}}{{18-21=}}{{12-12=A, }}
@@ -30,13 +30,13 @@ class D3 : Any, A { } // expected-error{{superclass 'A' must appear first in the
 class D4 : P & P1, A { } // expected-error{{superclass 'A' must appear first in the inheritance clause}}{{18-21=}}{{12-12=A, }}
 
 // Struct inheriting a class
-struct S : A { } // expected-error{{non-class type 'S' cannot inherit from class 'A'}}
+struct S : A { } // expected-error{{inheritance from non-protocol type 'A'}}
 
 // Protocol inheriting a class
 protocol Q : A { }
 
 // Extension inheriting a class
-extension C : A { } // expected-error{{extension of type 'C' cannot inherit from class 'A'}}
+extension C : A { } // expected-error{{inheritance from non-protocol type 'A'}}
 
 // Keywords in inheritance clauses
 struct S2 : struct { } // expected-error{{expected type}}
@@ -49,7 +49,7 @@ struct S4 : P, P { }
 // expected-error@-1{{redundant conformance of 'S4' to protocol 'P'}}
 // expected-note@-2{{'S4' declares conformance to protocol 'P' here}}
 struct S6 : P & { }      // expected-error {{expected identifier for type name}}
-struct S7 : protocol<P, Q> { }  // expected-error {{'protocol<...>' composition syntax has been removed; join the protocols using '&'}}
+struct S7 : protocol<P, Q> { }  // expected-error {{'protocol<...>' composition syntax has been removed; join the type constraints using '&'}}
                                 // expected-error @-1 {{non-class type 'S7' cannot conform to class protocol 'Q'}}
 
 class GenericBase<T> {}
@@ -57,9 +57,9 @@ class GenericBase<T> {}
 class GenericSub<T> : GenericBase<T> {} // okay
 
 class InheritGenericParam<T> : T {} // expected-error {{inheritance from non-protocol, non-class type 'T'}}
-class InheritBody : T { // expected-error {{use of undeclared type 'T'}}
+class InheritBody : T { // expected-error {{cannot find type 'T' in scope}}
   typealias T = A
 }
-class InheritBodyBad : fn { // expected-error {{use of undeclared type 'fn'}}
+class InheritBodyBad : fn { // expected-error {{cannot find type 'fn' in scope}}
   func fn() {}
 }

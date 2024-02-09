@@ -23,6 +23,7 @@
 
 // REQUIRES: executable_test
 // REQUIRES: shell
+// REQUIRES: reflection
 
 import StdlibUnittest
 
@@ -35,7 +36,7 @@ class NativeSwiftClass : NativeClassBoundExistential {
   }
 }
 
-protocol NativeClassBoundExistential : class {
+protocol NativeClassBoundExistential : AnyObject {
   var x: Int { get }
 }
 class NativeSwiftClassHasWeak {
@@ -101,8 +102,9 @@ mirrors.test("struct/StructHasNativeWeakReference") {
   print(extractedChild)
 }
 
-// SR-8878: Using Mirror to access a weak reference results in object
-// being retained indefinitely
+// https://github.com/apple/swift/issues/51384
+// Using 'Mirror' to access a weak reference results in object being
+// retained indefinitely
 mirrors.test("class/NativeSwiftClassHasNativeWeakReferenceNoLeak") {
   weak var verifier: AnyObject?
   do {
@@ -115,6 +117,8 @@ mirrors.test("class/NativeSwiftClassHasNativeWeakReferenceNoLeak") {
     let extractedChild = children[0].1 as! NativeSwiftClass
     expectNotNil(extractedChild)
     expectNotNil(verifier)
+    // If child is destroyed, the above cast and checks will fail.
+    _fixLifetime(child)
   }
   expectNil(verifier)
 }
@@ -123,7 +127,7 @@ mirrors.test("class/NativeSwiftClassHasNativeWeakReferenceNoLeak") {
 
 import Foundation
 
-@objc protocol ObjCClassExistential : class {
+@objc protocol ObjCClassExistential : AnyObject {
   var weakProperty: AnyObject? { get set }
   var x: Int { get }
 }

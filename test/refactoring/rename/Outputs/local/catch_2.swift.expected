@@ -37,13 +37,21 @@ func test4(arg: () throws -> Void) {
     try arg()
   } catch let x as Err1 {
     print(x)
-  } catch let xRenamed {
-    print(xRenamed)
+  } catch let <base>x</base> {
+    print(<base>x</base>)
   }
 }
 
 func test5(_ x: Int) {
   let x = x 
   print(x)
+}
+
+func testCaptureVariable() {
+  let capturedVariable = 0
+
+  _ = { [capturedVariable] in
+    print(capturedVariable)
+  }
 }
 

@@ -210,18 +210,53 @@ func conditionalDowncastToOptional(b: B?) -> D? {
 }
 
 func conditionalDowncastToObject(b: B?) -> D {
-  return b as? D! // expected-error {{value of optional type 'D?' must be unwrapped}}
-  // expected-note@-1{{coalesce}}
-  // expected-note@-2{{force-unwrap}}
+  return b as? D! // expected-error {{value of optional type 'D?' must be unwrapped to a value of type 'D'}}
+  // expected-note@-1 {{coalesce using '??' to provide a default when the optional value contains 'nil'}}
+  // expected-note@-2 {{force-unwrap using '!' to abort execution if the optional value contains 'nil'}}
   // expected-warning@-3 {{using '!' here is deprecated and will be removed in a future release}}
 }
 
+// https://github.com/apple/swift/issues/49536
 // Ensure that we select the overload that does *not* involve forcing an IUO.
-func sr6988(x: Int?, y: Int?) -> Int { return x! }
-func sr6988(x: Int, y: Int) -> Float { return Float(x) }
+do {
+  func f(x: Int?, y: Int?) -> Int { return x! }
+  func f(x: Int, y: Int) -> Float { return Float(x) }
 
-var x: Int! = nil
-var y: Int = 2
+  let x: Int! = nil
+  let y: Int = 2
 
-let r = sr6988(x: x, y: y)
-let _: Int = r
+  let r = f(x: x, y: y)
+  let _: Int = r
+}
+
+// rdar://problem/58455441
+// https://github.com/apple/swift/issues/54432
+do {
+  class C<T> {}
+  let _: C! = C<Int>()
+}
+
+// rdar://problem/83352038
+// https://github.com/apple/swift/issues/57541
+// Make sure we don't crash if an IUO param becomes a placeholder.
+do {
+  func foo(_: UnsafeRawPointer) -> Undefined {} // expected-error {{cannot find type 'Undefined' in scope}}
+  let _ = { (cnode: AlsoUndefined!) -> UnsafeMutableRawPointer in // expected-error {{cannot find type 'AlsoUndefined' in scope}}
+    return foo(cnode)
+  }
+}
+
+// Make sure we reject an attempt at a function conversion.
+func returnsIUO() -> Int! { 0 }
+let _ = (returnsIUO as () -> Int)() // expected-error {{cannot convert value of type '() -> Int?' to type '() -> Int' in coercion}}
+
+// Make sure we only permit an IUO unwrap on the first application.
+func returnsIUOFn() -> (() -> Int?)! { nil }
+let _: (() -> Int?)? = returnsIUOFn()
+let _: (() -> Int)? = returnsIUOFn() // expected-error {{cannot convert value of type '(() -> Int?)?' to specified type '(() -> Int)?'}}
+let _: () -> Int? = returnsIUOFn()
+let _: () -> Int = returnsIUOFn() // expected-error {{cannot convert value of type '(() -> Int?)?' to specified type '() -> Int'}}
+let _: Int? = returnsIUOFn()()
+let _: Int = returnsIUOFn()() // expected-error {{value of optional type 'Int?' must be unwrapped to a value of type 'Int'}}
+// expected-note@-1 {{coalesce using '??' to provide a default when the optional value contains 'nil'}}
+// expected-note@-2 {{force-unwrap using '!' to abort execution if the optional value contains 'nil'}}

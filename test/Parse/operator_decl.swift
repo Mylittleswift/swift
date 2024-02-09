@@ -40,13 +40,30 @@ prefix operator // expected-error {{expected operator name in operator declarati
 prefix operator %%+
 
 prefix operator ??
-postfix operator ?? // expected-error {{expected operator name in operator declaration}}
+postfix operator ?? // expected-error {{postfix operator names starting with '?' or '!' are disallowed to avoid collisions with built-in unwrapping operators}}
 prefix operator !!
-postfix operator !! // expected-error {{expected operator name in operator declaration}}
+postfix operator !! // expected-error {{postfix operator names starting with '?' or '!' are disallowed to avoid collisions with built-in unwrapping operators}}
+postfix operator ?$$
+// expected-error@-1 {{postfix operator names starting with '?' or '!' are disallowed}}
+// expected-error@-2 {{'$$' is considered an identifier}}
+
+infix operator --aa // expected-error {{'aa' is considered an identifier and must not appear within an operator name}}
+infix operator aa--: A // expected-error {{'aa' is considered an identifier and must not appear within an operator name}}
+infix operator <<$$@< // expected-error {{'$$' is considered an identifier and must not appear within an operator name}}
+infix operator !!@aa // expected-error {{'@' is not allowed in operator names}}
+infix operator #++= // expected-error {{'#' is not allowed in operator names}}
+infix operator ++=# // expected-error {{'#' is not allowed in operator names}}
+infix operator -># // expected-error {{'#' is not allowed in operator names}}
+
+// FIXME: Ideally, we shouldn't emit the «consistent whitespace» diagnostic
+// where = cannot possibly mean an assignment.
+infix operator =#=
+// expected-error@-1 {{'#' is not allowed in operator names}}
+// expected-error@-2 {{'=' must have consistent whitespace on both sides}}
 
 infix operator +++=
 infix operator *** : A
-infix operator --- : ;
+infix operator --- : ; // expected-error {{expected precedence group name after ':' in operator declaration}}
 
 precedencegroup { // expected-error {{expected identifier after 'precedencegroup'}}
   associativity: right
@@ -93,3 +110,8 @@ protocol Proto {}
 infix operator *<*< : F, Proto
 // expected-error@-1 {{consecutive statements on a line must be separated by ';'}}
 // expected-error@-2 {{expected expression}}
+
+// https://github.com/apple/swift/issues/60932
+
+// expected-error@+2 {{expected precedence group name after ':' in operator declaration}}
+postfix operator ++: // expected-error {{only infix operators may declare a precedence}} {{20-21=}}

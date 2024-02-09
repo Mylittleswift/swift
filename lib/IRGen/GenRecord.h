@@ -18,6 +18,7 @@
 #ifndef SWIFT_IRGEN_GENRECORD_H
 #define SWIFT_IRGEN_GENRECORD_H
 
+#include "BitPatternBuilder.h"
 #include "IRGenFunction.h"
 #include "IRGenModule.h"
 #include "Explosion.h"
@@ -27,7 +28,9 @@
 #include "Outlining.h"
 #include "TypeInfo.h"
 #include "StructLayout.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/TrailingObjects.h"
+#include "swift/AST/DiagnosticsIRGen.h"
 
 namespace swift {
 namespace irgen {
@@ -41,8 +44,8 @@ template <class FieldImpl> class RecordField {
   template <class, class, class> friend class RecordTypeBuilder;
 
   /// Begin/End - the range of explosion indexes for this element
-  unsigned Begin : 16;
-  unsigned End : 16;
+  unsigned Begin;
+  unsigned End;
 
 protected:
   explicit RecordField(const TypeInfo &elementTI)
@@ -66,8 +69,8 @@ public:
     return Layout.isEmpty();
   }
 
-  IsPOD_t isPOD() const {
-    return Layout.isPOD();
+  IsTriviallyDestroyable_t isTriviallyDestroyable() const {
+    return Layout.isTriviallyDestroyable();
   }
 
   IsABIAccessible_t isABIAccessible() const {
@@ -121,8 +124,8 @@ private:
   const unsigned NumFields;
   const unsigned AreFieldsABIAccessible : 1;
 
-  mutable Optional<const FieldImpl *> ExtraInhabitantProvidingField;
-  mutable Optional<bool> MayHaveExtraInhabitants;
+  mutable llvm::Optional<const FieldImpl *> ExtraInhabitantProvidingField;
+  mutable llvm::Optional<bool> MayHaveExtraInhabitants;
 
 protected:
   const Impl &asImpl() const { return *static_cast<const Impl*>(this); }
@@ -147,6 +150,10 @@ public:
     return new(buffer) Impl(fields, std::forward<As>(args)...);
   }
 
+  bool areFieldsABIAccessible() const {
+    return AreFieldsABIAccessible;
+  }
+
   ArrayRef<FieldImpl> getFields() const {
     return {this->template getTrailingObjects<FieldImpl>(), NumFields};
   }
@@ -165,7 +172,7 @@ public:
       return emitAssignWithCopyCall(IGF, T, dest, src);
     }
 
-    if (isOutlined || T.hasOpenedExistential()) {
+    if (isOutlined || T.hasParameterizedExistential()) {
       auto offsets = asImpl().getNonFixedOffsets(IGF, T);
       for (auto &field : getFields()) {
         if (field.isEmpty())
@@ -188,7 +195,7 @@ public:
       return emitAssignWithTakeCall(IGF, T, dest, src);
     }
 
-    if (isOutlined || T.hasOpenedExistential()) {
+    if (isOutlined || T.hasParameterizedExistential()) {
       auto offsets = asImpl().getNonFixedOffsets(IGF, T);
       for (auto &field : getFields()) {
         if (field.isEmpty())
@@ -207,7 +214,7 @@ public:
   void initializeWithCopy(IRGenFunction &IGF, Address dest, Address src,
                           SILType T, bool isOutlined) const override {
     // If we're POD, use the generic routine.
-    if (this->isPOD(ResilienceExpansion::Maximal) &&
+    if (this->isTriviallyDestroyable(ResilienceExpansion::Maximal) &&
         isa<LoadableTypeInfo>(this)) {
       return cast<LoadableTypeInfo>(this)->LoadableTypeInfo::initializeWithCopy(
           IGF, dest, src, T, isOutlined);
@@ -218,7 +225,7 @@ public:
       return emitInitializeWithCopyCall(IGF, T, dest, src);
     }
 
-    if (isOutlined || T.hasOpenedExistential()) {
+    if (isOutlined || T.hasParameterizedExistential()) {
       auto offsets = asImpl().getNonFixedOffsets(IGF, T);
       for (auto &field : getFields()) {
         if (field.isEmpty())
@@ -238,11 +245,10 @@ public:
                           SILType T, bool isOutlined) const override {
     // If we're bitwise-takable, use memcpy.
     if (this->isBitwiseTakable(ResilienceExpansion::Maximal)) {
-      IGF.Builder.CreateMemCpy(dest.getAddress(),
-                               dest.getAlignment().getValue(),
-                               src.getAddress(),
-                               src.getAlignment().getValue(),
-                 asImpl().Impl::getSize(IGF, T));
+      IGF.Builder.CreateMemCpy(
+          dest.getAddress(), llvm::MaybeAlign(dest.getAlignment().getValue()),
+          src.getAddress(), llvm::MaybeAlign(src.getAlignment().getValue()),
+          asImpl().Impl::getSize(IGF, T));
       return;
     }
 
@@ -251,7 +257,7 @@ public:
       return emitInitializeWithTakeCall(IGF, T, dest, src);
     }
 
-    if (isOutlined || T.hasOpenedExistential()) {
+    if (isOutlined || T.hasParameterizedExistential()) {
       auto offsets = asImpl().getNonFixedOffsets(IGF, T);
       for (auto &field : getFields()) {
         if (field.isEmpty())
@@ -274,10 +280,10 @@ public:
       return emitDestroyCall(IGF, T, addr);
     }
 
-    if (isOutlined || T.hasOpenedExistential()) {
+    if (isOutlined || T.hasParameterizedExistential()) {
       auto offsets = asImpl().getNonFixedOffsets(IGF, T);
       for (auto &field : getFields()) {
-        if (field.isPOD())
+        if (field.isTriviallyDestroyable())
           continue;
 
         field.getTypeInfo().destroy(IGF,
@@ -291,7 +297,7 @@ public:
 
   // The extra inhabitants of a record are determined from its fields.
   bool mayHaveExtraInhabitants(IRGenModule &IGM) const override {
-    if (!MayHaveExtraInhabitants.hasValue()) {
+    if (!MayHaveExtraInhabitants.has_value()) {
       MayHaveExtraInhabitants = false;
       for (auto &field : asImpl().getFields())
         if (field.getTypeInfo().mayHaveExtraInhabitants(IGM)) {
@@ -418,7 +424,7 @@ public:
 
   const FieldImpl *
   getFixedExtraInhabitantProvidingField(IRGenModule &IGM) const {
-    if (!ExtraInhabitantProvidingField.hasValue()) {
+    if (!ExtraInhabitantProvidingField.has_value()) {
       unsigned mostExtraInhabitants = 0;
       const FieldImpl *fieldWithMost = nullptr;
       const FieldImpl *singleNonFixedField = nullptr;
@@ -538,7 +544,6 @@ public:
   }
 
 private:
-  /// Scan the given field info
   static unsigned findUniqueNonEmptyField(ArrayRef<FieldImpl> fields) {
     unsigned result = 0;
     for (auto &field : fields) {
@@ -546,7 +551,7 @@ private:
       if (field.isEmpty()) continue;
 
       // If the field is not ABI-accessible, suppress this.
-      if (!field.isABIAccessible()) continue;
+      if (!field.isABIAccessible()) return 0;
 
       // If we've already found an index, then there isn't a
       // unique non-empty field.
@@ -591,6 +596,28 @@ public:
     return 0;
   }
 
+  bool canValueWitnessExtraInhabitantsUpTo(IRGenModule &IGM,
+                                           unsigned index) const override {
+    if (auto field = asImpl().getFixedExtraInhabitantProvidingField(IGM)) {
+      // The non-extra-inhabitant-providing fields of the type must be
+      // trivial, because an enum may contain garbage values in those fields'
+      // storage which the value witness operation won't handle.
+      for (auto &otherField : asImpl().getFields()) {
+        if (field == &otherField)
+          continue;
+        auto &ti = otherField.getTypeInfo();
+        if (!ti.isTriviallyDestroyable(ResilienceExpansion::Maximal)) {
+          return false;
+        }
+      }
+
+      return field->getTypeInfo()
+        .canValueWitnessExtraInhabitantsUpTo(IGM, index);
+    }
+    
+    return false;
+  }
+
   APInt getFixedExtraInhabitantValue(IRGenModule &IGM,
                                      unsigned bits,
                                      unsigned index) const override {
@@ -598,27 +625,32 @@ public:
     // inhabitants.
     auto &field = *asImpl().getFixedExtraInhabitantProvidingField(IGM);
     auto &fieldTI = cast<FixedTypeInfo>(field.getTypeInfo());
-    APInt fieldValue = fieldTI.getFixedExtraInhabitantValue(IGM, bits, index);
-    return fieldValue.shl(field.getFixedByteOffset().getValueInBits());
+    auto fieldSize = fieldTI.getFixedExtraInhabitantMask(IGM).getBitWidth();
+
+    auto value = BitPatternBuilder(IGM.Triple.isLittleEndian());
+    value.appendClearBits(field.getFixedByteOffset().getValueInBits());
+    value.append(fieldTI.getFixedExtraInhabitantValue(IGM, fieldSize, index));
+    value.padWithClearBitsTo(bits);
+    return value.build().value();
   }
 
   APInt getFixedExtraInhabitantMask(IRGenModule &IGM) const override {
     auto field = asImpl().getFixedExtraInhabitantProvidingField(IGM);
     if (!field)
       return APInt();
-    
+
     const FixedTypeInfo &fieldTI
       = cast<FixedTypeInfo>(field->getTypeInfo());
     auto targetSize = asImpl().getFixedSize().getValueInBits();
-    
+
     if (fieldTI.isKnownEmpty(ResilienceExpansion::Maximal))
       return APInt(targetSize, 0);
-    
-    APInt fieldMask = fieldTI.getFixedExtraInhabitantMask(IGM);
-    if (targetSize > fieldMask.getBitWidth())
-      fieldMask = fieldMask.zext(targetSize);
-    fieldMask = fieldMask.shl(field->getFixedByteOffset().getValueInBits());
-    return fieldMask;
+
+    auto mask = BitPatternBuilder(IGM.Triple.isLittleEndian());
+    mask.appendClearBits(field->getFixedByteOffset().getValueInBits());
+    mask.append(fieldTI.getFixedExtraInhabitantMask(IGM));
+    mask.padWithClearBitsTo(targetSize);
+    return mask.build().value();
   }
 
   llvm::Value *getExtraInhabitantIndex(IRGenFunction &IGF,
@@ -710,6 +742,22 @@ private:
     }
   }
 
+  template <void (LoadableTypeInfo::*Op)(IRGenFunction &IGF, Explosion &in,
+                                         Address addr, bool isOutlined,
+                                         SILType T) const>
+  void forAllFields(IRGenFunction &IGF, Explosion &in, Address addr,
+                    bool isOutlined, SILType T) const {
+    auto offsets = asImpl().getNonFixedOffsets(IGF);
+    for (auto &field : getFields()) {
+      if (field.isEmpty()) continue;
+
+      Address fieldAddr = field.projectAddress(IGF, addr, offsets);
+      (cast<LoadableTypeInfo>(field.getTypeInfo()).*Op)(IGF, in, fieldAddr,
+                                                    isOutlined,
+                                                    field.getType(IGF.IGM, T));
+    }
+  }
+
 public:
   using super::getFields;
 
@@ -724,8 +772,8 @@ public:
   }
 
   void assign(IRGenFunction &IGF, Explosion &e, Address addr,
-              bool isOutlined) const override {
-    forAllFields<&LoadableTypeInfo::assign>(IGF, e, addr, isOutlined);
+              bool isOutlined, SILType T) const override {
+    forAllFields<&LoadableTypeInfo::assign>(IGF, e, addr, isOutlined, T);
   }
 
   void initialize(IRGenFunction &IGF, Explosion &e, Address addr,
@@ -737,10 +785,10 @@ public:
     return ExplosionSize;
   }
 
-  void reexplode(IRGenFunction &IGF, Explosion &src,
+  void reexplode(Explosion &src,
                  Explosion &dest) const override {
     for (auto &field : getFields())
-      cast<LoadableTypeInfo>(field.getTypeInfo()).reexplode(IGF, src, dest);
+      cast<LoadableTypeInfo>(field.getTypeInfo()).reexplode(src, dest);
   }
 
   void copy(IRGenFunction &IGF, Explosion &src,
@@ -751,10 +799,11 @@ public:
   }
 
   void consume(IRGenFunction &IGF, Explosion &src,
-               Atomicity atomicity) const override {
-    for (auto &field : getFields())
+               Atomicity atomicity, SILType T) const override {
+    for (auto &field : getFields()) {
       cast<LoadableTypeInfo>(field.getTypeInfo())
-          .consume(IGF, src, atomicity);
+          .consume(IGF, src, atomicity, field.getType(IGF.IGM, T));
+    }
   }
 
   void fixLifetime(IRGenFunction &IGF, Explosion &src) const override {
@@ -762,7 +811,8 @@ public:
       cast<LoadableTypeInfo>(field.getTypeInfo()).fixLifetime(IGF, src);
   }
   
-  void packIntoEnumPayload(IRGenFunction &IGF,
+  void packIntoEnumPayload(IRGenModule &IGM,
+                           IRBuilder &builder,
                            EnumPayload &payload,
                            Explosion &src,
                            unsigned startOffset) const override {
@@ -771,7 +821,7 @@ public:
         unsigned offset = field.getFixedByteOffset().getValueInBits()
           + startOffset;
         cast<LoadableTypeInfo>(field.getTypeInfo())
-          .packIntoEnumPayload(IGF, payload, src, offset);
+          .packIntoEnumPayload(IGM, builder, payload, src, offset);
       }
     }
   }
@@ -813,7 +863,6 @@ public:
     fields.reserve(astFields.size());
     fieldTypesForLayout.reserve(astFields.size());
 
-    bool loadable = true;
     auto fieldsABIAccessible = FieldsAreABIAccessible;
 
     unsigned explosionSize = 0;
@@ -830,13 +879,17 @@ public:
 
       auto loadableFieldTI = dyn_cast<LoadableTypeInfo>(&fieldTI);
       if (!loadableFieldTI) {
-        loadable = false;
         continue;
       }
 
       auto &fieldInfo = fields.back();
       fieldInfo.Begin = explosionSize;
-      explosionSize += loadableFieldTI->getExplosionSize();
+      bool overflow = false;
+      explosionSize = llvm::SaturatingAdd(explosionSize, loadableFieldTI->getExplosionSize(), &overflow);
+      if (overflow) {
+        IGM.Context.Diags.diagnose(SourceLoc(), diag::explosion_size_oveflow);
+      }
+
       fieldInfo.End = explosionSize;
     }
 
@@ -847,7 +900,7 @@ public:
     }
 
     // Create the type info.
-    if (loadable) {
+    if (layout.isLoadable()) {
       assert(layout.isFixedLayout());
       assert(fieldsABIAccessible);
       return asImpl()->createLoadable(fields, std::move(layout), explosionSize);

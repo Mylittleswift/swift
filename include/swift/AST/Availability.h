@@ -24,6 +24,7 @@
 
 namespace swift {
 class ASTContext;
+class AvailableAttr;
 class Decl;
 
 /// A lattice of version ranges of the form [x.y.z, +Inf).
@@ -38,7 +39,7 @@ class VersionRange {
   //    x.y.x: all versions greater than or equal to x.y.z
 
   enum class ExtremalRange { Empty, All };
-  
+
   // A version range is either an extremal value (Empty, All) or
   // a single version tuple value representing the lower end point x.y.z of a
   // range [x.y.z, +Inf).
@@ -46,7 +47,7 @@ class VersionRange {
     llvm::VersionTuple LowerEndpoint;
     ExtremalRange ExtremalValue;
   };
-  
+
   unsigned HasLowerEndpoint : 1;
 
 public:
@@ -85,12 +86,24 @@ public:
   bool isContainedIn(const VersionRange &Other) const {
     if (isEmpty() || Other.isAll())
       return true;
-    
+
     if (isAll() || Other.isEmpty())
       return false;
 
     // [v1, +Inf) is contained in [v2, +Inf) if v1 >= v2
     return getLowerEndpoint() >= Other.getLowerEndpoint();
+  }
+
+  // Returns true if all the versions in the Other range are versions in this
+  // range and the ranges are not equal.
+  bool isSupersetOf(const VersionRange &Other) const {
+    if (isEmpty() || Other.isAll())
+      return false;
+
+    if (isAll() || Other.isEmpty())
+      return true;
+
+    return getLowerEndpoint() < Other.getLowerEndpoint();
   }
 
   /// Mutates this range to be a best-effort underapproximation of
@@ -182,47 +195,24 @@ private:
 
 /// Records the reason a declaration is potentially unavailable.
 class UnavailabilityReason {
-public:
-  enum class Kind {
-    /// The declaration is potentially unavailable because it requires an OS
-    /// version range that is not guaranteed by the minimum deployment
-    /// target.
-    RequiresOSVersionRange,
-
-    /// The declaration is potentially unavailable because it is explicitly
-    /// weakly linked.
-    ExplicitlyWeakLinked
-  };
-
 private:
-  // A value of None indicates the declaration is potentially unavailable
-  // because it is explicitly weak linked.
-  Optional<VersionRange> RequiredDeploymentRange;
+  VersionRange RequiredDeploymentRange;
 
-  UnavailabilityReason(const Optional<VersionRange> &RequiredDeploymentRange)
+  explicit UnavailabilityReason(const VersionRange RequiredDeploymentRange)
       : RequiredDeploymentRange(RequiredDeploymentRange) {}
 
 public:
-  static UnavailabilityReason explicitlyWeaklyLinked() {
-    return UnavailabilityReason(None);
-  }
-
   static UnavailabilityReason requiresVersionRange(const VersionRange Range) {
     return UnavailabilityReason(Range);
   }
 
-  Kind getReasonKind() const {
-    if (RequiredDeploymentRange.hasValue()) {
-      return Kind::RequiresOSVersionRange;
-    } else {
-      return Kind::ExplicitlyWeakLinked;
-    }
+  const VersionRange &getRequiredOSVersionRange() const {
+    return RequiredDeploymentRange;
   }
 
-  const VersionRange &getRequiredOSVersionRange() const {
-    assert(getReasonKind() == Kind::RequiresOSVersionRange);
-    return RequiredDeploymentRange.getValue();
-  }
+  /// Returns true if the required OS version range's lower endpoint is at or
+  /// below the deployment target of the given ASTContext.
+  bool requiresDeploymentTargetOrEarlier(ASTContext &Ctx) const;
 };
 
 /// Represents everything that a particular chunk of code may assume about its
@@ -234,15 +224,29 @@ public:
 /// See #unionWith, #intersectWith, and #constrainWith.
 ///
 /// [lattice]: http://mathworld.wolfram.com/Lattice.html
+///
+/// NOTE: Generally you should use the utilities on \c AvailabilityInference
+/// to create an \c AvailabilityContext, rather than creating one directly.
 class AvailabilityContext {
   VersionRange OSVersion;
+  llvm::Optional<bool> SPI;
 public:
   /// Creates a context that requires certain versions of the target OS.
-  explicit AvailabilityContext(VersionRange OSVersion) : OSVersion(OSVersion) {}
+  explicit AvailabilityContext(VersionRange OSVersion,
+                               llvm::Optional<bool> SPI = llvm::None)
+    : OSVersion(OSVersion), SPI(SPI) {}
 
   /// Creates a context that imposes the constraints of the ASTContext's
   /// deployment target.
-  static AvailabilityContext forDeploymentTarget(ASTContext &Ctx);
+  static AvailabilityContext forDeploymentTarget(const ASTContext &Ctx);
+
+  /// Creates a context that imposes the constraints of the ASTContext's
+  /// inlining target (i.e. minimum inlining version).
+  static AvailabilityContext forInliningTarget(const ASTContext &Ctx);
+
+  /// Creates a context that imposes the constraints of the ASTContext's
+  /// minimum runtime version.
+  static AvailabilityContext forRuntimeTarget(const ASTContext &Ctx);
 
   /// Creates a context that imposes no constraints.
   ///
@@ -264,8 +268,15 @@ public:
   /// Returns true if \p other makes stronger guarantees than this context.
   ///
   /// That is, `a.isContainedIn(b)` implies `a.union(b) == b`.
-  bool isContainedIn(AvailabilityContext other) const {
+  bool isContainedIn(const AvailabilityContext &other) const {
     return OSVersion.isContainedIn(other.OSVersion);
+  }
+
+  /// Returns true if \p other is a strict subset of this context.
+  ///
+  /// That is, `a.isSupersetOf(b)` implies `a != b` and `a.union(b) == a`.
+  bool isSupersetOf(const AvailabilityContext &other) const {
+    return OSVersion.isSupersetOf(other.OSVersion);
   }
 
   /// Returns true if this context has constraints that make it impossible to
@@ -292,7 +303,7 @@ public:
   ///
   /// As an example, this is used when figuring out the required availability
   /// for a type that references multiple nominal decls.
-  void intersectWith(AvailabilityContext other) {
+  void intersectWith(const AvailabilityContext &other) {
     OSVersion.intersectWith(other.getOSVersion());
   }
 
@@ -303,7 +314,7 @@ public:
   /// treating some invalid deployment environments as available.
   ///
   /// As an example, this is used for the true branch of `#available`.
-  void constrainWith(AvailabilityContext other) {
+  void constrainWith(const AvailabilityContext &other) {
     OSVersion.constrainWith(other.getOSVersion());
   }
 
@@ -315,21 +326,32 @@ public:
   ///
   /// As an example, this is used for the else branch of a conditional with
   /// multiple `#available` checks.
-  void unionWith(AvailabilityContext other) {
+  void unionWith(const AvailabilityContext &other) {
     OSVersion.unionWith(other.getOSVersion());
+  }
+
+  bool isAvailableAsSPI() const { return SPI && *SPI; }
+
+  /// Returns a representation of this range as a string for debugging purposes.
+  std::string getAsString() const {
+    return "AvailabilityContext(" + OSVersion.getAsString() +
+           (isAvailableAsSPI() ? ", spi" : "") + ")";
   }
 };
 
-
 class AvailabilityInference {
 public:
+  /// Returns the decl that should be considered the parent decl of the given
+  /// decl when looking for inherited availability annotations.
+  static const Decl *parentDeclForInferredAvailability(const Decl *D);
+
   /// Infers the common availability required to access an array of
   /// declarations and adds attributes reflecting that availability
   /// to ToDecl.
   static void
   applyInferredAvailableAttrs(Decl *ToDecl,
-                                 ArrayRef<const Decl *> InferredFromDecls,
-                                 ASTContext &Context);
+                              ArrayRef<const Decl *> InferredFromDecls,
+                              ASTContext &Context);
 
   static AvailabilityContext inferForType(Type t);
 
@@ -337,13 +359,34 @@ public:
   ///  We assume a declaration without an annotation is always available.
   static AvailabilityContext availableRange(const Decl *D, ASTContext &C);
 
+  /// Returns the availability context for a declaration with the given
+  /// @available attribute.
+  ///
+  /// NOTE: The attribute must be active on the current platform.
+  static AvailabilityContext availableRange(const AvailableAttr *attr,
+                                            ASTContext &C);
+
+  /// Returns the attribute that should be used to determine the availability
+  /// range of the given declaration, or nullptr if there is none.
+  static const AvailableAttr *attrForAnnotatedAvailableRange(const Decl *D,
+                                                             ASTContext &Ctx);
+
   /// Returns the context for which the declaration
   /// is annotated as available, or None if the declaration
   /// has no availability annotation.
-  static Optional<AvailabilityContext> annotatedAvailableRange(const Decl *D,
-                                                               ASTContext &C);
+  static llvm::Optional<AvailabilityContext>
+  annotatedAvailableRange(const Decl *D, ASTContext &C);
 
+  static AvailabilityContext
+  annotatedAvailableRangeForAttr(const SpecializeAttr *attr, ASTContext &ctx);
 };
+
+/// Given a declaration upon which an availability attribute would appear in
+/// concrete syntax, return a declaration to which the parser
+/// actually attaches the attribute in the abstract syntax tree. We use this
+/// function to determine whether the concrete syntax already has an
+/// availability attribute.
+const Decl *abstractSyntaxDeclForAvailableAttribute(const Decl *D);
 
 } // end namespace swift
 

@@ -21,6 +21,7 @@
 
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/Decl.h"
+#include "swift/AST/DistributedDecl.h"
 #include "swift/AST/ProtocolAssociations.h"
 #include "swift/AST/Types.h"
 #include "swift/SIL/TypeLowering.h"
@@ -38,10 +39,12 @@ namespace swift {
 /// physical projection (if we decide to support that).
 ///
 /// You must override the following methods:
+/// - addProtocolConformanceDescriptor()
 /// - addOutOfLineBaseProtocol()
-/// - addMethod()
-/// - addConstructor()
 /// - addAssociatedType()
+/// - addAssociatedConformance()
+/// - addMethod()
+/// - addPlaceholder()
 
 template <class T> class SILWitnessVisitor : public ASTVisitor<T> {
   T &asDerived() { return *static_cast<T*>(this); }
@@ -51,8 +54,12 @@ public:
     // The protocol conformance descriptor gets added first.
     asDerived().addProtocolConformanceDescriptor();
 
-    for (const auto &reqt : protocol->getRequirementSignature()) {
+    auto requirements = protocol->getRequirementSignature().getRequirements();
+    for (const auto &reqt : requirements) {
       switch (reqt.getKind()) {
+      case RequirementKind::SameShape:
+        llvm_unreachable("Same-shape requirement not supported here");
+
       // These requirements don't show up in the witness table.
       case RequirementKind::Superclass:
       case RequirementKind::SameType:
@@ -62,9 +69,7 @@ public:
       case RequirementKind::Conformance: {
         auto type = reqt.getFirstType()->getCanonicalType();
         assert(type->isTypeParameter());
-        auto requirement =
-          cast<ProtocolType>(reqt.getSecondType()->getCanonicalType())
-            ->getDecl();
+        auto requirement = reqt.getProtocolDecl();
 
         // ObjC protocols do not have witnesses.
         if (!Lowering::TypeConverter::protocolRequiresWitnessTable(requirement))
@@ -91,13 +96,11 @@ public:
     }
 
     // Add the associated types.
-    for (Decl *member : protocol->getMembers()) {
-      if (auto associatedType = dyn_cast<AssociatedTypeDecl>(member)) {
-        // If this is a new associated type (which does not override an
-        // existing associated type), add it.
-        if (associatedType->getOverriddenDecls().empty())
-          asDerived().addAssociatedType(AssociatedType(associatedType));
-      }
+    for (auto *associatedType : protocol->getAssociatedTypeMembers()) {
+      // If this is a new associated type (which does not override an
+      // existing associated type), add it.
+      if (associatedType->getOverriddenDecls().empty())
+        asDerived().addAssociatedType(AssociatedType(associatedType));
     }
 
     if (asDerived().shouldVisitRequirementSignatureOnly())
@@ -122,14 +125,19 @@ public:
 
   void visitAbstractStorageDecl(AbstractStorageDecl *sd) {
     sd->visitOpaqueAccessors([&](AccessorDecl *accessor) {
-      if (SILDeclRef::requiresNewWitnessTableEntry(accessor))
+      if (accessor->requiresNewWitnessTableEntry()) {
         asDerived().addMethod(SILDeclRef(accessor, SILDeclRef::Kind::Func));
+        addAutoDiffDerivativeMethodsIfRequired(accessor,
+                                               SILDeclRef::Kind::Func);
+      }
     });
   }
 
   void visitConstructorDecl(ConstructorDecl *cd) {
-    if (SILDeclRef::requiresNewWitnessTableEntry(cd))
+    if (cd->requiresNewWitnessTableEntry()) {
       asDerived().addMethod(SILDeclRef(cd, SILDeclRef::Kind::Allocator));
+      addAutoDiffDerivativeMethodsIfRequired(cd, SILDeclRef::Kind::Allocator);
+    }
   }
 
   void visitAccessorDecl(AccessorDecl *func) {
@@ -138,8 +146,11 @@ public:
 
   void visitFuncDecl(FuncDecl *func) {
     assert(!isa<AccessorDecl>(func));
-    if (SILDeclRef::requiresNewWitnessTableEntry(func))
+    if (func->requiresNewWitnessTableEntry()) {
       asDerived().addMethod(SILDeclRef(func, SILDeclRef::Kind::Func));
+      addAutoDiffDerivativeMethodsIfRequired(func, SILDeclRef::Kind::Func);
+      addDistributedWitnessMethodsIfRequired(func, SILDeclRef::Kind::Func);
+    }
   }
 
   void visitMissingMemberDecl(MissingMemberDecl *placeholder) {
@@ -165,6 +176,36 @@ public:
 
   void visitPoundDiagnosticDecl(PoundDiagnosticDecl *pdd) {
     // We don't care about diagnostics at this stage.
+  }
+
+private:
+  void addAutoDiffDerivativeMethodsIfRequired(AbstractFunctionDecl *AFD,
+                                              SILDeclRef::Kind kind) {
+    SILDeclRef declRef(AFD, kind);
+    for (auto *diffAttr : AFD->getAttrs().getAttributes<DifferentiableAttr>()) {
+      asDerived().addMethod(declRef.asAutoDiffDerivativeFunction(
+          AutoDiffDerivativeFunctionIdentifier::get(
+              AutoDiffDerivativeFunctionKind::JVP,
+              diffAttr->getParameterIndices(),
+              diffAttr->getDerivativeGenericSignature(),
+              AFD->getASTContext())));
+      asDerived().addMethod(declRef.asAutoDiffDerivativeFunction(
+          AutoDiffDerivativeFunctionIdentifier::get(
+              AutoDiffDerivativeFunctionKind::VJP,
+              diffAttr->getParameterIndices(),
+              diffAttr->getDerivativeGenericSignature(),
+              AFD->getASTContext())));
+    }
+  }
+
+  void addDistributedWitnessMethodsIfRequired(AbstractFunctionDecl *AFD,
+                                              SILDeclRef::Kind kind) {
+    if (!AFD->isDistributed())
+      return;
+
+    // Add another which will be witnessed by the 'distributed thunk'
+    SILDeclRef declRef(AFD, kind);
+    asDerived().addMethod(declRef.asDistributed());
   }
 };
 

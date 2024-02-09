@@ -18,7 +18,7 @@ import MissingDependencyFromSwift
 // CHECK-NOT: no such module 'MissingDependencyFromSwift'
 
 import MissingDependencyFromClang
-// CHECK: {{.+}}/Inputs/broken-modules/MissingDependencyFromClang.h:1:9: error: module 'Dependency' not found
+// CHECK: {{.+}}{{/|\\}}Inputs{{/|\\}}broken-modules{{/|\\}}MissingDependencyFromClang.h:1:9: error: module 'Dependency' not found
 // CHECK: broken-modules.swift:[[@LINE-2]]:8: error: could not build Objective-C module 'MissingDependencyFromClang'
 // CHECK: error: no such module 'MissingDependencyFromClang'
 
@@ -37,4 +37,4 @@ import BrokenClangModule
 
 
 _ = BrokenClangModule.x
-// CHECK: broken-modules.swift:[[@LINE-1]]:5: error: use of unresolved identifier 'BrokenClangModule'
+// CHECK: broken-modules.swift:[[@LINE-1]]:5: error: cannot find 'BrokenClangModule' in scope

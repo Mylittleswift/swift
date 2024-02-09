@@ -28,7 +28,7 @@ public typealias CUnsignedShort = UInt16
 public typealias CUnsignedInt = UInt32
 
 /// The C 'unsigned long' type.
-#if os(Windows) && arch(x86_64)
+#if os(Windows) && (arch(x86_64) || arch(arm64))
 public typealias CUnsignedLong = UInt32
 #else
 public typealias CUnsignedLong = UInt
@@ -47,7 +47,7 @@ public typealias CShort = Int16
 public typealias CInt = Int32
 
 /// The C 'long' type.
-#if os(Windows) && arch(x86_64)
+#if os(Windows) && (arch(x86_64) || arch(arm64))
 public typealias CLong = Int32
 #else
 public typealias CLong = Int
@@ -55,6 +55,12 @@ public typealias CLong = Int
 
 /// The C 'long long' type.
 public typealias CLongLong = Int64
+
+#if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
+/// The C '_Float16' type.
+@available(SwiftStdlib 5.3, *)
+public typealias CFloat16 = Float16
+#endif
 
 /// The C 'float' type.
 public typealias CFloat = Float
@@ -80,19 +86,45 @@ public typealias CLongDouble = Double
 // which we don't yet have in Swift.
 #if arch(x86_64) || arch(i386)
 public typealias CLongDouble = Float80
-#endif
-// TODO: Fill in definitions for other OSes.
-#if arch(s390x)
+#elseif arch(s390x)
 // On s390x '-mlong-double-64' option with size of 64-bits makes the
 // Long Double type equivalent to Double type.
 public typealias CLongDouble = Double
 #endif
+#elseif os(Android)
+// On Android, long double is Float128 for AAPCS64, which we don't have yet in
+// Swift (https://github.com/apple/swift/issues/51573); and Double for ARMv7.
+#if arch(arm)
+public typealias CLongDouble = Double
+#endif
+#elseif os(OpenBSD)
+#if arch(x86_64)
+public typealias CLongDouble = Float80
+#else
+#error("CLongDouble needs to be defined for this OpenBSD architecture")
+#endif
+#elseif os(FreeBSD)
+#if arch(x86_64) || arch(i386)
+public typealias CLongDouble = Float80
+#else
+#error("CLongDouble needs to be defined for this FreeBSD architecture")
+#endif
+#elseif $Embedded
+#if arch(x86_64) || arch(i386)
+public typealias CLongDouble = Double
+#endif
+#else
+// TODO: define CLongDouble for other OSes
 #endif
 
 // FIXME: Is it actually UTF-32 on Darwin?
 //
 /// The C++ 'wchar_t' type.
+#if os(Windows)
+public typealias CWideChar = UInt16
+#else
 public typealias CWideChar = Unicode.Scalar
+#endif
 
 // FIXME: Swift should probably have a UTF-16 type other than UInt16.
 //
@@ -109,7 +141,7 @@ public typealias CBool = Bool
 ///
 /// Opaque pointers are used to represent C pointers to types that
 /// cannot be represented in Swift, such as incomplete struct types.
-@_fixed_layout
+@frozen
 public struct OpaquePointer {
   @usableFromInline
   internal var _rawValue: Builtin.RawPointer
@@ -135,7 +167,7 @@ public struct OpaquePointer {
 
   /// Converts a typed `UnsafePointer` to an opaque C pointer.
   @_transparent
-  public init<T>(_ from: UnsafePointer<T>) {
+  public init<T>(@_nonEphemeral _ from: UnsafePointer<T>) {
     self._rawValue = from._rawValue
   }
 
@@ -143,14 +175,14 @@ public struct OpaquePointer {
   ///
   /// The result is `nil` if `from` is `nil`.
   @_transparent
-  public init?<T>(_ from: UnsafePointer<T>?) {
+  public init?<T>(@_nonEphemeral _ from: UnsafePointer<T>?) {
     guard let unwrapped = from else { return nil }
     self.init(unwrapped)
   }
 
   /// Converts a typed `UnsafeMutablePointer` to an opaque C pointer.
   @_transparent
-  public init<T>(_ from: UnsafeMutablePointer<T>) {
+  public init<T>(@_nonEphemeral _ from: UnsafeMutablePointer<T>) {
     self._rawValue = from._rawValue
   }
 
@@ -158,7 +190,7 @@ public struct OpaquePointer {
   ///
   /// The result is `nil` if `from` is `nil`.
   @_transparent
-  public init?<T>(_ from: UnsafeMutablePointer<T>?) {
+  public init?<T>(@_nonEphemeral _ from: UnsafeMutablePointer<T>?) {
     guard let unwrapped = from else { return nil }
     self.init(unwrapped)
   }
@@ -183,7 +215,11 @@ extension OpaquePointer: Hashable {
   }
 }
 
-extension OpaquePointer : CustomDebugStringConvertible {
+@available(*, unavailable)
+extension OpaquePointer : Sendable { }
+
+@_unavailableInEmbedded
+extension OpaquePointer: CustomDebugStringConvertible {
   /// A textual representation of the pointer, suitable for debugging.
   public var debugDescription: String {
     return _rawPointerToString(_rawValue)
@@ -220,7 +256,7 @@ extension UInt {
 
 /// A wrapper around a C `va_list` pointer.
 #if arch(arm64) && !(os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(Windows))
-@_fixed_layout
+@frozen
 public struct CVaListPointer {
   @usableFromInline // unsafe-performance
   internal var _value: (__stack: UnsafeMutablePointer<Int>?,
@@ -240,7 +276,8 @@ public struct CVaListPointer {
   }
 }
 
-extension CVaListPointer : CustomDebugStringConvertible {
+@_unavailableInEmbedded
+extension CVaListPointer: CustomDebugStringConvertible {
   public var debugDescription: String {
     return "(\(_value.__stack.debugDescription), " +
            "\(_value.__gr_top.debugDescription), " +
@@ -252,7 +289,7 @@ extension CVaListPointer : CustomDebugStringConvertible {
 
 #else
 
-@_fixed_layout
+@frozen
 public struct CVaListPointer {
   @usableFromInline // unsafe-performance
   internal var _value: UnsafeMutableRawPointer
@@ -264,7 +301,8 @@ public struct CVaListPointer {
   }
 }
 
-extension CVaListPointer : CustomDebugStringConvertible {
+@_unavailableInEmbedded
+extension CVaListPointer: CustomDebugStringConvertible {
   /// A textual representation of the pointer, suitable for debugging.
   public var debugDescription: String {
     return _value.debugDescription
@@ -273,6 +311,13 @@ extension CVaListPointer : CustomDebugStringConvertible {
 
 #endif
 
+@available(*, unavailable)
+extension CVaListPointer: Sendable { }
+
+/// Copy `size` bytes of memory from `src` into `dest`.
+///
+/// The memory regions `src..<src + size` and
+/// `dest..<dest + size` should not overlap.
 @inlinable
 internal func _memcpy(
   dest destination: UnsafeMutableRawPointer,
@@ -287,10 +332,10 @@ internal func _memcpy(
     /*volatile:*/ false._value)
 }
 
-/// Copy `count` bytes of memory from `src` into `dest`.
+/// Copy `size` bytes of memory from `src` into `dest`.
 ///
-/// The memory regions `source..<source + count` and
-/// `dest..<dest + count` may overlap.
+/// The memory regions `src..<src + size` and
+/// `dest..<dest + size` may overlap.
 @inlinable
 internal func _memmove(
   dest destination: UnsafeMutableRawPointer,

@@ -14,8 +14,8 @@
 ///
 /// When you use this type, you become partially responsible for
 /// keeping the object alive.
-@_fixed_layout
-public struct Unmanaged<Instance : AnyObject> {
+@frozen
+public struct Unmanaged<Instance: AnyObject> {
   @usableFromInline
   internal unowned(unsafe) var _value: Instance
 
@@ -31,8 +31,18 @@ public struct Unmanaged<Instance : AnyObject> {
   /// - Parameter value: An opaque C pointer.
   /// - Returns: An unmanaged class reference to `value`.
   @_transparent
-  public static func fromOpaque(_ value: UnsafeRawPointer) -> Unmanaged {
-    return Unmanaged(_private: unsafeBitCast(value, to: Instance.self))
+  public static func fromOpaque(
+    @_nonEphemeral _ value: UnsafeRawPointer
+  ) -> Unmanaged {
+    // NOTE: `value` is allowed to represent a dangling reference, so 
+    // this function must not ever try to dereference it. For
+    // example, this function must NOT use the init(_private:) initializer
+    // because doing so requires materializing a strong reference to 'Instance'.
+    // This materialization would be enough to convince the compiler to add
+    // retain/releases which must be avoided for the opaque pointer functions.
+    // 'Unmanaged<Instance>' is layout compatible with 'UnsafeRawPointer' and
+    // casting to that will not attempt to retain the reference held at 'value'.
+    unsafeBitCast(value, to: Unmanaged<Instance>.self)
   }
 
   /// Unsafely converts an unmanaged class reference to a pointer.
@@ -46,7 +56,13 @@ public struct Unmanaged<Instance : AnyObject> {
   /// - Returns: An opaque pointer to the value of this unmanaged reference.
   @_transparent
   public func toOpaque() -> UnsafeMutableRawPointer {
-    return unsafeBitCast(_value, to: UnsafeMutableRawPointer.self)
+    // NOTE: `self` is allowed to be a dangling reference.
+    // Therefore, this function must not unsafeBitCast '_value' because
+    // that will get a strong reference temporary value that the compiler will
+    // try to retain/release. Use 'self' to avoid this. 'Unmanaged<Instance>' is
+    // layout compatible with 'UnsafeRawPointer' and casting from that will not
+    // attempt to retain the reference held at '_value'.
+    unsafeBitCast(self, to: UnsafeMutableRawPointer.self)
   }
 
   /// Creates an unmanaged reference with an unbalanced retain.
@@ -62,7 +78,9 @@ public struct Unmanaged<Instance : AnyObject> {
   /// - Returns: An unmanaged reference to the object passed as `value`.
   @_transparent
   public static func passRetained(_ value: Instance) -> Unmanaged {
-    return Unmanaged(_private: value).retain()
+    // Retain 'value' before it becomes unmanaged. This may be its last use.
+    Builtin.retain(value)
+    return Unmanaged(_private: value)
   }
 
   /// Creates an unmanaged reference without performing an unbalanced
@@ -89,7 +107,7 @@ public struct Unmanaged<Instance : AnyObject> {
   /// and you know that you're not responsible for releasing the result.
   ///
   /// - Returns: The object referenced by this `Unmanaged` instance.
-  @inlinable // unsafe-performance
+  @_transparent // unsafe-performance
   public func takeUnretainedValue() -> Instance {
     return _value
   }
@@ -101,7 +119,7 @@ public struct Unmanaged<Instance : AnyObject> {
   /// and you know that you're responsible for releasing the result.
   ///
   /// - Returns: The object referenced by this `Unmanaged` instance.
-  @inlinable // unsafe-performance
+  @_transparent // unsafe-performance
   public func takeRetainedValue() -> Instance {
     let result = _value
     release()
@@ -122,7 +140,7 @@ public struct Unmanaged<Instance : AnyObject> {
   /// Violation of this will incur undefined behavior.
   ///
   /// A lifetime of a reference 'the instance' is fixed over a point in the
-  /// programm if:
+  /// program if:
   ///
   /// * There exists a global variable that references 'the instance'.
   ///
@@ -194,20 +212,26 @@ public struct Unmanaged<Instance : AnyObject> {
   ///        }
   ///    }
   ///
-  ///    func doSomething(_ u : Unmanaged<Owned>) {
+  ///    func doSomething(_ u: Unmanaged<Owned>) {
   ///      u._withUnsafeGuaranteedRef {
   ///        $0.doSomething()
   ///      }
   ///    }
   ///  }
   @inlinable // unsafe-performance
+  @_transparent
   public func _withUnsafeGuaranteedRef<Result>(
     _ body: (Instance) throws -> Result
   ) rethrows -> Result {
-    let (guaranteedInstance, token) = Builtin.unsafeGuaranteed(_value)
-    let result = try body(guaranteedInstance)
-    Builtin.unsafeGuaranteedEnd(token)
-    return result
+    var tmp = self
+    // Builtin.convertUnownedUnsafeToGuaranteed expects to have a base value
+    // that the +0 value depends on. In this case, we are assuming that is done
+    // for us opaquely already. So, the builtin will emit a mark_dependence on a
+    // trivial object. The optimizer knows to eliminate that so we do not have
+    // any overhead from this.
+    let fakeBase: Int? = nil
+    return try body(Builtin.convertUnownedUnsafeToGuaranteed(fakeBase,
+                                                             &tmp._value))
   }
 
   /// Performs an unbalanced retain of the object.
@@ -232,3 +256,6 @@ public struct Unmanaged<Instance : AnyObject> {
   }
 #endif
 }
+
+extension Unmanaged: Sendable where Instance: Sendable { }
+

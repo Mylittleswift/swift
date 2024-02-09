@@ -36,7 +36,8 @@ using namespace irgen;
 
 IRGenTypeVerifierFunction::IRGenTypeVerifierFunction(IRGenModule &IGM,
                                                      llvm::Function *f)
-: IRGenFunction(IGM, f), VerifierFn(IGM.getVerifyTypeLayoutAttributeFn()) {
+    : IRGenFunction(IGM, f),
+      VerifierFn(IGM.getVerifyTypeLayoutAttributeFunctionPointer()) {
   // Verifier functions are always artificial.
   if (IGM.DebugInfo)
     IGM.DebugInfo->emitArtificialFunction(*this, f);
@@ -87,9 +88,9 @@ IRGenTypeVerifierFunction::emit(ArrayRef<CanType> formalTypes) {
                                == FixedPacking::OffsetZero),
              "is-inline bit");
       verifyValues(metadata,
-             emitLoadOfIsPOD(*this, layoutType),
-             getBoolConstant(fixedTI->isPOD(ResilienceExpansion::Maximal)),
-             "is-POD bit");
+             emitLoadOfIsTriviallyDestroyable(*this, layoutType),
+             getBoolConstant(fixedTI->isTriviallyDestroyable(ResilienceExpansion::Maximal)),
+             "is-trivially-destructible bit");
       verifyValues(metadata,
              emitLoadOfIsBitwiseTakable(*this, layoutType),
              getBoolConstant(fixedTI->isBitwiseTakable(ResilienceExpansion::Maximal)),
@@ -111,11 +112,11 @@ IRGenTypeVerifierFunction::emit(ArrayRef<CanType> formalTypes) {
         auto fixedXIBuf = createAlloca(fixedTI->getStorageType(),
                                            fixedTI->getFixedAlignment(),
                                            "extra-inhabitant");
-        auto xiOpaque = Builder.CreateBitCast(xiBuf, IGM.OpaquePtrTy);
-        auto fixedXIOpaque = Builder.CreateBitCast(fixedXIBuf,
-                                                       IGM.OpaquePtrTy);
+        auto xiOpaque = Builder.CreateElementBitCast(xiBuf, IGM.OpaqueTy);
+        auto fixedXIOpaque =
+            Builder.CreateElementBitCast(fixedXIBuf, IGM.OpaqueTy);
         auto xiMask = fixedTI->getFixedExtraInhabitantMask(IGM);
-        auto xiSchema = EnumPayloadSchema::withBitSize(xiMask.getBitWidth());
+        auto xiSchema = EnumPayloadSchema(xiMask.getBitWidth());
 
         auto maxXiCount = std::min(xiCount, 256u);
         auto numCases = llvm::ConstantInt::get(IGM.Int32Ty, maxXiCount);
@@ -129,7 +130,7 @@ IRGenTypeVerifierFunction::emit(ArrayRef<CanType> formalTypes) {
           Builder.CreateMemSet(xiBuf.getAddress(),
                                    llvm::ConstantInt::get(IGM.Int8Ty, 0x5A),
                                    fixedTI->getFixedSize().getValue(),
-                                   fixedTI->getFixedAlignment().getValue());
+                                   llvm::MaybeAlign(fixedTI->getFixedAlignment().getValue()));
           
           // Ask the runtime to store an extra inhabitant.
           auto tag = llvm::ConstantInt::get(IGM.Int32Ty, i+1);
@@ -291,8 +292,8 @@ void IRGenModule::emitTypeVerifier() {
     return;
 
   // Find the entry point.
-  SILFunction *EntryPoint =
-    getSILModule().lookUpFunction(SWIFT_ENTRY_POINT_FUNCTION);
+  SILFunction *EntryPoint = getSILModule().lookUpFunction(
+      getSILModule().getASTContext().getEntryPointFunctionName());
 
   if (!EntryPoint)
     return;
@@ -317,7 +318,7 @@ void IRGenModule::emitTypeVerifier() {
     Builder.llvm::IRBuilderBase::SetInsertPoint(EntryBB, IP);
     if (DebugInfo)
       DebugInfo->setEntryPointLoc(Builder);
-    Builder.CreateCall(VerifierFunction, {});
+    Builder.CreateCall(fnTy, VerifierFunction, {});
   }
 
   IRGenTypeVerifierFunction VerifierIGF(*this, VerifierFunction);

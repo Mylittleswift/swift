@@ -2,6 +2,7 @@
 // REQUIRES: objc_interop
 import ImportAsMember.A
 import ImportAsMember.Class
+import Foundation
 
 public func returnGlobalVar() -> Double {
 	return Struct1.globalVar
@@ -34,7 +35,7 @@ public func returnNullableStringGlobalVar() -> String? {
 // CHECK:   [[VAL:%.*]] = load [copy] %0 : $*NSString
 // CHECK:   [[BRIDGE:%.*]] = function_ref @$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ
 // CHECK:   [[RESULT:%.*]] = apply [[BRIDGE]](
-// CHECK:   [[SOME:%.*]] = enum $Optional<String>, #Optional.some!enumelt.1, [[RESULT]]
+// CHECK:   [[SOME:%.*]] = enum $Optional<String>, #Optional.some!enumelt, [[RESULT]]
 // CHECK:   return [[SOME]] : $Optional<String>
 // CHECK-NEXT: }
 
@@ -45,11 +46,12 @@ public func useClass(d: Double, opts: SomeClass.Options) {
   // CHECK: [[OBJ:%[0-9]+]] = apply [[CTOR]]([[D]])
   let o = SomeClass(value: d)
 
-  // CHECK: [[BORROWED_OBJ:%.*]] = begin_borrow [[OBJ]]
+  // CHECK: [[MOVED_OBJ:%.*]] = move_value [lexical] [var_decl] [[OBJ]]
+  // CHECK: [[BORROWED_OBJ:%.*]] = begin_borrow [[MOVED_OBJ]]
   // CHECK: [[APPLY_FN:%[0-9]+]] = function_ref @IAMSomeClassApplyOptions : $@convention(c) (SomeClass, SomeClass.Options) -> ()
   // CHECK: apply [[APPLY_FN]]([[BORROWED_OBJ]], [[OPTS]])
   // CHECK: end_borrow [[BORROWED_OBJ]]
-  // CHECK: destroy_value [[OBJ]]
+  // CHECK: destroy_value [[MOVED_OBJ]]
   o.applyOptions(opts)
 }
 
@@ -65,7 +67,6 @@ extension SomeClass {
 }
 
 public func useSpecialInit() -> Struct1 {
-  // FIXME: the below triggers an assert, due to number or params mismatch
-  // return Struct1(specialLabel:())
+  return Struct1(specialLabel:())
 }
 

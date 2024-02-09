@@ -54,6 +54,7 @@ namespace irgen {
   class OwnedAddress;
   class RValue;
   class RValueSchema;
+  class TypeLayoutEntry;
 
 /// Ways in which an object can fit into a fixed-size buffer.
 enum class FixedPacking {
@@ -94,22 +95,26 @@ class TypeInfo {
   friend class TypeConverter;
 
 protected:
+  // clang-format off
   union {
     uint64_t OpaqueBits;
 
     SWIFT_INLINE_BITFIELD_BASE(TypeInfo,
-                               bitmax(NumSpecialTypeInfoKindBits,8)+6+1+1+3+1+1,
+                             bitmax(NumSpecialTypeInfoKindBits,8)+6+1+1+1+3+1+1,
       /// The kind of supplemental API this type has, if any.
       Kind : bitmax(NumSpecialTypeInfoKindBits,8),
 
       /// The storage alignment of this type in log2 bytes.
       AlignmentShift : 6,
 
-      /// Whether this type is known to be POD.
-      POD : 1,
-
+      /// Whether this type is known to be trivially destructible.
+      TriviallyDestroyable : 1,
+      
       /// Whether this type is known to be bitwise-takable.
       BitwiseTakable : 1,
+
+      /// Whether this type is known to be copyable.
+      Copyable : 1,
 
       /// An arbitrary discriminator for the subclass.  This is useful for e.g.
       /// distinguishing between different TypeInfos that all implement the same
@@ -139,20 +144,23 @@ protected:
       Size : 32
     );
   } Bits;
+  // clang-format on
+
   enum { InvalidSubclassKind = 0x7 };
 
-  TypeInfo(llvm::Type *Type, Alignment A, IsPOD_t pod,
+  TypeInfo(llvm::Type *Type, Alignment A, IsTriviallyDestroyable_t pod,
            IsBitwiseTakable_t bitwiseTakable,
+           IsCopyable_t copyable,
            IsFixedSize_t alwaysFixedSize,
            IsABIAccessible_t abiAccessible,
            SpecialTypeInfoKind stik) : StorageType(Type) {
     assert(stik >= SpecialTypeInfoKind::Fixed || !alwaysFixedSize);
-    assert(!A.isZero() && "Invalid alignment");
     Bits.OpaqueBits = 0;
     Bits.TypeInfo.Kind = unsigned(stik);
     Bits.TypeInfo.AlignmentShift = llvm::Log2_32(A.getValue());
-    Bits.TypeInfo.POD = pod;
+    Bits.TypeInfo.TriviallyDestroyable = pod;
     Bits.TypeInfo.BitwiseTakable = bitwiseTakable;
+    Bits.TypeInfo.Copyable = copyable;
     Bits.TypeInfo.SubclassKind = InvalidSubclassKind;
     Bits.TypeInfo.AlwaysFixedSize = alwaysFixedSize;
     Bits.TypeInfo.ABIAccessible = abiAccessible;
@@ -206,10 +214,16 @@ public:
     return IsABIAccessible_t(Bits.TypeInfo.ABIAccessible);
   }
 
-  /// Whether this type is known to be POD, i.e. to not require any
-  /// particular action on copy or destroy.
-  IsPOD_t isPOD(ResilienceExpansion expansion) const {
-    return IsPOD_t(Bits.TypeInfo.POD);
+  /// Whether this type is known to be trivially destroyable, i.e. to not
+  /// require any particular action on destroy. If the type is also copyable,
+  /// this implies that copying is also bitwise, i.e., equivalent to memcpy.
+  IsTriviallyDestroyable_t isTriviallyDestroyable(ResilienceExpansion expansion) const {
+    return IsTriviallyDestroyable_t(Bits.TypeInfo.TriviallyDestroyable);
+  }
+  
+  /// Whether this type is known to be copyable.
+  IsCopyable_t isCopyable(ResilienceExpansion expansion) const {
+    return IsCopyable_t(Bits.TypeInfo.Copyable);
   }
   
   /// Whether this type is known to be bitwise-takable, i.e. "initializeWithTake"
@@ -286,7 +300,7 @@ public:
   virtual llvm::Value *getSize(IRGenFunction &IGF, SILType T) const = 0;
   virtual llvm::Value *getAlignmentMask(IRGenFunction &IGF, SILType T) const = 0;
   virtual llvm::Value *getStride(IRGenFunction &IGF, SILType T) const = 0;
-  virtual llvm::Value *getIsPOD(IRGenFunction &IGF, SILType T) const = 0;
+  virtual llvm::Value *getIsTriviallyDestroyable(IRGenFunction &IGF, SILType T) const = 0;
   virtual llvm::Value *getIsBitwiseTakable(IRGenFunction &IGF, SILType T) const = 0;
   virtual llvm::Value *isDynamicallyPackedInline(IRGenFunction &IGF,
                                                  SILType T) const = 0;
@@ -310,10 +324,19 @@ public:
   /// A convenience for getting the schema of a single type.
   ExplosionSchema getSchema() const;
 
+  /// Build the type layout for this type info.
+  virtual TypeLayoutEntry
+  *buildTypeLayoutEntry(IRGenModule &IGM,
+                        SILType T,
+                        bool useStructLayouts) const = 0;
+
   /// Allocate a variable of this type on the stack.
   virtual StackAddress allocateStack(IRGenFunction &IGF, SILType T,
                                      const llvm::Twine &name) const = 0;
 
+  virtual StackAddress allocateVector(IRGenFunction &IGF, SILType T,
+                                      llvm::Value *capacity,
+                                      const Twine &name) const = 0;
   /// Deallocate a variable of this type.
   virtual void deallocateStack(IRGenFunction &IGF, StackAddress addr,
                                SILType T) const = 0;
@@ -403,6 +426,17 @@ public:
   /// have extra inhabitants based on type arguments?
   virtual bool mayHaveExtraInhabitants(IRGenModule &IGM) const = 0;
 
+  /// Returns true if the value witness operations on this type work correctly
+  /// with extra inhabitants up to the given index.
+  ///
+  /// An example of this is retainable pointers. The first extra inhabitant for
+  /// these types is the null pointer, on which swift_retain is a harmless
+  /// no-op. If this predicate returns true, then a single-payload enum with
+  /// this type as its payload (like Optional<T>) can avoid additional branching
+  /// on the enum tag for value witness operations.
+  virtual bool canValueWitnessExtraInhabitantsUpTo(IRGenModule &IGM,
+                                                   unsigned index) const;
+  
   /// Get the tag of a single payload enum with a payload of this type (\p T) e.g
   /// Optional<T>.
   virtual llvm::Value *getEnumTagSinglePayload(IRGenFunction &IGF,

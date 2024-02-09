@@ -1,4 +1,4 @@
-// RUN: %target-sil-opt -enable-sil-verify-all %s -capture-promotion -verify-sil-ownership | %FileCheck %s
+// RUN: %target-sil-opt -enable-sil-verify-all %s -capture-promotion | %FileCheck %s
 
 // Check to make sure that the process of promoting closure captures results in
 // a correctly cloned and modified closure function body. This test
@@ -172,7 +172,7 @@ bb0:
 // CHECK:   [[DUMMY_FUNC:%.*]] = function_ref @dummy_func : $@convention(thin) (Int, Int, Int) -> Int
 
 // CHECK:   [[ARG0_COPY:%.*]] = copy_value [[ARG0]]
-// CHECK:   [[METHOD_FOO:%.*]] = class_method [[ARG0_COPY]] : $Foo, #Foo.foo!1 : (Foo) -> () -> Int, $@convention(method) (@guaranteed Foo) -> Int
+// CHECK:   [[METHOD_FOO:%.*]] = class_method [[ARG0_COPY]] : $Foo, #Foo.foo : (Foo) -> () -> Int, $@convention(method) (@guaranteed Foo) -> Int
 // CHECK:   [[BORROWED_ARG0_COPY:%.*]] = begin_borrow [[ARG0_COPY]]
 // CHECK:   [[APPLY_FOO:%.*]] = apply [[METHOD_FOO]]([[BORROWED_ARG0_COPY]]) : $@convention(method) (@guaranteed Foo) -> Int
 // CHECK:   end_borrow [[BORROWED_ARG0_COPY]]
@@ -206,7 +206,7 @@ bb0(%0 : @owned $<τ_0_0> { var τ_0_0 } <Foo>, %2 : @owned $<τ_0_0> { var τ_0
   // function_ref test14.plus (a : Swift.Int, b : Swift.Int, c : Swift.Int) -> Swift.Int
   %7 = function_ref @dummy_func : $@convention(thin) (Int, Int, Int) -> Int
   %8 = load [copy] %1 : $*Foo
-  %10 = class_method %8 : $Foo, #Foo.foo!1 : (Foo) -> () -> Int, $@convention(method) (@guaranteed Foo) -> Int
+  %10 = class_method %8 : $Foo, #Foo.foo : (Foo) -> () -> Int, $@convention(method) (@guaranteed Foo) -> Int
   %9 = begin_borrow %8 : $Foo
   %11 = apply %10(%9) : $@convention(method) (@guaranteed Foo) -> Int
   end_borrow %9 : $Foo
@@ -253,7 +253,7 @@ bb0(%0 : @owned $<τ_0_0> { var τ_0_0 } <Foo>):
   // function_ref test14.plus (a : Swift.Int, b : Swift.Int, c : Swift.Int) -> Swift.Int
   %7 = function_ref @dummy_func : $@convention(thin) (Int, Int, Int) -> Int
   %8 = load [copy] %1 : $*Foo
-  %10 = class_method %8 : $Foo, #Foo.foo!1 : (Foo) -> () -> Int, $@convention(method) (@guaranteed Foo) -> Int
+  %10 = class_method %8 : $Foo, #Foo.foo : (Foo) -> () -> Int, $@convention(method) (@guaranteed Foo) -> Int
   %9 = begin_borrow %8 : $Foo
   %11 = apply %10(%9) : $@convention(method) (@guaranteed Foo) -> Int
   end_borrow %9 : $Foo
@@ -272,10 +272,10 @@ sil [ossa] @captureWithinGeneric : $@convention(thin) <T> (@inout Int, @inout In
 bb0(%0 : $*Int, %1 : $*Int):
   %2 = alloc_box $<τ_0_0> { var τ_0_0 } <Int>
   %2a = project_box %2 : $<τ_0_0> { var τ_0_0 } <Int>, 0
-  copy_addr %0 to [initialization] %2a : $*Int
+  copy_addr %0 to [init] %2a : $*Int
   %4 = alloc_box $<τ_0_0> { var τ_0_0 } <Int>
   %4a = project_box %4 : $<τ_0_0> { var τ_0_0 } <Int>, 0
-  copy_addr %1 to [initialization] %4a : $*Int
+  copy_addr %1 to [init] %4a : $*Int
   %6 = function_ref @apply : $@convention(thin) (@owned @callee_owned () -> ()) -> ()
   // CHECK: [[PROMOTED:%[0-9a-zA-Z]+]] = function_ref @$s27closureWithGenericSignatureTf2ni_n : $@convention(thin) <τ_0_0> (@owned <τ_0_0> { var τ_0_0 } <Int>, Int) -> ()
   %7 = function_ref @closureWithGenericSignature : $@convention(thin) <τ_0_0> (@owned <τ_0_0> { var τ_0_0 } <Int>, @owned <τ_0_0> { var τ_0_0 } <Int>) -> ()
@@ -318,7 +318,7 @@ bb0(%0: $*Int, %1 : @owned $<τ_0_0> { var τ_0_0 } <Foo>, %2 : @owned $<τ_0_0>
   // function_ref test14.plus (a : Swift.Int, b : Swift.Int, c : Swift.Int) -> Swift.Int
   %7 = function_ref @dummy_func : $@convention(thin) (Int, Int, Int) -> Int
   %8 = load [copy] %17 : $*Foo
-  %10 = class_method %8 : $Foo, #Foo.foo!1 : (Foo) -> () -> Int, $@convention(method) (@guaranteed Foo) -> Int
+  %10 = class_method %8 : $Foo, #Foo.foo : (Foo) -> () -> Int, $@convention(method) (@guaranteed Foo) -> Int
   %9 = begin_borrow %8 : $Foo
   %11 = apply %10(%9) : $@convention(method) (@guaranteed Foo) -> Int
   end_borrow %9 : $Foo
@@ -431,11 +431,15 @@ bb0:
 // CHECK:   [[BORROWED_BAZ:%.*]] = begin_borrow [[BAZ]] : $Baz
 // CHECK:   [[X:%.*]] = struct_extract [[BORROWED_BAZ]] : $Baz, #Baz.x
 // CHECK:   [[BAR:%.*]] = struct_extract [[BORROWED_BAZ]] : $Baz, #Baz.bar
+
 // CHECK:   [[BAR_COPY:%.*]] = copy_value [[BAR]]
+// CHECK:   [[BAR_COPY_2:%.*]] = copy_value [[BAR_COPY]]
 // CHECK:   [[BAR2:%.*]] = struct_extract [[BORROWED_BAZ]] : $Baz, #Baz.bar
 // CHECK:   [[BAR2_COPY:%.*]] = copy_value [[BAR2]]
 // CHECK:   [[BAR2_COPY_BORROW:%.*]] = begin_borrow [[BAR2_COPY]]
+// CHECK:   [[LOAD_BORROW_EXT:%.*]] = struct_extract [[BORROWED_BAZ]]
 // CHECK:   apply {{%.*}}([[BAR_COPY]], [[BAR2_COPY_BORROW]], [[X]])
+// CHECK:   apply {{%.*}}([[BAR_COPY_2]], [[LOAD_BORROW_EXT]], [[X]])
 // CHECK:   end_borrow [[BAR2_COPY_BORROW]]
 // CHECK:   destroy_value [[BAR2_COPY]]
 // CHECK:   end_borrow [[BORROWED_BAZ]]
@@ -458,12 +462,17 @@ bb0(%0 : @owned $<τ_0_0> { var τ_0_0 } <Baz>, %1 : @owned $<τ_0_0> { var τ_0
   %1a = project_box %1 : $<τ_0_0> { var τ_0_0 } <Baz>, 0
   %9 = struct_element_addr %1a : $*Baz, #Baz.x
   %10 = struct_element_addr %1a : $*Baz, #Baz.bar
+  %10a = struct_element_addr %1a : $*Baz, #Baz.bar
   %11 = load [trivial] %9 : $*Int
   %12 = load [copy] %10 : $*Bar
+  %12a = copy_value %12 : $Bar
   %13 = load [copy] %10 : $*Bar
   %14 = begin_borrow %13 : $Bar
   %15 = function_ref @destructured_baz_user : $@convention(thin) (@owned Bar, @guaranteed Bar, Int) -> ()
+  %16 = load_borrow %10a : $*Bar
   apply %15(%12, %14, %11) : $@convention(thin) (@owned Bar, @guaranteed Bar, Int) -> ()
+  apply %15(%12a, %16, %11) : $@convention(thin) (@owned Bar, @guaranteed Bar, Int) -> ()
+  end_borrow %16 : $Bar
   end_borrow %14 : $Bar
   destroy_value %13 : $Bar
 

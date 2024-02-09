@@ -15,10 +15,10 @@
 namespace swift {
 
 template <typename RefCountBits>
-void RefCounts<RefCountBits>::incrementSlow(RefCountBits oldbits,
-                                            uint32_t n) {
-  if (oldbits.isImmortal()) {
-    return;
+HeapObject *RefCounts<RefCountBits>::incrementSlow(RefCountBits oldbits,
+                                                   uint32_t n) {
+  if (oldbits.isImmortal(false)) {
+    return getHeapObject();
   }
   else if (oldbits.hasSideTable()) {
     // Out-of-line slow path.
@@ -29,14 +29,19 @@ void RefCounts<RefCountBits>::incrementSlow(RefCountBits oldbits,
     // Retain count overflow.
     swift::swift_abortRetainOverflow();
   }
+  return getHeapObject();
 }
-template void RefCounts<InlineRefCountBits>::incrementSlow(InlineRefCountBits oldbits, uint32_t n);
-template void RefCounts<SideTableRefCountBits>::incrementSlow(SideTableRefCountBits oldbits, uint32_t n);
+template HeapObject *
+RefCounts<InlineRefCountBits>::incrementSlow(InlineRefCountBits oldbits,
+                                             uint32_t n);
+template HeapObject *
+RefCounts<SideTableRefCountBits>::incrementSlow(SideTableRefCountBits oldbits,
+                                                uint32_t n);
 
 template <typename RefCountBits>
 void RefCounts<RefCountBits>::incrementNonAtomicSlow(RefCountBits oldbits,
                                                      uint32_t n) {
-  if (oldbits.isImmortal()) {
+  if (oldbits.isImmortal(false)) {
     return;
   }
   else if (oldbits.hasSideTable()) {
@@ -52,7 +57,7 @@ template void RefCounts<SideTableRefCountBits>::incrementNonAtomicSlow(SideTable
 
 template <typename RefCountBits>
 bool RefCounts<RefCountBits>::tryIncrementSlow(RefCountBits oldbits) {
-  if (oldbits.isImmortal()) {
+  if (oldbits.isImmortal(false)) {
     return true;
   }
   else if (oldbits.hasSideTable())
@@ -65,7 +70,7 @@ template bool RefCounts<SideTableRefCountBits>::tryIncrementSlow(SideTableRefCou
 
 template <typename RefCountBits>
 bool RefCounts<RefCountBits>::tryIncrementNonAtomicSlow(RefCountBits oldbits) {
-  if (oldbits.isImmortal()) {
+  if (oldbits.isImmortal(false)) {
     return true;
   }
   else if (oldbits.hasSideTable())
@@ -97,7 +102,7 @@ HeapObjectSideTableEntry* RefCounts<InlineRefCountBits>::allocateSideTable(bool 
   // Preflight passed. Allocate a side table.
   
   // FIXME: custom side table allocator
-  HeapObjectSideTableEntry *side = new HeapObjectSideTableEntry(getHeapObject());
+  auto side = swift_cxx_newObject<HeapObjectSideTableEntry>(getHeapObject());
   
   auto newbits = InlineRefCountBits(side);
   
@@ -106,7 +111,7 @@ HeapObjectSideTableEntry* RefCounts<InlineRefCountBits>::allocateSideTable(bool 
       // Already have a side table. Return it and delete ours.
       // Read before delete to streamline barriers.
       auto result = oldbits.getSideTable();
-      delete side;
+      swift_cxx_deleteObject(side);
       return result;
     }
     else if (failIfDeiniting && oldbits.getIsDeiniting()) {
@@ -155,6 +160,28 @@ void _swift_stdlib_immortalize(void *obj) {
   auto heapObj = reinterpret_cast<HeapObject *>(obj);
   heapObj->refCounts.setIsImmortal(true);
 }
+
+#ifndef NDEBUG
+// SideTableRefCountBits specialization intentionally does not exist.
+template <>
+bool RefCounts<InlineRefCountBits>::isImmutableCOWBuffer() {
+  if (!hasSideTable())
+    return false;
+  HeapObjectSideTableEntry *sideTable = allocateSideTable(false);
+  assert(sideTable);
+  return sideTable->isImmutableCOWBuffer();
+}
+
+template <>
+bool RefCounts<InlineRefCountBits>::setIsImmutableCOWBuffer(bool immutable) {
+  HeapObjectSideTableEntry *sideTable = allocateSideTable(false);
+  assert(sideTable);
+  bool oldValue = sideTable->isImmutableCOWBuffer();
+  sideTable->setIsImmutableCOWBuffer(immutable);
+  return oldValue;
+}
+
+#endif
 
 // namespace swift
 } // namespace swift

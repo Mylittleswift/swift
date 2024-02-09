@@ -4,13 +4,13 @@
 // RUN: %empty-directory(%t)
 // RUN: %target-swift-frontend -emit-module %S/Inputs/TestableMultifileHelper.swift -enable-testing -o %t
 
-// RUN: %target-swift-emit-silgen -verify-sil-ownership -I %t %s %S/testable-multifile.swift -module-name main | %FileCheck %s
-// RUN: %target-swift-emit-silgen -verify-sil-ownership -I %t %S/testable-multifile.swift %s -module-name main | %FileCheck %s
-// RUN: %target-swift-emit-silgen -verify-sil-ownership -I %t -primary-file %s %S/testable-multifile.swift -module-name main | %FileCheck %s
+// RUN: %target-swift-emit-silgen -I %t %s %S/testable-multifile.swift -module-name main | %FileCheck %s
+// RUN: %target-swift-emit-silgen -I %t %S/testable-multifile.swift %s -module-name main | %FileCheck %s
+// RUN: %target-swift-emit-silgen -I %t -primary-file %s %S/testable-multifile.swift -module-name main | %FileCheck %s
 
 // Just make sure we don't crash later on.
-// RUN: %target-swift-emit-ir -verify-sil-ownership -I %t -primary-file %s %S/testable-multifile.swift -module-name main -o /dev/null
-// RUN: %target-swift-emit-ir -verify-sil-ownership -I %t -O -primary-file %s %S/testable-multifile.swift -module-name main -o /dev/null
+// RUN: %target-swift-emit-ir -I %t -primary-file %s %S/testable-multifile.swift -module-name main -o /dev/null
+// RUN: %target-swift-emit-ir -I %t -O -primary-file %s %S/testable-multifile.swift -module-name main -o /dev/null
 
 @testable import TestableMultifileHelper
 
@@ -41,7 +41,7 @@ func test(internalSub: Sub, publicSub: PublicSub) {
 
 // CHECK-LABEL: sil hidden [ossa] @$s4main4test11internalSub06publicD0yAA0D0C_AA06PublicD0CtF
 // CHECK: bb0([[ARG0:%.*]] : @guaranteed $Sub, [[ARG1:%.*]] : @guaranteed $PublicSub):
-// CHECK: = class_method [[ARG0]] : $Sub, #Sub.foo!1
-// CHECK: = class_method [[ARG1]] : $PublicSub, #PublicSub.foo!1
+// CHECK: = class_method [[ARG0]] : $Sub, #Sub.foo :
+// CHECK: = class_method [[ARG1]] : $PublicSub, #PublicSub.foo :
 // CHECK: } // end sil function '$s4main4test11internalSub06publicD0yAA0D0C_AA06PublicD0CtF'
 

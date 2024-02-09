@@ -19,7 +19,14 @@
 // RUN: %FileCheck -check-prefix=CHECK -check-prefix=CHECK-INTERNAL %s < %t/accessibility-appext.h
 // RUN: %check-in-clang %t/accessibility-appext.h
 
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -parse-as-library %s -typecheck -application-extension-library -emit-objc-header-path %t/accessibility-appextlib.h -disable-objc-attr-requires-foundation-module
+// RUN: %FileCheck -check-prefix=CHECK -check-prefix=CHECK-PUBLIC %s < %t/accessibility-appextlib.h
+// RUN: %check-in-clang %t/accessibility-appextlib.h
+
 // REQUIRES: objc_interop
+
+// CHECK: #ifndef ACCESSIBILITY_SWIFT_H
+// CHECK-NEXT: #define ACCESSIBILITY_SWIFT_H
 
 // CHECK-LABEL: @interface A_Public{{$}}
 // CHECK-INTERNAL-NEXT: init
@@ -37,13 +44,13 @@
 
 
 #if MAIN
-#if os(macOS)
+#if canImport(AppKit)
 import AppKit
 
 @NSApplicationMain
 @objc class AppDelegate : NSApplicationDelegate {}
 
-#elseif os(iOS) || os(tvOS) || os(watchOS)
+#elseif canImport(UIKit)
 import UIKit
 
 @UIApplicationMain
@@ -51,5 +58,6 @@ import UIKit
 
 #else
 // Uh oh, this test depends on having an app delegate.
+#error("Unsupported platform")
 #endif
 #endif

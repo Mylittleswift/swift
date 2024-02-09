@@ -1,10 +1,8 @@
-silopt_register_sources(
-  CapturePromotion.cpp
+target_sources(swiftSILOptimizer PRIVATE
   CapturePropagation.cpp
   ClosureSpecializer.cpp
+  CrossModuleOptimization.cpp
   DeadFunctionElimination.cpp
-  EagerSpecializer.cpp
-  GlobalOpt.cpp
   GlobalPropertyOpt.cpp
   LetPropertiesOpts.cpp
   UsePrespecialized.cpp)

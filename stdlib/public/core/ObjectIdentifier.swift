@@ -10,12 +10,17 @@
 //
 //===----------------------------------------------------------------------===//
 
+#if !$Embedded
+
 /// A unique identifier for a class instance or metatype.
+///
+/// This unique identifier is only valid for comparisons during the lifetime
+/// of the instance.
 ///
 /// In Swift, only class instances and metatypes have unique identities. There
 /// is no notion of identity for structs, enums, functions, or tuples.
-@_fixed_layout // trivial-implementation
-public struct ObjectIdentifier {
+@frozen // trivial-implementation
+public struct ObjectIdentifier: Sendable {
   @usableFromInline // trivial-implementation
   internal let _value: Builtin.RawPointer
 
@@ -61,7 +66,28 @@ public struct ObjectIdentifier {
   }
 }
 
-extension ObjectIdentifier : CustomDebugStringConvertible {
+#else
+
+@frozen // trivial-implementation
+public struct ObjectIdentifier: Sendable {
+  @usableFromInline // trivial-implementation
+  internal let _value: Builtin.RawPointer
+
+  @inlinable // trivial-implementation
+  public init<Object: AnyObject>(_ x: Object) {
+    self._value = Builtin.bridgeToRawPointer(x)
+  }
+
+  @inlinable // trivial-implementation
+  public init<Object>(_ x: Object.Type) {
+    self._value = unsafeBitCast(x, to: Builtin.RawPointer.self)
+  }
+}
+
+#endif
+
+@_unavailableInEmbedded
+extension ObjectIdentifier: CustomDebugStringConvertible {
   /// A textual representation of the identifier, suitable for debugging.
   public var debugDescription: String {
     return "ObjectIdentifier(\(_rawPointerToString(_value)))"
@@ -91,6 +117,11 @@ extension ObjectIdentifier: Hashable {
   @inlinable
   public func hash(into hasher: inout Hasher) {
     hasher.combine(Int(Builtin.ptrtoint_Word(_value)))
+  }
+
+  @_alwaysEmitIntoClient // For back deployment
+  public func _rawHashValue(seed: Int) -> Int {
+    Int(Builtin.ptrtoint_Word(_value))._rawHashValue(seed: seed)
   }
 }
 

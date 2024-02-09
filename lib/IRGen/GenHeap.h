@@ -37,6 +37,7 @@ namespace irgen {
 class HeapLayout : public StructLayout {
   SmallVector<SILType, 8> ElementTypes;
   NecessaryBindings Bindings;
+  unsigned BindingsIndex;
   mutable llvm::Constant *privateMetadata = nullptr;
   
 public:
@@ -44,8 +45,8 @@ public:
              ArrayRef<SILType> elementTypes,
              ArrayRef<const TypeInfo *> elementTypeInfos,
              llvm::StructType *typeToFill = 0,
-             NecessaryBindings &&bindings = {});
-  
+             NecessaryBindings &&bindings = {}, unsigned bindingsIndex = 0);
+
   /// True if the heap object carries type bindings.
   ///
   /// If true, the first element of the heap layout will be the type metadata
@@ -56,6 +57,12 @@ public:
   
   const NecessaryBindings &getBindings() const {
     return Bindings;
+  }
+
+  unsigned getBindingsIndex() const { return BindingsIndex; }
+
+  unsigned getIndexAfterBindings() const {
+    return BindingsIndex + (hasBindings() ? 1 : 0);
   }
 
   /// Get the types of the elements.
@@ -140,18 +147,13 @@ emitAllocateExistentialBoxInBuffer(IRGenFunction &IGF, SILType boxedType,
                                    Address destBuffer, GenericEnvironment *env,
                                    const llvm::Twine &name, bool isOutlined);
 
-/// Given an opaque class instance pointer, produce the type
-/// metadata reference as a %type*.
-llvm::Value *emitDynamicTypeOfOpaqueHeapObject(IRGenFunction &IGF,
-                                               llvm::Value *object,
-                                               MetatypeRepresentation rep);
-
 /// Given a heap-object instance, with some heap-object type,
 /// produce a reference to its type metadata.
 llvm::Value *emitDynamicTypeOfHeapObject(IRGenFunction &IGF,
                                          llvm::Value *object,
                                          MetatypeRepresentation rep,
                                          SILType objectType,
+                                         GenericSignature sig,
                                          bool allowArtificialSubclasses = false);
 
 /// Given a non-tagged object pointer, load a pointer to its class object.
@@ -168,6 +170,7 @@ llvm::Value *emitHeapMetadataRefForUnknownHeapObject(IRGenFunction &IGF,
 llvm::Value *emitHeapMetadataRefForHeapObject(IRGenFunction &IGF,
                                               llvm::Value *object,
                                               CanType objectType,
+                                              GenericSignature sig,
                                               bool suppressCast = false);
 
 /// Given a heap-object instance, with some heap-object type,
@@ -175,10 +178,12 @@ llvm::Value *emitHeapMetadataRefForHeapObject(IRGenFunction &IGF,
 llvm::Value *emitHeapMetadataRefForHeapObject(IRGenFunction &IGF,
                                               llvm::Value *object,
                                               SILType objectType,
+                                              GenericSignature sig,
                                               bool suppressCast = false);
 
 /// What isa-encoding mechanism does a type use?
-IsaEncoding getIsaEncodingForType(IRGenModule &IGM, CanType type);
+IsaEncoding getIsaEncodingForType(IRGenModule &IGM, CanType type,
+                                  GenericSignature sig);
 
 } // end namespace irgen
 } // end namespace swift

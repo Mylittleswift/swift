@@ -29,8 +29,9 @@ func _isDebugAssertConfiguration() -> Bool {
   return Int32(Builtin.assert_configuration()) == 0
 }
 
-@usableFromInline @_transparent
-internal func _isReleaseAssertConfiguration() -> Bool {
+@_transparent
+public // @testable, used in _Concurrency executor preconditions
+func _isReleaseAssertConfiguration() -> Bool {
   // The values for the assert_configuration call are:
   // 0: Debug
   // 1: Release
@@ -58,6 +59,17 @@ func _isStdlibInternalChecksEnabled() -> Bool {
 #endif
 }
 
+@_transparent
+@_alwaysEmitIntoClient // Introduced in 5.7
+public // @testable
+func _isStdlibDebugChecksEnabled() -> Bool {
+#if SWIFT_STDLIB_ENABLE_DEBUG_PRECONDITIONS_IN_RELEASE
+  return !_isFastAssertConfiguration()
+#else
+  return _isDebugAssertConfiguration()
+#endif
+}
+
 @usableFromInline @_transparent
 internal func _fatalErrorFlags() -> UInt32 {
   // The current flags are:
@@ -82,6 +94,7 @@ internal func _assertionFailure(
   file: StaticString, line: UInt,
   flags: UInt32
 ) -> Never {
+#if !$Embedded
   prefix.withUTF8Buffer {
     (prefix) -> Void in
     message.withUTF8Buffer {
@@ -97,6 +110,7 @@ internal func _assertionFailure(
       }
     }
   }
+#endif
   Builtin.int_trap()
 }
 
@@ -108,6 +122,7 @@ internal func _assertionFailure(
 @usableFromInline
 @inline(never)
 @_semantics("programtermination_point")
+@_unavailableInEmbedded
 internal func _assertionFailure(
   _ prefix: StaticString, _ message: String,
   file: StaticString, line: UInt,
@@ -115,7 +130,8 @@ internal func _assertionFailure(
 ) -> Never {
   prefix.withUTF8Buffer {
     (prefix) -> Void in
-    message._withUnsafeBufferPointerToUTF8 {
+    var message = message
+    message.withUTF8 {
       (messageUTF8) -> Void in
       file.withUTF8Buffer {
         (file) -> Void in
@@ -139,13 +155,15 @@ internal func _assertionFailure(
 @usableFromInline
 @inline(never)
 @_semantics("programtermination_point")
+@_unavailableInEmbedded
 internal func _assertionFailure(
   _ prefix: StaticString, _ message: String,
   flags: UInt32
 ) -> Never {
   prefix.withUTF8Buffer {
     (prefix) -> Void in
-    message._withUnsafeBufferPointerToUTF8 {
+    var message = message
+    message.withUTF8 {
       (messageUTF8) -> Void in
       _swift_stdlib_reportFatalError(
         prefix.baseAddress!, CInt(prefix.count),
@@ -156,6 +174,18 @@ internal func _assertionFailure(
 
   Builtin.int_trap()
 }
+
+#if $Embedded
+@usableFromInline
+@inline(never)
+@_semantics("programtermination_point")
+internal func _assertionFailure(
+  _ prefix: StaticString, _ message: StaticString,
+  flags: UInt32
+) -> Never {
+  Builtin.int_trap()
+}
+#endif
 
 /// This function should be used only in the implementation of stdlib
 /// assertions.
@@ -170,35 +200,7 @@ internal func _fatalErrorMessage(
   file: StaticString, line: UInt,
   flags: UInt32
 ) -> Never {
-#if INTERNAL_CHECKS_ENABLED
-  prefix.withUTF8Buffer() {
-    (prefix) in
-    message.withUTF8Buffer() {
-      (message) in
-      file.withUTF8Buffer() {
-        (file) in
-        _swift_stdlib_reportFatalErrorInFile(
-          prefix.baseAddress!, CInt(prefix.count),
-          message.baseAddress!, CInt(message.count),
-          file.baseAddress!, CInt(file.count), UInt32(line),
-          flags)
-      }
-    }
-  }
-#else
-  prefix.withUTF8Buffer() {
-    (prefix) in
-    message.withUTF8Buffer() {
-      (message) in
-      _swift_stdlib_reportFatalError(
-        prefix.baseAddress!, CInt(prefix.count),
-        message.baseAddress!, CInt(message.count),
-        flags)
-    }
-  }
-#endif
-
-  Builtin.int_trap()
+  _assertionFailure(prefix, message, file: file, line: line, flags: flags)
 }
 
 /// Prints a fatal error message when an unimplemented initializer gets
@@ -216,6 +218,7 @@ func _unimplementedInitializer(className: StaticString,
   // redundant parameter values (#file etc.) are eliminated, and don't leak
   // information about the user's source.
 
+#if !$Embedded
   if _isDebugAssertConfiguration() {
     className.withUTF8Buffer {
       (className) in
@@ -244,10 +247,14 @@ func _unimplementedInitializer(className: StaticString,
       }
     }
   }
+#endif
 
   Builtin.int_trap()
 }
 
+#if !$Embedded
+
+/// Used to evaluate editor placeholders.
 public // COMPILER_INTRINSIC
 func _undefined<T>(
   _ message: @autoclosure () -> String = String(),
@@ -255,6 +262,19 @@ func _undefined<T>(
 ) -> T {
   _assertionFailure("Fatal error", message(), file: file, line: line, flags: 0)
 }
+
+#else
+
+/// Used to evaluate editor placeholders.
+public // COMPILER_INTRINSIC
+func _undefined<T>(
+  _ message: @autoclosure () -> StaticString = StaticString(),
+  file: StaticString = #file, line: UInt = #line
+) -> T {
+  _assertionFailure("Fatal error", message(), file: file, line: line, flags: 0)
+}
+
+#endif
 
 /// Called when falling off the end of a switch and the type can be represented
 /// as a raw value.
@@ -268,9 +288,13 @@ internal func _diagnoseUnexpectedEnumCaseValue<SwitchedValue, RawValue>(
   type: SwitchedValue.Type,
   rawValue: RawValue
 ) -> Never {
+#if !$Embedded
   _assertionFailure("Fatal error",
                     "unexpected enum case '\(type)(rawValue: \(rawValue))'",
                     flags: _fatalErrorFlags())
+#else
+  Builtin.int_trap()
+#endif
 }
 
 /// Called when falling off the end of a switch and the value is not safe to
@@ -284,8 +308,38 @@ internal func _diagnoseUnexpectedEnumCaseValue<SwitchedValue, RawValue>(
 internal func _diagnoseUnexpectedEnumCase<SwitchedValue>(
   type: SwitchedValue.Type
 ) -> Never {
+#if !$Embedded
   _assertionFailure(
     "Fatal error",
     "unexpected enum case while switching on value of type '\(type)'",
     flags: _fatalErrorFlags())
+#else
+  Builtin.int_trap()
+#endif
+}
+
+/// Called when a function marked `unavailable` with `@available` is invoked
+/// and the module containing the unavailable function was compiled with
+/// `-unavailable-decl-optimization=stub`.
+///
+/// This function should not be inlined because it is cold and inlining just
+/// bloats code.
+@backDeployed(before: SwiftStdlib 5.9)
+@inline(never)
+@_semantics("unavailable_code_reached")
+@usableFromInline // COMPILER_INTRINSIC
+internal func _diagnoseUnavailableCodeReached() -> Never {
+  _diagnoseUnavailableCodeReached_aeic()
+}
+
+// FIXME: Remove this with rdar://119892482
+/// An `@_alwaysEmitIntoClient` variant of `_diagnoseUnavailableCodeReached()`.
+/// This is temporarily needed by the compiler to reference from back deployed
+/// clients.
+@_alwaysEmitIntoClient
+@inline(never)
+@_semantics("unavailable_code_reached")
+internal func _diagnoseUnavailableCodeReached_aeic() -> Never {
+  _assertionFailure(
+    "Fatal error", "Unavailable code reached", flags: _fatalErrorFlags())
 }

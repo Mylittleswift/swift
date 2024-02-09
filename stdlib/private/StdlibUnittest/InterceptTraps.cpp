@@ -13,7 +13,7 @@
 #include <stdio.h>
 #include <signal.h>
 #include <string.h>
-#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__)) || defined(__wasi__)
 #include <unistd.h>
 #endif
 #if defined(_WIN32)
@@ -63,7 +63,7 @@ VectoredCrashHandler(PEXCEPTION_POINTERS ExceptionInfo) {
 
   return EXCEPTION_CONTINUE_SEARCH;
 }
-#endif
+#endif // _WIN32
 
 SWIFT_CC(swift) SWIFT_RUNTIME_LIBRARY_VISIBILITY extern "C"
 void installTrapInterceptor() {
@@ -86,4 +86,3 @@ void installTrapInterceptor() {
   signal(SIGSYS,  CrashCatcher);
 #endif
 }
-

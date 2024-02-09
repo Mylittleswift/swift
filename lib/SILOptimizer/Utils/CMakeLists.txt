@@ -1,20 +1,35 @@
-silopt_register_sources(
-  CFG.cpp
+target_sources(swiftSILOptimizer PRIVATE
+  BasicBlockOptUtils.cpp
+  CFGOptUtils.cpp
+  CanonicalizeInstruction.cpp
+  CanonicalizeOSSALifetime.cpp
+  CanonicalizeBorrowScope.cpp
   CastOptimizer.cpp
   CheckedCastBrJumpThreading.cpp
+  CompileTimeInterpolationUtils.cpp
   ConstantFolding.cpp
   ConstExpr.cpp
   Devirtualize.cpp
+  DifferentiationMangler.cpp
+  DistributedActor.cpp
   Existential.cpp
   GenericCloner.cpp
   Generics.cpp
-  LoadStoreOptUtils.cpp
-  Local.cpp
+  InstructionDeleter.cpp
+  InstOptUtils.cpp
+  KeyPathProjector.cpp
+  LexicalDestroyFolding.cpp
+  LexicalDestroyHoisting.cpp
   LoopUtils.cpp
   OptimizerStatsUtils.cpp
+  PartialApplyCombiner.cpp
+  PartitionUtils.cpp
   PerformanceInlinerUtils.cpp
+  ShrinkBorrowScope.cpp
   SILInliner.cpp
   SILSSAUpdater.cpp
   SpecializationMangler.cpp
   StackNesting.cpp
-)
+  ValueLifetime.cpp
+  VariableNameUtils.cpp
+  OwnershipOptUtils.cpp)

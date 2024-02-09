@@ -1,4 +1,5 @@
 // RUN: %target-swift-frontend -sil-verify-all -primary-file %s -emit-sil -o - -verify | %FileCheck %s
+// RUN: %target-swift-frontend -sil-verify-all -primary-file %s -emit-sil -o - -verify
 
 // These tests are deliberately shallow, because I do not want to depend on the
 // specifics of SIL generation, which might change for reasons unrelated to this
@@ -156,7 +157,6 @@ func class_constrained_generic<T : C>(_ o: T) -> AnyClass? {
 func invoke(_ c: C) {
   // CHECK-NOT: function_ref @$s18mandatory_inlining25class_constrained_generic{{[_0-9a-zA-Z]*}}F
   // CHECK-NOT: apply
-  // CHECK: init_existential_metatype
   _ = class_constrained_generic(c)
   // CHECK: return
 }
@@ -185,5 +185,21 @@ func dontCrash() {
     return
   default:
     fatalError("baz \(k)")
+  }
+}
+
+func switchLoopWithPartialApplyCallee(reportError: ((String) -> (Void))?) {
+  let reportError = reportError ?? { error in
+    print(error)
+  }
+
+  for _ in 0..<1 {
+    reportError("foo bar baz")
+  }
+}
+
+func switchLoopWithPartialApplyCaller() {
+  switchLoopWithPartialApplyCallee { error in
+      print(error)
   }
 }

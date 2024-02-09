@@ -9,6 +9,10 @@
 // See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
+
+// rdar://84233775
+// REQUIRES: rdar84233775
+
 // RUN: %target-run-stdlib-swift
 // REQUIRES: executable_test
 
@@ -180,8 +184,8 @@ tests.test("index-mapping/utf16-to-utf8/\(id)") {
       [0xf0, 0x9f, 0x8f],
 
       // Prior to UTF-8 String, this tested for empty array in "legacy mode" or
-      // the replacemnet character otherwise. However, SE-0180 (String Index
-      // Overhual) dictates subscript behavior should treat it as emergent
+      // the replacement character otherwise. However, SE-0180 (String Index
+      // Overhaul) dictates subscript behavior should treat it as emergent
       // behavior from its encoded offset, hence we should get the same 3 code
       // units as prior for non-scalar-aligned UTF-16 offsets applied to the
       // UTF-8 view.
@@ -451,8 +455,8 @@ tests.test("index-mapping/utf16-to-unicode-scalar/\(id)") {
     UnicodeScalar(0x1f3c2),
 
   // Prior to UTF-8 String, this tested for empty array in "legacy mode" or
-  // the replacemnet character otherwise. However, SE-0180 (String Index
-  // Overhual) dictates subscript behavior should treat it as emergent
+  // the replacement character otherwise. However, SE-0180 (String Index
+  // Overhaul) dictates subscript behavior should treat it as emergent
   // behavior from its encoded offset, hence we should get the same 3 code
   // units as prior for non-scalar-aligned UTF-16 offsets applied to the
   // UTF-8 view.
@@ -585,8 +589,8 @@ tests.test("index-mapping/utf16-to-character/\(id)") {
       "🏂",
 
       // Prior to UTF-8 String, this tested for empty array in "legacy mode" or
-      // the replacemnet character otherwise. However, SE-0180 (String Index
-      // Overhual) dictates subscript behavior should treat it as emergent
+      // the replacement character otherwise. However, SE-0180 (String Index
+      // Overhaul) dictates subscript behavior should treat it as emergent
       // behavior from its encoded offset, hence we should get the same 3 code
       // units as prior for non-scalar-aligned UTF-16 offsets applied to the
       // UTF-8 view. Under a mixed-encoding String model, we necessarily have to
@@ -778,14 +782,14 @@ tests.test("String.UTF8View/Collection")
   .forEach(in: utfTests) {
   test in
 
-  checkBidirectionalCollection(test.utf8, test.string.utf8) { $0 == $1 }
+  checkBidirectionalCollection(test.utf8, test.string.utf8)
 }
 
 tests.test("String.UTF16View/BidirectionalCollection")
   .forEach(in: utfTests) {
   test in
 
-  checkBidirectionalCollection(test.utf16, test.string.utf16) { $0 == $1 }
+  checkBidirectionalCollection(test.utf16, test.string.utf16)
 }
 
 tests.test("String.UTF32View/BidirectionalCollection")
@@ -793,7 +797,7 @@ tests.test("String.UTF32View/BidirectionalCollection")
   test in
 
   checkBidirectionalCollection(
-    test.unicodeScalars, test.string.unicodeScalars) { $0 == $1 }
+    test.unicodeScalars, test.string.unicodeScalars)
 }
 
 tests.test("String View Setters") {
@@ -818,6 +822,31 @@ tests.test("String View Setters") {
   expectEqual(winter, string)
   string = summer
   expectEqual(summer, string)
+}
+
+tests.test("Scalar alignment") {
+  // Misaligned indices were fixed in 5.1
+  guard _hasSwift_5_1() else { return }
+
+  let str = "😀"
+  let idx = str.utf8.index(after: str.startIndex)
+  let substr = str[idx...]
+  expectEqual(str, substr)
+
+  checkBidirectionalCollection(str, substr)
+  checkBidirectionalCollection(str.utf16, substr.utf16)
+  checkBidirectionalCollection(str.utf8, substr.utf8)
+  checkBidirectionalCollection(str.unicodeScalars, substr.unicodeScalars)
+
+  let idxBeforeLast = str.utf8.index(before: str.endIndex)
+  let substr2 = str[idx...]
+  expectEqual(str, substr2)
+  expectEqual(substr, substr2)
+
+  checkBidirectionalCollection(str, substr2)
+  checkBidirectionalCollection(str.utf16, substr2.utf16)
+  checkBidirectionalCollection(str.utf8, substr2.utf8)
+  checkBidirectionalCollection(str.unicodeScalars, substr2.unicodeScalars)
 }
 
 runAllTests()

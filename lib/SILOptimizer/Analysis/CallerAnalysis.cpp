@@ -14,7 +14,8 @@
 #include "swift/SILOptimizer/Analysis/CallerAnalysis.h"
 #include "swift/SIL/InstructionUtils.h"
 #include "swift/SIL/SILModule.h"
-#include "swift/SILOptimizer/Utils/Local.h"
+#include "swift/SIL/SILVisitor.h"
+#include "swift/SILOptimizer/Utils/InstOptUtils.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/YAMLTraits.h"
 
@@ -32,7 +33,12 @@ CallerAnalysis::FunctionInfo::FunctionInfo(SILFunction *f)
     : callerStates(),
       // TODO: Make this more aggressive by considering
       // final/visibility/etc.
-      mayHaveIndirectCallers(canBeCalledIndirectly(f->getRepresentation())) {}
+      mayHaveIndirectCallers(
+          f->getDynamicallyReplacedFunction() ||
+          f->getReferencedAdHocRequirementWitnessFunction() ||
+          canBeCalledIndirectly(f->getRepresentation())),
+      mayHaveExternalCallers(f->isPossiblyUsedExternally() ||
+                             f->isAvailableExternally()) {}
 
 //===----------------------------------------------------------------------===//
 //                   CallerAnalysis::ApplySiteFinderVisitor
@@ -42,16 +48,14 @@ struct CallerAnalysis::ApplySiteFinderVisitor
     : SILInstructionVisitor<ApplySiteFinderVisitor, bool> {
   CallerAnalysis *analysis;
   SILFunction *callerFn;
-  FunctionInfo &callerInfo;
 
 #ifndef NDEBUG
   SmallPtrSet<SILInstruction *, 8> visitedCallSites;
-  SmallSetVector<SILInstruction *, 8> callSitesThatMustBeVisited;
+  llvm::SmallSetVector<SILInstruction *, 8> callSitesThatMustBeVisited;
 #endif
 
   ApplySiteFinderVisitor(CallerAnalysis *analysis, SILFunction *callerFn)
-      : analysis(analysis), callerFn(callerFn),
-        callerInfo(analysis->unsafeGetFunctionInfo(callerFn)) {}
+      : analysis(analysis), callerFn(callerFn) {}
   ~ApplySiteFinderVisitor();
 
   bool visitSILInstruction(SILInstruction *) { return false; }
@@ -113,15 +117,15 @@ CallerAnalysis::ApplySiteFinderVisitor::~ApplySiteFinderVisitor() {
 bool CallerAnalysis::ApplySiteFinderVisitor::visitFunctionRefBaseInst(
     FunctionRefBaseInst *fri) {
   auto optResult = findLocalApplySites(fri);
-  auto *calleeFn = fri->getReferencedFunction();
-  FunctionInfo &calleeInfo = analysis->unsafeGetFunctionInfo(calleeFn);
+  auto *calleeFn = fri->getInitiallyReferencedFunction();
 
   // First make an edge from our callerInfo to our calleeState for invalidation
   // purposes.
-  callerInfo.calleeStates.insert(calleeFn);
+  analysis->getOrInsertFunctionInfo(callerFn).calleeStates.insert(calleeFn);
 
   // Then grab our callee state and update it with state for this caller.
-  auto iter = calleeInfo.callerStates.insert({callerFn, {}});
+  auto iter = analysis->getOrInsertFunctionInfo(calleeFn).callerStates.
+                  insert({callerFn, {}});
   // If we succeeded in inserting a new value, put in an optimistic
   // value for escaping.
   if (iter.second) {
@@ -130,12 +134,12 @@ bool CallerAnalysis::ApplySiteFinderVisitor::visitFunctionRefBaseInst(
 
   // Then check if we found any information at all from our result. If we
   // didn't, then mark this as escaping and bail.
-  if (!optResult.hasValue()) {
+  if (!optResult.has_value()) {
     iter.first->second.isDirectCallerSetComplete = false;
     return true;
   }
 
-  auto &result = optResult.getValue();
+  auto &result = optResult.value();
 
   // Ok. We know that we have some sort of information. Merge that information
   // into our information.
@@ -148,7 +152,7 @@ bool CallerAnalysis::ApplySiteFinderVisitor::visitFunctionRefBaseInst(
 
   if (result.partialApplySites.size()) {
     auto optMin = iter.first->second.getNumPartiallyAppliedArguments();
-    unsigned min = optMin.getValueOr(UINT_MAX);
+    unsigned min = optMin.value_or(UINT_MAX);
     for (ApplySite partialSite : result.partialApplySites) {
       min = std::min(min, partialSite.getNumArguments());
     }
@@ -216,6 +220,10 @@ const FunctionInfo &CallerAnalysis::getFunctionInfo(SILFunction *f) const {
   // Recompute every function in the invalidated function list and empty the
   // list.
   auto &self = const_cast<CallerAnalysis &>(*this);
+  if (funcInfos.find(f) == funcInfos.end()) {
+    (void)self.getOrInsertFunctionInfo(f);
+    self.recomputeFunctionList.insert(f);
+  }
   self.processRecomputeFunctionList();
   return self.unsafeGetFunctionInfo(f);
 }
@@ -256,11 +264,7 @@ void CallerAnalysis::processFunctionCallSites(SILFunction *callerFn) {
   visitor.process();
 }
 
-void CallerAnalysis::invalidateAllInfo(SILFunction *f) {
-  // Look up the callees that our caller refers to and invalidate any
-  // values that point back at the caller.
-  FunctionInfo &fInfo = unsafeGetFunctionInfo(f);
-
+void CallerAnalysis::invalidateAllInfo(SILFunction *f, FunctionInfo &fInfo) {
   // Then we first eliminate any callees that we point at.
   invalidateKnownCallees(f, fInfo);
 
@@ -297,9 +301,12 @@ void CallerAnalysis::invalidateKnownCallees(SILFunction *caller,
 }
 
 void CallerAnalysis::invalidateKnownCallees(SILFunction *caller) {
-  // Look up the callees that our caller refers to and invalidate any
-  // values that point back at the caller.
-  invalidateKnownCallees(caller, unsafeGetFunctionInfo(caller));
+  auto iter = funcInfos.find(caller);
+  if (iter != funcInfos.end()) {
+    // Look up the callees that our caller refers to and invalidate any
+    // values that point back at the caller.
+    invalidateKnownCallees(caller, iter->second);
+  }
 }
 
 void CallerAnalysis::verify(SILFunction *caller) const {
@@ -369,6 +376,17 @@ void CallerAnalysis::invalidate() {
     // will unique for us.
     recomputeFunctionList.insert(&f);
   }
+}
+
+void CallerAnalysis::notifyWillDeleteFunction(SILFunction *f) {
+  auto iter = funcInfos.find(f);
+  if (iter == funcInfos.end())
+    return;
+    
+  invalidateAllInfo(f, iter->second);
+  recomputeFunctionList.remove(f);
+  // Now that we have invalidated all references to the function, delete it.
+  funcInfos.erase(iter);
 }
 
 //===----------------------------------------------------------------------===//
@@ -443,7 +461,7 @@ void CallerAnalysis::dump() const { print(llvm::errs()); }
 void CallerAnalysis::print(const char *filePath) const {
   using namespace llvm::sys;
   std::error_code error;
-  llvm::raw_fd_ostream fileOutputStream(filePath, error, fs::F_Text);
+  llvm::raw_fd_ostream fileOutputStream(filePath, error, fs::OF_Text);
   if (error) {
     llvm::errs() << "Failed to open path \"" << filePath << "\" for writing.!";
     llvm_unreachable("default error handler");
@@ -466,7 +484,7 @@ void CallerAnalysis::print(llvm::raw_ostream &os) const {
       if (apply.second.hasFullApply) {
         fullAppliers.push_back(apply.first->getName());
       }
-      if (apply.second.getNumPartiallyAppliedArguments().hasValue()) {
+      if (apply.second.getNumPartiallyAppliedArguments().has_value()) {
         partialAppliers.push_back(apply.first->getName());
       }
     }

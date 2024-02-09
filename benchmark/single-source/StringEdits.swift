@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2021 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -11,19 +11,25 @@
 //===----------------------------------------------------------------------===//
 
 import TestsUtils
-#if os(Linux)
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif os(Windows)
+import MSVCRT
 #else
 import Darwin
 #endif
 
-public let StringEdits = BenchmarkInfo(
-  name: "StringEdits",
-  runFunction: run_StringEdits,
-  tags: [.validation, .api, .String],
-  legacyFactor: 100)
+public let benchmarks = [
+  BenchmarkInfo(
+    name: "StringEdits",
+    runFunction: run_StringEdits,
+    tags: [.validation, .api, .String],
+    legacyFactor: 100),
+]
 
-var editWords: [String] = [
+let editWords: [String] = [
   "woodshed",
   "lakism",
   "gastroperiodynia",
@@ -66,8 +72,8 @@ func edits(_ word: String) -> Set<String> {
 }
 
 @inline(never)
-public func run_StringEdits(_ N: Int) {
-  for _ in 1...N {
+public func run_StringEdits(_ n: Int) {
+  for _ in 1...n {
     for word in editWords {
       _ = edits(word)
     }

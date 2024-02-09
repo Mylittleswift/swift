@@ -22,50 +22,61 @@
 #include "swift/AST/ASTDemangler.h"
 
 #include "swift/AST/ASTContext.h"
+#include "swift/AST/ClangModuleLoader.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/GenericSignature.h"
-#include "swift/AST/GenericSignatureBuilder.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/NameLookup.h"
+#include "swift/AST/SILLayout.h"
 #include "swift/AST/Type.h"
+#include "swift/AST/TypeCheckRequests.h"
 #include "swift/AST/Types.h"
-#include "swift/ClangImporter/ClangImporter.h"
+#include "swift/Basic/Defer.h"
 #include "swift/Demangling/Demangler.h"
 #include "swift/Demangling/ManglingMacros.h"
+#include "llvm/ADT/StringSwitch.h"
 
 using namespace swift;
 
 Type swift::Demangle::getTypeForMangling(ASTContext &ctx,
-                                         StringRef mangling) {
+                                         StringRef mangling,
+                                         GenericSignature genericSig) {
   Demangle::Context Dem;
   auto node = Dem.demangleSymbolAsNode(mangling);
   if (!node)
     return Type();
 
-  ASTBuilder builder(ctx);
-  return swift::Demangle::decodeMangledType(builder, node);
+  ASTBuilder builder(ctx, genericSig);
+  return builder.decodeMangledType(node);
 }
 
 TypeDecl *swift::Demangle::getTypeDeclForMangling(ASTContext &ctx,
-                                                  StringRef mangling) {
+                                                  StringRef mangling,
+                                                  GenericSignature genericSig) {
   Demangle::Context Dem;
   auto node = Dem.demangleSymbolAsNode(mangling);
   if (!node)
     return nullptr;
 
-  ASTBuilder builder(ctx);
+  ASTBuilder builder(ctx, genericSig);
   return builder.createTypeDecl(node);
 }
 
 TypeDecl *swift::Demangle::getTypeDeclForUSR(ASTContext &ctx,
-                                             StringRef usr) {
+                                             StringRef usr,
+                                             GenericSignature genericSig) {
   if (!usr.startswith("s:"))
     return nullptr;
 
   std::string mangling(usr);
   mangling.replace(0, 2, MANGLING_PREFIX_STR);
 
-  return getTypeDeclForMangling(ctx, mangling);
+  return getTypeDeclForMangling(ctx, mangling, genericSig);
+}
+
+Type ASTBuilder::decodeMangledType(NodePointer node, bool forRequirement) {
+  return swift::Demangle::decodeMangledType(*this, node, forRequirement)
+      .getType();
 }
 
 TypeDecl *ASTBuilder::createTypeDecl(NodePointer node) {
@@ -83,11 +94,7 @@ TypeDecl *ASTBuilder::createTypeDecl(NodePointer node) {
       return nullptr;
 
     auto name = Ctx.getIdentifier(node->getChild(1)->getText());
-    auto results = proto->lookupDirect(name);
-    if (results.size() != 1)
-      return nullptr;
-
-    return dyn_cast<AssociatedTypeDecl>(results[0]);
+    return proto->getAssociatedType(name);
   }
 
   auto *DC = findDeclContext(node);
@@ -100,11 +107,9 @@ ASTBuilder::createBuiltinType(StringRef builtinName,
   if (builtinName.startswith(BUILTIN_TYPE_NAME_PREFIX)) {
     SmallVector<ValueDecl *, 1> decls;
 
-    ModuleDecl::AccessPathTy accessPath;
     StringRef strippedName =
-          builtinName.drop_front(strlen(BUILTIN_TYPE_NAME_PREFIX));
-    Ctx.TheBuiltinModule->lookupValue(accessPath,
-                                      Ctx.getIdentifier(strippedName),
+        builtinName.drop_front(BUILTIN_TYPE_NAME_PREFIX.size());
+    Ctx.TheBuiltinModule->lookupValue(Ctx.getIdentifier(strippedName),
                                       NLKind::QualifiedLookup,
                                       decls);
     
@@ -149,14 +154,16 @@ Type ASTBuilder::createNominalType(GenericTypeDecl *decl, Type parent) {
     return Type();
 
   // If the declaration is generic, fail.
-  if (nominalDecl->getGenericParams())
+  if (auto list = nominalDecl->getGenericParams())
     return Type();
 
   // Imported types can be renamed to be members of other (non-generic)
   // types, but the mangling does not have a parent type. Just use the
   // declared type directly in this case and skip the parent check below.
-  if (nominalDecl->hasClangNode() && !nominalDecl->isGenericContext())
-    return nominalDecl->getDeclaredType();
+  bool isImported = nominalDecl->hasClangNode() ||
+      nominalDecl->getAttrs().hasAttribute<ClangImporterSynthesizedTypeAttr>();
+  if (isImported && !nominalDecl->isGenericContext())
+    return nominalDecl->getDeclaredInterfaceType();
 
   // Validate the parent type.
   if (!validateParentType(nominalDecl, parent))
@@ -177,7 +184,9 @@ Type ASTBuilder::createTypeAliasType(GenericTypeDecl *decl, Type parent) {
   // Imported types can be renamed to be members of other (non-generic)
   // types, but the mangling does not have a parent type. Just use the
   // declared type directly in this case and skip the parent check below.
-  if (aliasDecl->hasClangNode() && !aliasDecl->isGenericContext())
+  bool isImported = aliasDecl->hasClangNode() ||
+      aliasDecl->getAttrs().hasAttribute<ClangImporterSynthesizedTypeAttr>();
+  if (isImported && !aliasDecl->isGenericContext())
     return aliasDecl->getDeclaredInterfaceType();
 
   // Validate the parent type.
@@ -191,36 +200,29 @@ Type ASTBuilder::createTypeAliasType(GenericTypeDecl *decl, Type parent) {
   auto *dc = aliasDecl->getDeclContext();
   auto subs = parent->getContextSubstitutionMap(dc->getParentModule(), dc);
 
-  // FIXME: subst() should build the sugar for us
-  declaredType = declaredType.subst(subs);
-  if (!declaredType)
-    return Type();
-
-  return TypeAliasType::get(aliasDecl, parent, subs, declaredType);
+  return declaredType.subst(subs);
 }
 
 static SubstitutionMap
-createSubstitutionMapFromGenericArgs(GenericSignature *genericSig,
+createSubstitutionMapFromGenericArgs(GenericSignature genericSig,
                                      ArrayRef<Type> args,
-                                     ModuleDecl *moduleDecl) {
-  SmallVector<GenericTypeParamType *, 4> genericParams;
-  genericSig->forEachParam([&](GenericTypeParamType *gp, bool canonical) {
-    if (canonical)
-      genericParams.push_back(gp);
-  });
-  if (genericParams.size() != args.size())
+                                     LookupConformanceFn lookupConformance) {
+  if (!genericSig)
+    return SubstitutionMap();
+  
+  if (genericSig.getGenericParams().size() != args.size())
     return SubstitutionMap();
 
   return SubstitutionMap::get(
       genericSig,
       [&](SubstitutableType *t) -> Type {
-        for (unsigned i = 0, e = genericParams.size(); i < e; ++i) {
-          if (t->isEqual(genericParams[i]))
-            return args[i];
-        }
+        auto *gp = cast<GenericTypeParamType>(t);
+        unsigned ordinal = genericSig->getGenericParamOrdinal(gp);
+        if (ordinal < args.size())
+          return args[ordinal];
         return Type();
       },
-      LookUpConformanceInModule(moduleDecl));
+      lookupConformance);
 }
 
 Type ASTBuilder::createBoundGenericType(GenericTypeDecl *decl,
@@ -234,17 +236,54 @@ Type ASTBuilder::createBoundGenericType(GenericTypeDecl *decl,
     return Type();
 
   // Build a SubstitutionMap.
-  auto *genericSig = nominalDecl->getGenericSignature();
+  auto genericSig = nominalDecl->getGenericSignature();
   auto subs = createSubstitutionMapFromGenericArgs(
-      genericSig, args, decl->getParentModule());
+      genericSig, args, LookUpConformanceInModule(decl->getParentModule()));
   if (!subs)
     return Type();
   auto origType = nominalDecl->getDeclaredInterfaceType();
 
   // FIXME: We're not checking that the type satisfies the generic
   // requirements of the signature here.
-  auto substType = origType.subst(subs);
-  return substType;
+  return origType.subst(subs);
+}
+
+Type ASTBuilder::resolveOpaqueType(NodePointer opaqueDescriptor,
+                                   ArrayRef<ArrayRef<Type>> args,
+                                   unsigned ordinal) {
+  if (opaqueDescriptor->getKind() == Node::Kind::OpaqueReturnTypeOf) {
+    auto definingDecl = opaqueDescriptor->getChild(0);
+    auto definingGlobal = Factory.createNode(Node::Kind::Global);
+    definingGlobal->addChild(definingDecl, Factory);
+    auto mangling = mangleNode(definingGlobal);
+    if (!mangling.isSuccess())
+      return Type();
+    auto mangledName = mangling.result();
+
+    auto moduleNode = findModuleNode(definingDecl);
+    if (!moduleNode)
+      return Type();
+    auto parentModule = findModule(moduleNode);
+    if (!parentModule)
+      return Type();
+
+    auto opaqueDecl = parentModule->lookupOpaqueResultType(mangledName);
+    if (!opaqueDecl)
+      return Type();
+    SmallVector<Type, 8> allArgs;
+    for (auto argSet : args) {
+      allArgs.append(argSet.begin(), argSet.end());
+    }
+
+    SubstitutionMap subs = createSubstitutionMapFromGenericArgs(
+        opaqueDecl->getGenericSignature(), allArgs,
+        LookUpConformanceInModule(parentModule));
+    Type interfaceType = opaqueDecl->getOpaqueGenericParams()[ordinal];
+    return OpaqueTypeArchetypeType::get(opaqueDecl, interfaceType, subs);
+  }
+  
+  // TODO: named opaque types
+  return Type();
 }
 
 Type ASTBuilder::createBoundGenericType(GenericTypeDecl *decl,
@@ -269,9 +308,9 @@ Type ASTBuilder::createBoundGenericType(GenericTypeDecl *decl,
 
   auto *aliasDecl = cast<TypeAliasDecl>(decl);
 
-  auto *genericSig = aliasDecl->getGenericSignature();
-  for (unsigned i = 0, e = args.size(); i < e; i++) {
-    auto origTy = genericSig->getInnermostGenericParams()[i];
+  auto genericSig = aliasDecl->getGenericSignature();
+  for (unsigned i = 0, e = args.size(); i < e; ++i) {
+    auto origTy = genericSig.getInnermostGenericParams()[i];
     auto substTy = args[i];
 
     subs[origTy->getCanonicalType()->castTo<GenericTypeParamType>()] =
@@ -286,39 +325,101 @@ Type ASTBuilder::createBoundGenericType(GenericTypeDecl *decl,
   if (!subMap)
     return Type();
 
-  // FIXME: subst() should build the sugar for us
-  auto declaredType = aliasDecl->getDeclaredInterfaceType().subst(subMap);
-  if (!declaredType)
-    return Type();
-
-  return TypeAliasType::get(aliasDecl, parent, subMap, declaredType);
+  return aliasDecl->getDeclaredInterfaceType().subst(subMap);
 }
 
-Type ASTBuilder::createTupleType(ArrayRef<Type> eltTypes,
-                                 StringRef labels,
-                                 bool isVariadic) {
-  // Just bail out on variadic tuples for now.
-  if (isVariadic) return Type();
+Type ASTBuilder::createTupleType(ArrayRef<Type> eltTypes, ArrayRef<StringRef> labels) {
+  // Unwrap unlabeled one-element tuples.
+  //
+  // FIXME: The behavior of one-element labeled tuples is inconsistent
+  // throughout the different re-implementations of type substitution
+  // and pack expansion.
+  if (eltTypes.size() == 1 &&
+      !eltTypes[0]->is<PackExpansionType>() &&
+      labels[0].empty()) {
+    return eltTypes[0];
+  }
 
   SmallVector<TupleTypeElt, 4> elements;
   elements.reserve(eltTypes.size());
-  for (auto eltType : eltTypes) {
+  for (unsigned i : indices(eltTypes)) {
     Identifier label;
-    if (!labels.empty()) {
-      auto split = labels.split(' ');
-      if (!split.first.empty())
-        label = Ctx.getIdentifier(split.first);
-      labels = split.second;
-    }
-    elements.emplace_back(eltType, label);
+    if (!labels[i].empty())
+      label = Ctx.getIdentifier(labels[i]);
+    elements.emplace_back(eltTypes[i], label);
   }
 
   return TupleType::get(elements, Ctx);
 }
 
+Type ASTBuilder::createPackType(ArrayRef<Type> eltTypes) {
+  return PackType::get(Ctx, eltTypes);
+}
+
+Type ASTBuilder::createSILPackType(ArrayRef<Type> eltTypes,
+                                   bool isElementAddress) {
+  auto extInfo = SILPackType::ExtInfo(isElementAddress);
+
+  SmallVector<CanType, 4> elements;
+  for (auto eltType : eltTypes)
+    elements.push_back(eltType->getCanonicalType());
+
+  return SILPackType::get(Ctx, extInfo, elements);
+}
+
+size_t ASTBuilder::beginPackExpansion(Type countType) {
+  ActivePackExpansions.push_back(countType);
+
+  return 1;
+}
+
+void ASTBuilder::advancePackExpansion(size_t index) {
+  assert(index == 0);
+}
+
+Type ASTBuilder::createExpandedPackElement(Type patternType) {
+  assert(!ActivePackExpansions.empty());
+  auto countType = ActivePackExpansions.back();
+  return PackExpansionType::get(patternType, countType);
+}
+
+void ASTBuilder::endPackExpansion() {
+  ActivePackExpansions.pop_back();
+}
+
 Type ASTBuilder::createFunctionType(
     ArrayRef<Demangle::FunctionParam<Type>> params,
-    Type output, FunctionTypeFlags flags) {
+    Type output, FunctionTypeFlags flags, ExtendedFunctionTypeFlags extFlags,
+    FunctionMetadataDifferentiabilityKind diffKind, Type globalActor,
+    Type thrownError) {
+  // The result type must be materializable.
+  if (!output->isMaterializable()) return Type();
+
+  bool hasIsolatedParameter = false;
+
+  llvm::SmallVector<AnyFunctionType::Param, 8> funcParams;
+  for (const auto &param : params) {
+    auto type = param.getType();
+
+    // All the argument types must be materializable.
+    if (!type->isMaterializable())
+      return Type();
+
+    auto label = Ctx.getIdentifier(param.getLabel());
+    auto flags = param.getFlags();
+    auto ownership =
+      ParamDecl::getParameterSpecifierForValueOwnership(flags.getValueOwnership());
+    auto parameterFlags = ParameterTypeFlags()
+                              .withOwnershipSpecifier(ownership)
+                              .withVariadic(flags.isVariadic())
+                              .withAutoClosure(flags.isAutoClosure())
+                              .withNoDerivative(flags.isNoDerivative())
+                              .withIsolated(flags.isIsolated());
+
+    hasIsolatedParameter |= flags.isIsolated();
+    funcParams.push_back(AnyFunctionType::Param(type, label, parameterFlags));
+  }
+
   FunctionTypeRepresentation representation;
   switch (flags.getConvention()) {
   case FunctionMetadataConvention::Swift:
@@ -335,38 +436,47 @@ Type ASTBuilder::createFunctionType(
     break;
   }
 
-  auto einfo = AnyFunctionType::ExtInfo(representation,
-                                        /*throws*/ flags.throws());
-  if (flags.isEscaping())
-    einfo = einfo.withNoEscape(false);
-  else
-    einfo = einfo.withNoEscape(true);
-
-  // The result type must be materializable.
-  if (!output->isMaterializable()) return Type();
-
-  llvm::SmallVector<AnyFunctionType::Param, 8> funcParams;
-  for (const auto &param : params) {
-    auto type = param.getType();
-
-    // All the argument types must be materializable.
-    if (!type->isMaterializable())
-      return Type();
-
-    auto label = Ctx.getIdentifier(param.getLabel());
-    auto flags = param.getFlags();
-    auto ownership = flags.getValueOwnership();
-    auto parameterFlags = ParameterTypeFlags()
-                              .withValueOwnership(ownership)
-                              .withVariadic(flags.isVariadic())
-                              .withAutoClosure(flags.isAutoClosure());
-
-    if (auto *fnType = type->getAs<FunctionType>())
-      if (!fnType->isNoEscape())
-        parameterFlags = parameterFlags.withEscaping(true);
-
-    funcParams.push_back(AnyFunctionType::Param(type, label, parameterFlags));
+  DifferentiabilityKind resultDiffKind;
+  switch (diffKind.Value) {
+  #define SIMPLE_CASE(CASE) \
+      case FunctionMetadataDifferentiabilityKind::CASE: \
+        resultDiffKind = DifferentiabilityKind::CASE; break;
+  SIMPLE_CASE(NonDifferentiable)
+  SIMPLE_CASE(Forward)
+  SIMPLE_CASE(Reverse)
+  SIMPLE_CASE(Normal)
+  SIMPLE_CASE(Linear)
+  #undef SIMPLE_CASE
   }
+
+  FunctionTypeIsolation isolation = FunctionTypeIsolation::forNonIsolated();
+  if (hasIsolatedParameter) {
+    isolation = FunctionTypeIsolation::forParameter();
+  } else if (globalActor) {
+    isolation = FunctionTypeIsolation::forGlobalActor(globalActor);
+  } else if (extFlags.isIsolatedAny()) {
+    isolation = FunctionTypeIsolation::forErased();
+  }
+
+  auto noescape =
+    (representation == FunctionTypeRepresentation::Swift
+     || representation == FunctionTypeRepresentation::Block)
+    && !flags.isEscaping();
+
+  const clang::Type *clangFunctionType = nullptr;
+  if (shouldStoreClangType(representation))
+    clangFunctionType = Ctx.getClangFunctionType(funcParams, output,
+                                                 representation);
+
+  // TODO: Handle LifetimeDependenceInfo here.
+  auto einfo =
+      FunctionType::ExtInfoBuilder(representation, noescape, flags.isThrowing(),
+                                   thrownError, resultDiffKind,
+                                   clangFunctionType, isolation,
+                                   LifetimeDependenceInfo())
+          .withAsync(flags.isAsync())
+          .withConcurrent(flags.isSendable())
+          .build();
 
   return FunctionType::get(funcParams, output, einfo);
 }
@@ -375,9 +485,8 @@ static ParameterConvention
 getParameterConvention(ImplParameterConvention conv) {
   switch (conv) {
   case Demangle::ImplParameterConvention::Indirect_In:
-    return ParameterConvention::Indirect_In;
   case Demangle::ImplParameterConvention::Indirect_In_Constant:
-    return ParameterConvention::Indirect_In_Constant;
+    return ParameterConvention::Indirect_In;
   case Demangle::ImplParameterConvention::Indirect_In_Guaranteed:
     return ParameterConvention::Indirect_In_Guaranteed;
   case Demangle::ImplParameterConvention::Indirect_Inout:
@@ -390,7 +499,31 @@ getParameterConvention(ImplParameterConvention conv) {
     return ParameterConvention::Direct_Unowned;
   case Demangle::ImplParameterConvention::Direct_Guaranteed:
     return ParameterConvention::Direct_Guaranteed;
+  case Demangle::ImplParameterConvention::Pack_Owned:
+    return ParameterConvention::Pack_Owned;
+  case Demangle::ImplParameterConvention::Pack_Guaranteed:
+    return ParameterConvention::Pack_Guaranteed;
+  case Demangle::ImplParameterConvention::Pack_Inout:
+    return ParameterConvention::Pack_Inout;
   }
+  llvm_unreachable("covered switch");
+}
+
+static std::optional<SILParameterInfo::Options>
+getParameterOptions(ImplParameterInfoOptions implOptions) {
+  SILParameterInfo::Options result;
+
+  if (implOptions.contains(ImplParameterInfoFlags::NotDifferentiable)) {
+    implOptions -= ImplParameterInfoFlags::NotDifferentiable;
+    result |= SILParameterInfo::NotDifferentiable;
+  }
+
+  // If we did not handle all flags in implOptions, this code was not updated
+  // appropriately. Return None to signal error.
+  if (bool(implOptions))
+    return {};
+
+  return result;
 }
 
 static ResultConvention getResultConvention(ImplResultConvention conv) {
@@ -405,16 +538,36 @@ static ResultConvention getResultConvention(ImplResultConvention conv) {
     return ResultConvention::UnownedInnerPointer;
   case Demangle::ImplResultConvention::Autoreleased:
     return ResultConvention::Autoreleased;
+  case Demangle::ImplResultConvention::Pack:
+    return ResultConvention::Pack;
   }
+  llvm_unreachable("covered switch");
+}
+
+static std::optional<SILResultInfo::Options>
+getResultOptions(ImplResultInfoOptions implOptions) {
+  SILResultInfo::Options result;
+
+  if (implOptions.contains(ImplResultInfoFlags::NotDifferentiable)) {
+    implOptions -= ImplResultInfoFlags::NotDifferentiable;
+    result |= SILResultInfo::NotDifferentiable;
+  }
+
+  // If we did not remove all of the options from implOptions, someone forgot to
+  // update this code for a new type of flag. Return none to signal error!
+  if (bool(implOptions))
+    return {};
+
+  return result;
 }
 
 Type ASTBuilder::createImplFunctionType(
     Demangle::ImplParameterConvention calleeConvention,
     ArrayRef<Demangle::ImplFunctionParam<Type>> params,
     ArrayRef<Demangle::ImplFunctionResult<Type>> results,
-    Optional<Demangle::ImplFunctionResult<Type>> errorResult,
+    llvm::Optional<Demangle::ImplFunctionResult<Type>> errorResult,
     ImplFunctionTypeFlags flags) {
-  GenericSignature *genericSig = nullptr;
+  GenericSignature genericSig;
 
   SILCoroutineKind funcCoroutineKind = SILCoroutineKind::None;
   ParameterConvention funcCalleeConvention =
@@ -448,25 +601,40 @@ Type ASTBuilder::createImplFunctionType(
     break;
   }
 
-  auto einfo = SILFunctionType::ExtInfo(representation,
-                                        flags.isPseudogeneric(),
-                                        !flags.isEscaping());
+  swift::DifferentiabilityKind diffKind;
+  switch (flags.getDifferentiabilityKind()) {
+  #define SIMPLE_CASE(CASE) \
+      case ImplFunctionDifferentiabilityKind::CASE: \
+        diffKind = swift::DifferentiabilityKind::CASE; break;
+  SIMPLE_CASE(NonDifferentiable)
+  SIMPLE_CASE(Forward)
+  SIMPLE_CASE(Reverse)
+  SIMPLE_CASE(Normal)
+  SIMPLE_CASE(Linear)
+  #undef SIMPLE_CASE
+  }
+
+  // There's no representation of this in the mangling because it can't
+  // occur in well-formed programs.
+  bool unimplementable = false;
 
   llvm::SmallVector<SILParameterInfo, 8> funcParams;
   llvm::SmallVector<SILYieldInfo, 8> funcYields;
   llvm::SmallVector<SILResultInfo, 8> funcResults;
-  Optional<SILResultInfo> funcErrorResult;
+  llvm::Optional<SILResultInfo> funcErrorResult;
 
   for (const auto &param : params) {
     auto type = param.getType()->getCanonicalType();
     auto conv = getParameterConvention(param.getConvention());
-    funcParams.emplace_back(type, conv);
+    auto options = *getParameterOptions(param.getOptions());
+    funcParams.emplace_back(type, conv, options);
   }
 
   for (const auto &result : results) {
     auto type = result.getType()->getCanonicalType();
     auto conv = getResultConvention(result.getConvention());
-    funcResults.emplace_back(type, conv);
+    auto options = *getResultOptions(result.getOptions());
+    funcResults.emplace_back(type, conv, options);
   }
 
   if (errorResult) {
@@ -475,21 +643,50 @@ Type ASTBuilder::createImplFunctionType(
     funcErrorResult.emplace(type, conv);
   }
 
+  const clang::Type *clangFnType = nullptr;
+  if (shouldStoreClangType(representation)) {
+    assert(funcResults.size() <= 1 && funcYields.size() == 0 &&
+           "C functions and blocks have at most 1 result and 0 yields.");
+    auto result =
+        funcResults.empty() ? llvm::Optional<SILResultInfo>() : funcResults[0];
+    clangFnType = getASTContext().getCanonicalClangFunctionType(
+        funcParams, result, representation);
+  }
+  auto einfo = SILFunctionType::ExtInfoBuilder(
+                   representation, flags.isPseudogeneric(), !flags.isEscaping(),
+                   flags.isSendable(), flags.isAsync(), unimplementable,
+                   diffKind, clangFnType, LifetimeDependenceInfo())
+                   .build();
+
   return SILFunctionType::get(genericSig, einfo, funcCoroutineKind,
                               funcCalleeConvention, funcParams, funcYields,
-                              funcResults, funcErrorResult, Ctx);
+                              funcResults, funcErrorResult,
+                              SubstitutionMap(), SubstitutionMap(), Ctx);
 }
 
 Type ASTBuilder::createProtocolCompositionType(
     ArrayRef<ProtocolDecl *> protocols,
     Type superclass,
-    bool isClassBound) {
+    bool isClassBound,
+    bool forRequirement) {
   std::vector<Type> members;
   for (auto protocol : protocols)
-    members.push_back(protocol->getDeclaredType());
+    members.push_back(protocol->getDeclaredInterfaceType());
   if (superclass && superclass->getClassOrBoundGenericClass())
     members.push_back(superclass);
-  return ProtocolCompositionType::get(Ctx, members, isClassBound);
+
+  // FIXME: move-only generics
+  InvertibleProtocolSet inverses;
+  Type composition = ProtocolCompositionType::get(Ctx, members, inverses,
+                                                  isClassBound);
+  if (forRequirement)
+    return composition;
+
+  return ExistentialType::get(composition);
+}
+
+Type ASTBuilder::createProtocolTypeFromDecl(ProtocolDecl *protocol) {
+  return protocol->getDeclaredInterfaceType();
 }
 
 static MetatypeRepresentation
@@ -502,10 +699,13 @@ getMetatypeRepresentation(ImplMetatypeRepresentation repr) {
   case Demangle::ImplMetatypeRepresentation::ObjC:
     return MetatypeRepresentation::ObjC;
   }
+  llvm_unreachable("covered switch");
 }
 
-Type ASTBuilder::createExistentialMetatypeType(Type instance,
-                          Optional<Demangle::ImplMetatypeRepresentation> repr) {
+Type ASTBuilder::createExistentialMetatypeType(
+    Type instance, llvm::Optional<Demangle::ImplMetatypeRepresentation> repr) {
+  if (auto existential = instance->getAs<ExistentialType>())
+    instance = existential->getConstraintType();
   if (!instance->isAnyExistentialType())
     return Type();
   if (!repr)
@@ -515,38 +715,108 @@ Type ASTBuilder::createExistentialMetatypeType(Type instance,
                                       getMetatypeRepresentation(*repr));
 }
 
-Type ASTBuilder::createMetatypeType(Type instance,
-                         Optional<Demangle::ImplMetatypeRepresentation> repr) {
+Type ASTBuilder::createConstrainedExistentialType(
+    Type base, ArrayRef<BuiltRequirement> constraints) {
+  // FIXME: Generalize to other kinds of bases.
+  if (!base->getAs<ProtocolType>())
+    return Type();
+  auto baseTy = base->castTo<ProtocolType>();
+  auto baseDecl = baseTy->getDecl();
+  llvm::SmallDenseMap<Identifier, Type> cmap;
+  for (const auto &req : constraints) {
+    switch (req.getKind()) {
+    case RequirementKind::SameShape:
+      llvm_unreachable("Same-shape requirement not supported here");
+    case RequirementKind::Conformance:
+    case RequirementKind::Superclass:
+    case RequirementKind::Layout:
+      continue;
+
+    case RequirementKind::SameType:
+      if (auto *DMT = req.getFirstType()->getAs<DependentMemberType>())
+        cmap[DMT->getName()] = req.getSecondType();
+    }
+  }
+  llvm::SmallVector<Type, 4> args;
+  for (auto *assocTy : baseDecl->getPrimaryAssociatedTypes()) {
+    auto argTy = cmap.find(assocTy->getName());
+    if (argTy == cmap.end()) {
+      return Type();
+    }
+    args.push_back(argTy->getSecond());
+  }
+  auto constrainedBase =
+      ParameterizedProtocolType::get(base->getASTContext(), baseTy, args);
+  return ExistentialType::get(constrainedBase);
+}
+
+Type ASTBuilder::createSymbolicExtendedExistentialType(NodePointer shapeNode,
+                                                       ArrayRef<Type> genArgs) {
+  return Type();
+}
+
+Type ASTBuilder::createMetatypeType(
+    Type instance, llvm::Optional<Demangle::ImplMetatypeRepresentation> repr) {
   if (!repr)
     return MetatypeType::get(instance);
 
   return MetatypeType::get(instance, getMetatypeRepresentation(*repr));
 }
 
+void ASTBuilder::pushGenericParams(ArrayRef<std::pair<unsigned, unsigned>> parameterPacks) {
+  ParameterPackStack.push_back(ParameterPacks);
+  ParameterPacks.clear();
+  ParameterPacks.append(parameterPacks.begin(), parameterPacks.end());
+}
+
+void ASTBuilder::popGenericParams() {
+  ParameterPacks = ParameterPackStack.back();
+  ParameterPackStack.pop_back();
+}
+
 Type ASTBuilder::createGenericTypeParameterType(unsigned depth,
                                                 unsigned index) {
-  return GenericTypeParamType::get(depth, index, Ctx);
+  if (!ParameterPacks.empty()) {
+    for (auto pair : ParameterPacks) {
+      if (pair.first == depth && pair.second == index) {
+        return GenericTypeParamType::get(/*isParameterPack*/ true,
+                                         depth, index, Ctx);
+      }
+    }
+  }
+
+  return GenericTypeParamType::get(/*isParameterPack*/ false,
+                                   depth, index, Ctx);
 }
 
 Type ASTBuilder::createDependentMemberType(StringRef member,
                                            Type base) {
-  if (!base->isTypeParameter())
-    return Type();
+  auto identifier = Ctx.getIdentifier(member);
 
-  return DependentMemberType::get(base, Ctx.getIdentifier(member));
+  if (auto *archetype = base->getAs<ArchetypeType>()) {
+      if (Type memberType = archetype->getNestedTypeByName(identifier))
+        return memberType;
+  }
+
+  if (base->isTypeParameter()) {
+    return DependentMemberType::get(base, identifier);
+  }
+
+  return Type();
 }
 
 Type ASTBuilder::createDependentMemberType(StringRef member,
                                            Type base,
                                            ProtocolDecl *protocol) {
-  if (!base->isTypeParameter())
-    return Type();
+  auto identifier = Ctx.getIdentifier(member);
 
-  auto flags = OptionSet<NominalTypeDecl::LookupDirectFlags>();
-  flags |= NominalTypeDecl::LookupDirectFlags::IgnoreNewExtensions;
-  for (auto member : protocol->lookupDirect(Ctx.getIdentifier(member),
-                                            flags)) {
-    if (auto assocType = dyn_cast<AssociatedTypeDecl>(member))
+  if (auto *archetype = base->getAs<ArchetypeType>()) {
+    if (auto assocType = protocol->getAssociatedType(identifier))
+      return archetype->getNestedType(assocType);
+  }
+
+  if (base->isTypeParameter()) {
+    if (auto assocType = protocol->getAssociatedType(identifier))
       return DependentMemberType::get(base, assocType);
   }
 
@@ -561,6 +831,37 @@ Type ASTBuilder::create##Name##StorageType(Type base) { \
 
 Type ASTBuilder::createSILBoxType(Type base) {
   return SILBoxType::get(base->getCanonicalType());
+}
+
+Type ASTBuilder::createSILBoxTypeWithLayout(
+    ArrayRef<BuiltSILBoxField> fields,
+    ArrayRef<BuiltSubstitution> Substitutions,
+    ArrayRef<BuiltRequirement> Requirements) {
+  SmallVector<Type, 4> replacements;
+  SmallVector<GenericTypeParamType *, 4> genericTypeParams;
+  for (const auto &s : Substitutions) {
+    if (auto *t = dyn_cast_or_null<GenericTypeParamType>(s.first.getPointer()))
+      genericTypeParams.push_back(t);
+    replacements.push_back(s.second);
+  }
+
+  GenericSignature signature;
+  if (!genericTypeParams.empty())
+    signature = GenericSignature::get(genericTypeParams, Requirements);
+  SmallVector<SILField, 4> silFields;
+  for (auto field: fields)
+    silFields.emplace_back(field.getPointer()->getCanonicalType(),
+                           field.getInt());
+  SILLayout *layout =
+      SILLayout::get(Ctx, signature.getCanonicalSignature(), silFields,
+                     /*captures generics*/ false);
+
+  SubstitutionMap substs;
+  if (signature)
+    substs = createSubstitutionMapFromGenericArgs(
+        signature, replacements,
+        LookUpConformanceInSignature(signature.getPointer()));
+  return SILBoxType::get(Ctx, layout, substs);
 }
 
 Type ASTBuilder::createObjCClassType(StringRef name) {
@@ -641,6 +942,30 @@ Type ASTBuilder::createParenType(Type base) {
   return ParenType::get(Ctx, base);
 }
 
+GenericSignature
+ASTBuilder::createGenericSignature(ArrayRef<BuiltType> builtParams,
+                                   ArrayRef<BuiltRequirement> requirements) {
+  std::vector<GenericTypeParamType *> params;
+  for (auto &param : builtParams) {
+    auto paramTy = param->getAs<GenericTypeParamType>();
+    if (!paramTy)
+      return GenericSignature();
+    params.push_back(paramTy);
+  }
+  return GenericSignature::get(params, requirements);
+}
+
+SubstitutionMap
+ASTBuilder::createSubstitutionMap(BuiltGenericSignature sig,
+                                  ArrayRef<BuiltType> replacements) {
+  return SubstitutionMap::get(sig, replacements,
+                              LookUpConformanceInSignature(sig.getPointer()));
+}
+
+Type ASTBuilder::subst(Type subject, const BuiltSubstitutionMap &Subs) const {
+  return subject.subst(Subs);
+}
+
 bool ASTBuilder::validateParentType(TypeDecl *decl, Type parent) {
   auto parentDecl = decl->getDeclContext()->getSelfNominalTypeDecl();
 
@@ -706,7 +1031,14 @@ ASTBuilder::createTypeDecl(NodePointer node,
 ModuleDecl *
 ASTBuilder::findModule(NodePointer node) {
   assert(node->getKind() == Demangle::Node::Kind::Module);
-  const auto &moduleName = node->getText();
+  const auto moduleName = node->getText();
+  // Respect the main module's ABI name when we're trying to resolve
+  // mangled names. But don't touch anything under the Swift stdlib's
+  // umbrella. 
+  if (Ctx.MainModule && Ctx.MainModule->getABIName().is(moduleName))
+    if (!Ctx.MainModule->getABIName().is(STDLIB_NAME))
+      return Ctx.MainModule;
+
   return Ctx.getModuleByName(moduleName);
 }
 
@@ -724,95 +1056,55 @@ ASTBuilder::findModuleNode(NodePointer node) {
   return child;
 }
 
-Optional<ASTBuilder::ForeignModuleKind>
+llvm::Optional<ASTBuilder::ForeignModuleKind>
 ASTBuilder::getForeignModuleKind(NodePointer node) {
   if (node->getKind() == Demangle::Node::Kind::DeclContext)
     return getForeignModuleKind(node->getFirstChild());
 
   if (node->getKind() != Demangle::Node::Kind::Module)
-    return None;
+    return llvm::None;
 
-  return llvm::StringSwitch<Optional<ForeignModuleKind>>(node->getText())
+  return llvm::StringSwitch<llvm::Optional<ForeignModuleKind>>(node->getText())
       .Case(MANGLING_MODULE_OBJC, ForeignModuleKind::Imported)
       .Case(MANGLING_MODULE_CLANG_IMPORTER,
             ForeignModuleKind::SynthesizedByImporter)
-      .Default(None);
+      .Default(llvm::None);
+}
+
+LayoutConstraint ASTBuilder::getLayoutConstraint(LayoutConstraintKind kind) {
+  return LayoutConstraint::getLayoutConstraint(kind, getASTContext());
+}
+
+LayoutConstraint ASTBuilder::getLayoutConstraintWithSizeAlign(
+    LayoutConstraintKind kind, unsigned size, unsigned alignment) {
+  return LayoutConstraint::getLayoutConstraint(kind, size, alignment,
+                                               getASTContext());
 }
 
 CanGenericSignature ASTBuilder::demangleGenericSignature(
     NominalTypeDecl *nominalDecl,
     NodePointer node) {
-  GenericSignatureBuilder builder(Ctx);
-  builder.addGenericSignature(nominalDecl->getGenericSignature());
+  auto baseGenericSig = nominalDecl->getGenericSignature();
 
-  for (auto &child : *node) {
-    if (child->getKind() ==
-          Demangle::Node::Kind::DependentGenericParamCount)
-      continue;
-
-    if (child->getNumChildren() != 2)
-      return CanGenericSignature();
-    auto subjectType = swift::Demangle::decodeMangledType(
-        *this, child->getChild(0));
-    if (!subjectType)
-      return CanGenericSignature();
-
-    Type constraintType;
-    if (child->getKind() ==
-          Demangle::Node::Kind::DependentGenericConformanceRequirement ||
-        child->getKind() ==
-          Demangle::Node::Kind::DependentGenericSameTypeRequirement) {
-      constraintType = swift::Demangle::decodeMangledType(
-        *this, child->getChild(1));
-      if (!constraintType)
-        return CanGenericSignature();
-    }
-
-    auto source =
-      GenericSignatureBuilder::FloatingRequirementSource::forAbstract();
-
-    switch (child->getKind()) {
-    case Demangle::Node::Kind::DependentGenericConformanceRequirement: {
-      builder.addRequirement(
-          Requirement(constraintType->isExistentialType()
-                        ? RequirementKind::Conformance
-                        : RequirementKind::Superclass,
-                      subjectType, constraintType),
-          source, nullptr);
-      break;
-    }
-    case Demangle::Node::Kind::DependentGenericSameTypeRequirement: {
-      builder.addRequirement(
-          Requirement(RequirementKind::SameType,
-                      subjectType, constraintType),
-          source, nullptr);
-      break;
-    }
-    case Demangle::Node::Kind::DependentGenericLayoutRequirement: {
-      // FIXME: Other layout constraints
-      LayoutConstraint constraint;
-      auto kindChild = child->getChild(1);
-      if (kindChild->getKind() != Demangle::Node::Kind::Identifier)
-        return CanGenericSignature();
-
-      if (kindChild->getText() == "C") {
-        auto kind = LayoutConstraintKind::Class;
-        auto layout = LayoutConstraint::getLayoutConstraint(kind, Ctx);
-        builder.addRequirement(
-            Requirement(RequirementKind::Layout, subjectType, layout),
-            source, nullptr);
-        break;
-      }
-
-      return CanGenericSignature();
-    }
-    default:
-      return CanGenericSignature();
-    }
+  // The generic signature is for a constrained extension of nominalDecl, so
+  // we introduce the parameter packs from the nominal's generic signature.
+  ParameterPackStack.push_back(ParameterPacks);
+  ParameterPacks.clear();
+  for (auto *paramTy : baseGenericSig.getGenericParams()) {
+    if (paramTy->isParameterPack())
+      ParameterPacks.emplace_back(paramTy->getDepth(), paramTy->getIndex());
   }
+  SWIFT_DEFER { popGenericParams(); };
 
-  return std::move(builder).computeGenericSignature(SourceLoc())
-      ->getCanonicalSignature();
+  // Constrained extensions mangle the subset of requirements not satisfied
+  // by the nominal's generic signature.
+  SmallVector<Requirement, 2> requirements;
+  decodeRequirement<BuiltType, BuiltRequirement, BuiltLayoutConstraint,
+                    ASTBuilder>(node, requirements, *this);
+
+  return buildGenericSignature(Ctx, baseGenericSig, {}, std::move(requirements),
+                               /*allowInverses=*/true)
+      .getCanonicalSignature();
 }
 
 DeclContext *
@@ -847,7 +1139,10 @@ ASTBuilder::findDeclContext(NodePointer node) {
       if (!module) return nullptr;
 
       // Look up the local type by its mangling.
-      auto mangledName = Demangle::mangleNode(node);
+      auto mangling = Demangle::mangleNode(node);
+      if (!mangling.isSuccess()) return nullptr;
+      auto mangledName = mangling.result();
+
       auto decl = module->lookupLocalType(mangledName);
       if (!decl) return nullptr;
 
@@ -880,7 +1175,7 @@ ASTBuilder::findDeclContext(NodePointer node) {
     if (privateDiscriminator.empty()) {
       if (auto foreignModuleKind = getForeignModuleKind(node->getChild(0))) {
         return findForeignTypeDecl(name, relatedEntityKind,
-                                    foreignModuleKind.getValue(),
+                                    foreignModuleKind.value(),
                                     node->getKind());
       }
     }
@@ -922,8 +1217,7 @@ ASTBuilder::findDeclContext(NodePointer node) {
         continue;
       }
 
-      if (ext->getGenericSignature()->getCanonicalSignature()
-          == genericSig) {
+      if (ext->getGenericSignature().getCanonicalSignature() == genericSig) {
         return ext;
       }
     }
@@ -971,10 +1265,19 @@ ASTBuilder::findTypeDecl(DeclContext *dc,
     result = candidate;
   }
 
+  // If we looked into the standard library module, but didn't find anything,
+  // try the _Concurrency module, which is also mangled into the Swift module.
+  if (!result && !dc->getParent() && module->isStdlibModule()) {
+    ASTContext &ctx = module->getASTContext();
+    if (auto concurrencyModule = ctx.getLoadedModule(ctx.Id_Concurrency)) {
+      return findTypeDecl(concurrencyModule, name, privateDiscriminator, kind);
+    }
+  }
+
   return result;
 }
 
-static Optional<ClangTypeKind>
+static llvm::Optional<ClangTypeKind>
 getClangTypeKindForNodeKind(Demangle::Node::Kind kind) {
   switch (kind) {
   case Demangle::Node::Kind::Protocol:
@@ -987,18 +1290,18 @@ getClangTypeKindForNodeKind(Demangle::Node::Kind kind) {
   case Demangle::Node::Kind::Enum:
     return ClangTypeKind::Tag;
   default:
-    return None;
+    return llvm::None;
   }
 }
 
-GenericTypeDecl *
-ASTBuilder::findForeignTypeDecl(StringRef name,
-                                StringRef relatedEntityKind,
-                                ForeignModuleKind foreignKind,
-                                Demangle::Node::Kind kind) {
+GenericTypeDecl *ASTBuilder::findForeignTypeDecl(StringRef name,
+                                                 StringRef relatedEntityKind,
+                                                 ForeignModuleKind foreignKind,
+                                                 Demangle::Node::Kind kind) {
   // Check to see if we have an importer loaded.
-  auto importer = static_cast<ClangImporter *>(Ctx.getClangModuleLoader());
-  if (!importer) return nullptr;
+  auto importer = Ctx.getClangModuleLoader();
+  if (!importer)
+    return nullptr;
 
   // Find the unique declaration that has the right kind.
   struct Consumer : VisibleDeclConsumer {
@@ -1008,9 +1311,12 @@ ASTBuilder::findForeignTypeDecl(StringRef name,
 
     explicit Consumer(Demangle::Node::Kind kind) : ExpectedKind(kind) {}
 
-    void foundDecl(ValueDecl *decl, DeclVisibilityKind reason) override {
-      if (HadError) return;
-      if (decl == Result) return;
+    void foundDecl(ValueDecl *decl, DeclVisibilityKind reason,
+                   DynamicLookupInfo dynamicLookupInfo = {}) override {
+      if (HadError)
+        return;
+      if (decl == Result)
+        return;
       if (!Result) {
         Result = dyn_cast<GenericTypeDecl>(decl);
         HadError |= !Result;
@@ -1021,33 +1327,27 @@ ASTBuilder::findForeignTypeDecl(StringRef name,
     }
   } consumer(kind);
 
+  auto found = [&](TypeDecl *found) {
+    consumer.foundDecl(found, DeclVisibilityKind::VisibleAtTopLevel);
+  };
+
+  llvm::Optional<ClangTypeKind> lookupKind = getClangTypeKindForNodeKind(kind);
+  if (!lookupKind)
+    return nullptr;
+
   switch (foreignKind) {
   case ForeignModuleKind::SynthesizedByImporter:
     if (!relatedEntityKind.empty()) {
-      Optional<ClangTypeKind> lookupKind = getClangTypeKindForNodeKind(kind);
-      if (!lookupKind)
-        return nullptr;
-      importer->lookupRelatedEntity(name, lookupKind.getValue(),
-                                    relatedEntityKind, [&](TypeDecl *found) {
-        consumer.foundDecl(found, DeclVisibilityKind::VisibleAtTopLevel);
-      });
+      importer->lookupRelatedEntity(name, *lookupKind, relatedEntityKind,
+                                    found);
       break;
     }
     importer->lookupValue(Ctx.getIdentifier(name), consumer);
-    if (consumer.Result) {
-      consumer.Result =
-          getAcceptableTypeDeclCandidate(consumer.Result,kind);
-    }
+    if (consumer.Result)
+      consumer.Result = getAcceptableTypeDeclCandidate(consumer.Result, kind);
     break;
-  case ForeignModuleKind::Imported: {
-    Optional<ClangTypeKind> lookupKind = getClangTypeKindForNodeKind(kind);
-    if (!lookupKind)
-      return nullptr;
-    importer->lookupTypeDecl(name, lookupKind.getValue(),
-                             [&](TypeDecl *found) {
-      consumer.foundDecl(found, DeclVisibilityKind::VisibleAtTopLevel);
-    });
-  }
+  case ForeignModuleKind::Imported:
+    importer->lookupTypeDecl(name, *lookupKind, found);
   }
 
   return consumer.Result;

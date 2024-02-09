@@ -17,13 +17,20 @@
 #ifndef SWIFT_RUNTIME_PRIVATE_H
 #define SWIFT_RUNTIME_PRIVATE_H
 
+#include <functional>
+
 #include "swift/Demangling/Demangler.h"
+#include "swift/Demangling/TypeLookupError.h"
 #include "swift/Runtime/Config.h"
 #include "swift/Runtime/Metadata.h"
-#include "llvm/Support/Compiler.h"
+#include "swift/shims/Visibility.h"
+
+#if defined(__APPLE__) && __has_include(<TargetConditionals.h>)
+#include <TargetConditionals.h>
+#endif
 
 // Opaque ISAs need to use object_getClass which is in runtime.h
-#if SWIFT_HAS_OPAQUE_ISAS
+#if SWIFT_OBJC_INTEROP && SWIFT_HAS_OPAQUE_ISAS
 #include <objc/runtime.h>
 #endif
 
@@ -46,8 +53,17 @@ public:
 
 #define REF_STORAGE(Name, ...) \
   void set##Name() { Data |= Name; } \
-  bool is##Name() const { return Data & Name; }
+  bool is##Name() const { return Data == Name; }
 #include "swift/AST/ReferenceStorage.def"
+
+  bool isStrong() const { return Data == 0; }
+};
+
+/// A struct to return pointer and its size back to Swift
+/// as `(UnsafePointer<UInt8>, Int)`.
+struct BufferAndSize {
+  const void *buffer;
+  intptr_t length; // negative length means error.
 };
 
 /// Type information consists of metadata and its ownership info,
@@ -72,9 +88,13 @@ public:
   const Metadata *getMetadata() const { return Response.Value; }
   MetadataResponse getResponse() const { return Response; }
 
-  bool isWeak() const { return ReferenceOwnership.isWeak(); }
-  bool isUnowned() const { return ReferenceOwnership.isUnowned(); }
-  bool isUnmanaged() const { return ReferenceOwnership.isUnmanaged(); }
+  operator bool() const { return getMetadata(); }
+
+#define REF_STORAGE(Name, ...) \
+  bool is##Name() const { return ReferenceOwnership.is##Name(); }
+#include "swift/AST/ReferenceStorage.def"
+
+  bool isStrong() const { return ReferenceOwnership.isStrong(); }
 
   TypeReferenceOwnership getReferenceOwnership() const {
     return ReferenceOwnership;
@@ -84,6 +104,35 @@ public:
 #if SWIFT_HAS_ISA_MASKING
   SWIFT_RUNTIME_EXPORT
   uintptr_t swift_isaMask;
+
+// Hardcode the mask. We have our own copy of the value, as it's hard to work
+// out the proper includes from libobjc. The values MUST match the ones from
+// libobjc. Debug builds check these values against objc_debug_isa_class_mask
+// from libobjc.
+#  if TARGET_OS_SIMULATOR && __x86_64__
+// Simulators don't currently use isa masking on x86, but we still want to emit
+// swift_isaMask and the corresponding code in case that changes. libobjc's
+// mask has the bottom bits clear to include pointer alignment, match that
+// value here.
+#    define SWIFT_ISA_MASK 0xfffffffffffffff8ULL
+#  elif __arm64__
+// The ISA mask used when ptrauth is available.
+#  define SWIFT_ISA_MASK_PTRAUTH 0x007ffffffffffff8ULL
+// ARM64 simulators always use the ARM64e mask.
+#    if __has_feature(ptrauth_calls) || TARGET_OS_SIMULATOR
+#      define SWIFT_ISA_MASK SWIFT_ISA_MASK_PTRAUTH
+#    else
+#      if TARGET_OS_OSX
+#      define SWIFT_ISA_MASK 0x00007ffffffffff8ULL
+#      else
+#      define SWIFT_ISA_MASK 0x0000000ffffffff8ULL
+#      endif
+#    endif
+#  elif __x86_64__
+#    define SWIFT_ISA_MASK 0x00007ffffffffff8ULL
+#  else
+#    error Unknown architecture for masked isa.
+#  endif
 #endif
 
 #if SWIFT_OBJC_INTEROP
@@ -123,7 +172,7 @@ public:
   /// Note, in this case, the object may or may not have a non-pointer ISA.
   /// Masking, or otherwise, may be required to get a class pointer.
   static inline const ClassMetadata *_swift_getClassOfAllocated(const void *object) {
-#if SWIFT_HAS_OPAQUE_ISAS
+#if SWIFT_OBJC_INTEROP && SWIFT_HAS_OPAQUE_ISAS
     // The ISA is opaque so masking it will not return a pointer.  We instead
     // need to call the objc runtime to get the class.
     id idObject = reinterpret_cast<id>(const_cast<void *>(object));
@@ -134,7 +183,7 @@ public:
 
 #if SWIFT_HAS_ISA_MASKING
     // Apply the mask.
-    bits &= swift_isaMask;
+    bits &= SWIFT_ISA_MASK;
 #endif
 
     // The result is a class pointer.
@@ -166,16 +215,16 @@ public:
   }
 #endif
 
-  LLVM_LIBRARY_VISIBILITY
+  SWIFT_LIBRARY_VISIBILITY
   const ClassMetadata *_swift_getClass(const void *object);
 
-  LLVM_LIBRARY_VISIBILITY
+  SWIFT_LIBRARY_VISIBILITY
   bool usesNativeSwiftReferenceCounting(const ClassMetadata *theClass);
 
   static inline
   bool objectUsesNativeSwiftReferenceCounting(const void *object) {
     assert(!isObjCTaggedPointerOrNull(object));
-#if SWIFT_HAS_OPAQUE_ISAS
+#if SWIFT_OBJC_INTEROP && SWIFT_HAS_OPAQUE_ISAS
     // Fast path for opaque ISAs.  We don't want to call
     // _swift_getClassOfAllocated as that will call object_getClass.
     // Instead we can look at the bits in the ISA and tell if its a
@@ -227,18 +276,82 @@ public:
   const ContextDescriptor *
   _searchConformancesByMangledTypeName(Demangle::NodePointer node);
 
+  SWIFT_RUNTIME_EXPORT
   Demangle::NodePointer _swift_buildDemanglingForMetadata(const Metadata *type,
-                                                      Demangle::Demangler &Dem);
+                                                          Demangle::Demangler &Dem);
+
+  /// Build the demangling for the generic type that's created by specializing
+  /// the given type context descriptor with the given arguments.
+  Demangle::NodePointer
+  _buildDemanglingForGenericType(const TypeContextDescriptor *description,
+                                 const void *const *arguments,
+                                 Demangle::Demangler &Dem);
 
   /// Callback used to provide the substitution of a generic parameter
   /// (described by depth/index) to its metadata.
+  ///
+  /// The return type here is a lie; it's actually a MetadataOrPack.
   using SubstGenericParameterFn =
-    std::function<const Metadata *(unsigned depth, unsigned index)>;
+    std::function<const void *(unsigned depth, unsigned index)>;
 
   /// Callback used to provide the substitution of a witness table based on
   /// its index into the enclosing generic environment.
   using SubstDependentWitnessTableFn =
     std::function<const WitnessTable *(const Metadata *type, unsigned index)>;
+
+  /// A pointer to type metadata or a heap-allocated metadata pack.
+  struct SWIFT_RUNTIME_LIBRARY_VISIBILITY MetadataOrPack {
+    const void *Ptr;
+
+    MetadataOrPack() : Ptr(nullptr) {}
+
+    explicit MetadataOrPack(const void *ptr) : Ptr(ptr) {}
+
+    explicit MetadataOrPack(MetadataResponse response) : Ptr(response.Value) {}
+
+    explicit MetadataOrPack(MetadataPackPointer ptr) : Ptr(ptr.getPointer()) {
+      if (ptr.getLifetime() != PackLifetime::OnHeap)
+        fatalError(0, "Cannot have an on-stack pack here\n");
+    }
+
+    explicit operator bool() const { return Ptr != nullptr; }
+
+    bool isNull() const {
+      return !Ptr;
+    }
+
+    bool isMetadataOrNull() const {
+      return (reinterpret_cast<uintptr_t>(Ptr) & 1) == 0;
+    }
+
+    bool isMetadata() const {
+      return Ptr && isMetadataOrNull();
+    }
+
+    bool isMetadataPack() const {
+      return Ptr && (reinterpret_cast<uintptr_t>(Ptr) & 1) == 1;
+    }
+
+    const Metadata *getMetadata() const {
+      if (isMetadata())
+        return reinterpret_cast<const Metadata *>(Ptr);
+      fatalError(0, "Expected metadata but got a metadata pack\n");
+    }
+
+    const Metadata *getMetadataOrNull() const {
+      if (isMetadataOrNull())
+        return reinterpret_cast<const Metadata *>(Ptr);
+      fatalError(0, "Expected metadata but got a metadata pack\n");
+    }
+
+    MetadataPackPointer getMetadataPack() const {
+      if (isMetadataPack())
+        return MetadataPackPointer(Ptr);
+      fatalError(0, "Expected a metadata pack but got metadata\n");
+    }
+
+    std::string nameForMetadata() const;
+  };
 
   /// Function object that produces substitutions for the generic parameters
   /// that occur within a mangled name, using the generic arguments from
@@ -248,11 +361,17 @@ public:
   /// types.
   class SWIFT_RUNTIME_LIBRARY_VISIBILITY SubstGenericParametersFromMetadata {
     /// Whether the source is metadata (vs. a generic environment);
-    const bool sourceIsMetadata;
+    enum class SourceKind {
+      Metadata,
+      Environment,
+      Shape,
+    };
+    const SourceKind sourceKind;
 
     union {
       const TargetContextDescriptor<InProcess> *baseContext;
       const TargetGenericEnvironment<InProcess> *environment;
+      const TargetExtendedExistentialTypeShape<InProcess> *shape;
     };
 
     /// The generic arguments.
@@ -261,7 +380,7 @@ public:
     /// An element in the descriptor path.
     struct PathElement {
       /// The generic parameters local to this element.
-      ArrayRef<GenericParamDescriptor> localGenericParams;
+      llvm::ArrayRef<GenericParamDescriptor> localGenericParams;
 
       /// The total number of generic parameters.
       unsigned numTotalGenericParams;
@@ -283,15 +402,22 @@ public:
     /// The number of key generic parameters.
     mutable unsigned numKeyGenericParameters = 0;
 
+    /// The number of pack shape classes.
+    mutable unsigned numShapeClasses = 0;
+
     /// Builds the descriptor path.
     ///
     /// \returns a pair containing the number of key generic parameters in
     /// the path up to this point.
-    unsigned buildDescriptorPath(const ContextDescriptor *context) const;
+    unsigned buildDescriptorPath(const ContextDescriptor *context,
+                                 Demangler &demangler) const;
 
     /// Builds a path from the generic environment.
     unsigned buildEnvironmentPath(
                const TargetGenericEnvironment<InProcess> *environment) const;
+
+    unsigned buildShapePath(
+        const TargetExtendedExistentialTypeShape<InProcess> *shape) const;
 
     // Set up the state we need to compute substitutions.
     void setup() const;
@@ -299,41 +425,52 @@ public:
   public:
     /// Produce substitutions entirely from the given metadata.
     explicit SubstGenericParametersFromMetadata(const Metadata *base)
-      : sourceIsMetadata(true), baseContext(base->getTypeContextDescriptor()),
-        genericArgs(base ? (const void * const *)base->getGenericArgs()
-                         : nullptr) { }
-    
+        : sourceKind(SourceKind::Metadata),
+          baseContext(base->getTypeContextDescriptor()),
+          genericArgs(base ? (const void *const *)base->getGenericArgs()
+                           : nullptr) {}
+
     /// Produce substitutions from the given instantiation arguments for the
     /// given context.
     explicit SubstGenericParametersFromMetadata(const ContextDescriptor *base,
-                                                const void * const *args)
-      : sourceIsMetadata(true), baseContext(base), genericArgs(args)
-    {}
+                                                const void *const *args)
+        : sourceKind(SourceKind::Metadata), baseContext(base),
+          genericArgs(args) {}
 
     /// Produce substitutions from the given instantiation arguments for the
     /// given generic environment.
     explicit SubstGenericParametersFromMetadata(
-               const TargetGenericEnvironment<InProcess> *environment,
-               const void * const *arguments)
-      : sourceIsMetadata(false), environment(environment),
-        genericArgs(arguments) { }
+        const TargetGenericEnvironment<InProcess> *environment,
+        const void *const *arguments)
+        : sourceKind(SourceKind::Environment), environment(environment),
+          genericArgs(arguments) {}
 
-    const Metadata *getMetadata(unsigned depth, unsigned index) const;
+    explicit SubstGenericParametersFromMetadata(
+        const TargetExtendedExistentialTypeShape<InProcess> *shape,
+        const void *const *arguments)
+        : sourceKind(SourceKind::Shape), shape(shape), genericArgs(arguments) {}
+
+    const void * const *getGenericArgs() const { return genericArgs; }
+
+    MetadataOrPack getMetadata(unsigned depth, unsigned index) const;
     const WitnessTable *getWitnessTable(const Metadata *type,
                                         unsigned index) const;
   };
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreturn-type-c-linkage" 
   /// Retrieve the type metadata described by the given demangled type name.
   ///
   /// \p substGenericParam Function that provides generic argument metadata
   /// given a particular generic parameter specified by depth/index.
   /// \p substWitnessTable Function that provides witness tables given a
   /// particular dependent conformance index.
-  SWIFT_CC(swift)
-  TypeInfo swift_getTypeByMangledNode(
+  SWIFT_RUNTIME_EXPORT SWIFT_CC(swift)
+  TypeLookupErrorOr<TypeInfo> swift_getTypeByMangledNode(
                                MetadataRequest request,
                                Demangler &demangler,
                                Demangle::NodePointer node,
+                               const void * const *arguments,
                                SubstGenericParameterFn substGenericParam,
                                SubstDependentWitnessTableFn substWitnessTable);
 
@@ -343,46 +480,28 @@ public:
   /// given a particular generic parameter specified by depth/index.
   /// \p substWitnessTable Function that provides witness tables given a
   /// particular dependent conformance index.
-  SWIFT_CC(swift)
-  TypeInfo swift_getTypeByMangledName(
+  SWIFT_RUNTIME_EXPORT SWIFT_CC(swift)
+  TypeLookupErrorOr<TypeInfo> swift_getTypeByMangledName(
                                MetadataRequest request,
                                StringRef typeName,
+                               const void * const *arguments,
                                SubstGenericParameterFn substGenericParam,
                                SubstDependentWitnessTableFn substWitnessTable);
 
-  /// Function object that produces substitutions for the generic parameters
-  /// that occur within a mangled name, using the complete set of generic
-  /// arguments "as written".
+  /// Retrieve the type metadata pack described by the given type name.
   ///
-  /// Use with \c _getTypeByMangledName to decode potentially-generic types.
-  class SWIFT_RUNTIME_LIBRARY_VISIBILITY SubstGenericParametersFromWrittenArgs {
-    /// The complete set of generic arguments.
-    const SmallVectorImpl<const Metadata *> &allGenericArgs;
+  /// \p substGenericParam Function that provides generic argument metadata
+  /// given a particular generic parameter specified by depth/index.
+  /// \p substWitnessTable Function that provides witness tables given a
+  /// particular dependent conformance index.
+  SWIFT_RUNTIME_LIBRARY_VISIBILITY
+  TypeLookupErrorOr<MetadataPackPointer> getTypePackByMangledName(
+                               StringRef typeName,
+                               const void * const *arguments,
+                               SubstGenericParameterFn substGenericParam,
+                               SubstDependentWitnessTableFn substWitnessTable);
 
-    /// The counts of generic parameters at each level.
-    const SmallVectorImpl<unsigned> &genericParamCounts;
-
-  public:
-    /// Initialize a new function object to handle substitutions. Both
-    /// parameters are references to vectors that must live longer than
-    /// this function object.
-    ///
-    /// \param allGenericArgs The complete set of generic arguments, as written.
-    /// This could come directly from "source" (where all generic arguments are
-    /// encoded) or from metadata via gatherWrittenGenericArgs().
-    ///
-    /// \param genericParamCounts The count of generic parameters at each
-    /// generic level, typically gathered by _gatherGenericParameterCounts.
-    explicit SubstGenericParametersFromWrittenArgs(
-        const SmallVectorImpl<const Metadata *> &allGenericArgs,
-        const SmallVectorImpl<unsigned> &genericParamCounts)
-      : allGenericArgs(allGenericArgs), genericParamCounts(genericParamCounts) {
-    }
-
-    const Metadata *getMetadata(unsigned depth, unsigned index) const;
-    const WitnessTable *getWitnessTable(const Metadata *type,
-                                        unsigned index) const;
-  };
+#pragma clang diagnostic pop
 
   /// Gather generic parameter counts from a context descriptor.
   ///
@@ -396,6 +515,17 @@ public:
                                           unsigned depth, unsigned index,
                                           llvm::ArrayRef<unsigned> paramCounts);
 
+  /// Gathers all of the written generic parameters needed for
+  /// '_gatherGenericParameters'. This takes a list of key arguments and fills
+  /// in the generic arguments with all generic arguments.
+  ///
+  /// \returns true if the operation succeeded.
+  bool _gatherWrittenGenericParameters(
+      const TypeContextDescriptor *descriptor,
+      llvm::ArrayRef<const void *> keyArgs,
+      llvm::SmallVectorImpl<MetadataOrPack> &genericArgs,
+      Demangle::Demangler &Dem);
+
   /// Check the given generic requirements using the given set of generic
   /// arguments, collecting the key arguments (e.g., witness tables) for
   /// the caller.
@@ -406,12 +536,12 @@ public:
   /// generic requirements (e.g., those that need to be
   /// passed to an instantiation function) will be added to this vector.
   ///
-  /// \returns true if an error occurred, false otherwise.
-  bool _checkGenericRequirements(
-                    llvm::ArrayRef<GenericRequirementDescriptor> requirements,
-                    llvm::SmallVectorImpl<const void *> &extraArguments,
-                    SubstGenericParameterFn substGenericParam,
-                    SubstDependentWitnessTableFn substWitnessTable);
+  /// \returns the error if an error occurred, None otherwise.
+  llvm::Optional<TypeLookupError> _checkGenericRequirements(
+      llvm::ArrayRef<GenericRequirementDescriptor> requirements,
+      llvm::SmallVectorImpl<const void *> &extraArguments,
+      SubstGenericParameterFn substGenericParam,
+      SubstDependentWitnessTableFn substWitnessTable);
 
   /// A helper function which avoids performing a store if the destination
   /// address already contains the source value.  This is useful when
@@ -438,24 +568,38 @@ public:
 #endif
   }
 
+  template <>
+  inline const ClassMetadata *Metadata::getClassObject() const {
+    switch (getKind()) {
+    case MetadataKind::Class: {
+      // Native Swift class metadata is also the class object.
+      return static_cast<const ClassMetadata *>(this);
+    }
+#if SWIFT_OBJC_INTEROP
+    case MetadataKind::ObjCClassWrapper: {
+      // Objective-C class objects are referenced by their Swift metadata wrapper.
+      auto wrapper = static_cast<const ObjCClassWrapperMetadata *>(this);
+      return wrapper->Class;
+    }
+#endif
+    // Other kinds of types don't have class objects.
+    default:
+      return nullptr;
+    }
+  }
+
+  SWIFT_RETURNS_NONNULL SWIFT_NODISCARD
   void *allocateMetadata(size_t size, size_t align);
 
-  /// Gather the set of generic arguments that would be written in the
-  /// source, as a f
-  ///
-  /// This function computes generic arguments even when they are not
-  /// directly represented in the metadata, e.g., generic parameters that
-  /// are canonicalized away by same-type constraints and are therefore not
-  /// "key" parameters.
-  ///
-  /// \code
-  ///   extension Array where Element == String { }
-  ///   extension Dictionary where Key == Value { }
-  /// \endcode
-  void gatherWrittenGenericArgs(const Metadata *metadata,
-                                const TypeContextDescriptor *description,
-                                llvm::SmallVectorImpl<const Metadata *> &allGenericArgs,
-                                Demangler &BorrowFrom);
+  // Compare two pieces of metadata that should be identical. Returns true if
+  // they are, false if they are not equal. Dumps the metadata contents to
+  // stderr if they are not equal.
+  bool compareGenericMetadata(const Metadata *original,
+                              const Metadata *newMetadata);
+
+  void validateExternalGenericMetadataBuilder(
+      const Metadata *original, const TypeContextDescriptor *description,
+      const void * const *arguments);
 
   Demangle::NodePointer
   _buildDemanglingForContext(const ContextDescriptor *context,
@@ -568,6 +712,16 @@ public:
                                   const Metadata *assocType,
                                   const ProtocolRequirement *reqBase,
                                   const ProtocolRequirement *assocConformance);
+
+  RelativeWitnessTable *
+  lookThroughOptionalConditionalWitnessTable(const RelativeWitnessTable *wtable);
+
+#if SWIFT_OBJC_INTEROP
+  /// Returns a retained Quick Look representation object an Obj-C object.
+  SWIFT_CC(swift) SWIFT_RUNTIME_STDLIB_INTERNAL
+  id _quickLookObjectForPointer(void *value);
+#endif
+
 } // end namespace swift
 
 #endif /* SWIFT_RUNTIME_PRIVATE_H */

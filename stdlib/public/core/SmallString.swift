@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2023 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -23,7 +23,10 @@
 //  ↑                             ↑
 //  first (leftmost) code unit    discriminator (incl. count)
 //
-@_fixed_layout @usableFromInline
+// On Android AArch64, there is one less byte available because the discriminator
+// is stored in the penultimate code unit instead, to match where it's stored
+// for large strings.
+@frozen @usableFromInline
 internal struct _SmallString {
   @usableFromInline
   internal typealias RawBitPattern = (UInt64, UInt64)
@@ -32,10 +35,8 @@ internal struct _SmallString {
   @usableFromInline
   internal var _storage: RawBitPattern
 
-  @inlinable
-  internal var rawBits: RawBitPattern {
-    @inline(__always) get { return _storage }
-  }
+  @inlinable @inline(__always)
+  internal var rawBits: RawBitPattern { return _storage }
 
   @inlinable
   internal var leadingRawBits: UInt64 {
@@ -76,15 +77,17 @@ internal struct _SmallString {
 }
 
 extension _SmallString {
-  @inlinable
+  @inlinable @inline(__always)
   internal static var capacity: Int {
-    @inline(__always) get {
-#if arch(i386) || arch(arm)
-      return 10
+#if _pointerBitWidth(_32)
+    return 10
+#elseif os(Android) && arch(arm64)
+    return 14
+#elseif _pointerBitWidth(_64)
+    return 15
 #else
-      return 15
+#error("Unknown platform")
 #endif
-    }
   }
 
   // Get an integer equivalent to the _StringObject.discriminatedObjectRawBits
@@ -95,37 +98,31 @@ extension _SmallString {
     return _storage.1.littleEndian
   }
 
-  @inlinable
-  internal var capacity: Int {
-    @inline(__always) get {
-      return _SmallString.capacity
-    }
-  }
+  @inlinable @inline(__always)
+  internal var capacity: Int { return _SmallString.capacity }
 
-  @inlinable
+  @inlinable @inline(__always)
   internal var count: Int {
-    @inline(__always) get {
-      return _StringObject.getSmallCount(fromRaw: rawDiscriminatedObject)
-    }
+    return _StringObject.getSmallCount(fromRaw: rawDiscriminatedObject)
   }
 
-  @inlinable
-  internal var unusedCapacity: Int {
-    @inline(__always) get { return capacity &- count }
-  }
+  @inlinable @inline(__always)
+  internal var unusedCapacity: Int { return capacity &- count }
 
-  @inlinable
+  @inlinable @inline(__always)
   internal var isASCII: Bool {
-    @inline(__always) get {
-      return _StringObject.getSmallIsASCII(fromRaw: rawDiscriminatedObject)
-    }
+    return _StringObject.getSmallIsASCII(fromRaw: rawDiscriminatedObject)
   }
 
   // Give raw, nul-terminated code units. This is only for limited internal
   // usage: it always clears the discriminator and count (in case it's full)
   @inlinable @inline(__always)
   internal var zeroTerminatedRawCodeUnits: RawBitPattern {
+#if os(Android) && arch(arm64)
+    let smallStringCodeUnitMask = ~UInt64(0xFFFF).bigEndian // zero last two bytes
+#else
     let smallStringCodeUnitMask = ~UInt64(0xFF).bigEndian // zero last byte
+#endif
     return (self._storage.0, self._storage.1 & smallStringCodeUnitMask)
   }
 
@@ -145,6 +142,13 @@ extension _SmallString {
   internal func _invariantCheck() {
     _internalInvariant(count <= _SmallString.capacity)
     _internalInvariant(isASCII == computeIsASCII())
+
+    // No bits should be set between the last code unit and the discriminator
+    var copy = self
+    withUnsafeBytes(of: &copy._storage) {
+      _internalInvariant(
+        $0[count..<_SmallString.capacity].allSatisfy { $0 == 0 })
+    }
   }
   #endif // INTERNAL_CHECKS_ENABLED
 
@@ -170,11 +174,11 @@ extension _SmallString: RandomAccessCollection, MutableCollection {
   @usableFromInline
   internal typealias SubSequence = _SmallString
 
-  @inlinable
-  internal var startIndex: Int { @inline(__always) get { return 0 } }
+  @inlinable @inline(__always)
+  internal var startIndex: Int { return 0 }
 
-  @inlinable
-  internal var endIndex: Int { @inline(__always) get { return count } }
+  @inlinable @inline(__always)
+  internal var endIndex: Int { return count }
 
   @inlinable
   internal subscript(_ idx: Int) -> UInt8 {
@@ -196,16 +200,19 @@ extension _SmallString: RandomAccessCollection, MutableCollection {
     }
   }
 
-  @inlinable // FIXME(inline-always) was usableFromInline
-  // testable
+  @inlinable  @inline(__always)
   internal subscript(_ bounds: Range<Index>) -> SubSequence {
-    @inline(__always) get {
+    get {
       // TODO(String performance): In-vector-register operation
       return self.withUTF8 { utf8 in
         let rebased = UnsafeBufferPointer(rebasing: utf8[bounds])
         return _SmallString(rebased)._unsafelyUnwrappedUnchecked
       }
     }
+    // This setter is required for _SmallString to be a valid MutableCollection.
+    // Since _SmallString is internal and this setter unused, we cheat.
+    @_alwaysEmitIntoClient set { fatalError() }
+    @_alwaysEmitIntoClient _modify { fatalError() }
   }
 }
 
@@ -214,31 +221,53 @@ extension _SmallString {
   internal func withUTF8<Result>(
     _ f: (UnsafeBufferPointer<UInt8>) throws -> Result
   ) rethrows -> Result {
+    let count = self.count
     var raw = self.zeroTerminatedRawCodeUnits
-    return try Swift.withUnsafeBytes(of: &raw) { rawBufPtr in
-      let ptr = rawBufPtr.baseAddress._unsafelyUnwrappedUnchecked
-        .assumingMemoryBound(to: UInt8.self)
-      return try f(UnsafeBufferPointer(start: ptr, count: self.count))
+    return try Swift._withUnprotectedUnsafeBytes(of: &raw) {
+      let rawPtr = $0.baseAddress._unsafelyUnwrappedUnchecked
+      // Rebind the underlying (UInt64, UInt64) tuple to UInt8 for the
+      // duration of the closure. Accessing self after this rebind is undefined.
+      let ptr = rawPtr.bindMemory(to: UInt8.self, capacity: count)
+      defer {
+        // Restore the memory type of self._storage
+        _ = rawPtr.bindMemory(to: RawBitPattern.self, capacity: 1)
+      }
+      return try f(UnsafeBufferPointer(_uncheckedStart: ptr, count: count))
     }
   }
 
   // Overwrite stored code units, including uninitialized. `f` should return the
-  // new count.
+  // new count. This will re-establish the invariant after `f` that all bits
+  // between the last code unit and the discriminator are unset.
   @inline(__always)
-  internal mutating func withMutableCapacity(
-    _ f: (UnsafeMutableBufferPointer<UInt8>) throws -> Int
+  fileprivate mutating func withMutableCapacity(
+    _ f: (UnsafeMutableRawBufferPointer) throws -> Int
   ) rethrows {
-    let len = try withUnsafeMutableBytes(of: &self._storage) {
-      (rawBufPtr: UnsafeMutableRawBufferPointer) -> Int in
-      let ptr = rawBufPtr.baseAddress._unsafelyUnwrappedUnchecked
-        .assumingMemoryBound(to: UInt8.self)
-      return try f(UnsafeMutableBufferPointer(
-        start: ptr, count: _SmallString.capacity))
+    let len = try withUnsafeMutableBytes(of: &_storage) {
+      try f(.init(start: $0.baseAddress, count: _SmallString.capacity))
     }
-    _internalInvariant(len <= _SmallString.capacity)
 
-    let (leading, trailing) = self.zeroTerminatedRawCodeUnits
-    self = _SmallString(leading: leading, trailing: trailing, count: len)
+    if len <= 0 {
+      _debugPrecondition(len == 0)
+      self = _SmallString()
+      return
+    }
+    _SmallString.zeroTrailingBytes(of: &_storage, from: len)
+    self = _SmallString(leading: _storage.0, trailing: _storage.1, count: len)
+  }
+
+  @inlinable
+  @_alwaysEmitIntoClient
+  internal static func zeroTrailingBytes(
+    of storage: inout RawBitPattern, from index: Int
+  ) {
+    _internalInvariant(index > 0)
+    _internalInvariant(index <= _SmallString.capacity)
+    // FIXME: Verify this on big-endian architecture
+    let mask0 = (UInt64(bitPattern: ~0) &>> (8 &* ( 8 &- Swift.min(index, 8))))
+    let mask1 = (UInt64(bitPattern: ~0) &>> (8 &* (16 &- Swift.max(index, 8))))
+    storage.0 &= (index <= 0) ? 0 : mask0.littleEndian
+    storage.1 &= (index <= 8) ? 0 : mask1.littleEndian
   }
 }
 
@@ -278,6 +307,19 @@ extension _SmallString {
     self.init(leading: leading, trailing: trailing, count: count)
   }
 
+  @inline(__always)
+  internal init(
+    initializingUTF8With initializer: (
+      _ buffer: UnsafeMutableBufferPointer<UInt8>
+    ) throws -> Int
+  ) rethrows {
+    self.init()
+    try self.withMutableCapacity {
+      try $0.withMemoryRebound(to: UInt8.self, initializer)
+    }
+    self._invariantCheck()
+  }
+
   @usableFromInline // @testable
   internal init?(_ base: _SmallString, appending other: _SmallString) {
     let totalCount = base.count + other.count
@@ -298,20 +340,50 @@ extension _SmallString {
   }
 }
 
-#if _runtime(_ObjC) && !(arch(i386) || arch(arm))
+#if _runtime(_ObjC) && _pointerBitWidth(_64)
 // Cocoa interop
 extension _SmallString {
   // Resiliently create from a tagged cocoa string
   //
   @_effects(readonly) // @opaque
   @usableFromInline // testable
-  internal init(taggedCocoa cocoa: AnyObject) {
+  internal init?(taggedCocoa cocoa: AnyObject) {
     self.init()
+    var success = true
     self.withMutableCapacity {
-      let len = _bridgeTagged(cocoa, intoUTF8: $0)
-      _internalInvariant(len != nil && len! < _SmallString.capacity,
-        "Internal invariant violated: large tagged NSStrings")
-      return len._unsafelyUnwrappedUnchecked
+      /*
+       For regular NSTaggedPointerStrings we will always succeed here, but
+       tagged NSLocalizedStrings may not fit in a SmallString
+       */
+      if let len = _bridgeTagged(cocoa, intoUTF8: $0) {
+        return len
+      }
+      success = false
+      return 0
+    }
+    if !success {
+      return nil
+    }
+    self._invariantCheck()
+  }
+  
+  @_effects(readonly) // @opaque
+  internal init?(taggedASCIICocoa cocoa: AnyObject) {
+    self.init()
+    var success = true
+    self.withMutableCapacity {
+      /*
+       For regular NSTaggedPointerStrings we will always succeed here, but
+       tagged NSLocalizedStrings may not fit in a SmallString
+       */
+      if let len = _bridgeTaggedASCII(cocoa, intoUTF8: $0) {
+        return len
+      }
+      success = false
+      return 0
+    }
+    if !success {
+      return nil
     }
     self._invariantCheck()
   }

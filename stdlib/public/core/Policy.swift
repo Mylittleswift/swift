@@ -15,29 +15,85 @@
 //===----------------------------------------------------------------------===//
 // Standardized uninhabited type
 //===----------------------------------------------------------------------===//
-/// The return type of functions that do not return normally, that is, a type
-/// with no values.
+/// A type that has no values and can't be constructed.
 ///
-/// Use `Never` as the return type when declaring a closure, function, or
-/// method that unconditionally throws an error, traps, or otherwise does
-/// not terminate.
+/// Use `Never` as the return type of a function
+/// that doesn't return normally --- for example,
+/// because it runs forever or terminates the program.
 ///
+///     // An infinite loop never returns.
+///     func forever() -> Never {
+///         while true {
+///             print("I will print forever.")
+///         }
+///     }
+///
+///     // Calling fatalError(_:file:line:) unconditionally stops the program.
 ///     func crashAndBurn() -> Never {
 ///         fatalError("Something very, very bad happened")
 ///     }
-@_frozen
+///
+/// A function that returns `Never` is called a _nonreturning_ function.
+/// Closures, methods, computed properties, and subscripts
+/// can also be nonreturning.
+///
+/// There's no way to create an instance of `Never`;
+/// this characteristic makes it an _uninhabited_ type.
+/// You can use an uninhabited type like `Never`
+/// to represent states in your program
+/// that are impossible to reach during execution.
+/// Swift's type system uses this information ---
+/// for example, to reason about control statements
+/// in cases that are known to be unreachable.
+///
+///     let favoriteNumber: Result<Int, Never> = .success(42)
+///     switch favoriteNumber {
+///     case .success(let value):
+///         print("My favorite number is", value)
+///     }
+///
+/// In the code above,
+/// `favoriteNumber` has a failure type of `Never`,
+/// indicating that it always succeeds.
+/// The switch statement is therefore exhaustive,
+/// even though it doesn't contain a `.failure` case,
+/// because that case could never be reached.
+@frozen
 public enum Never {}
+
+extension Never: Sendable { }
 
 extension Never: Error {}
 
-extension Never: Equatable {}
+extension Never: Equatable, Comparable, Hashable {}
 
-extension Never: Comparable {
-  public static func < (lhs: Never, rhs: Never) -> Bool {
+@available(SwiftStdlib 5.5, *)
+@_unavailableInEmbedded
+extension Never: Identifiable {
+  @available(SwiftStdlib 5.5, *)
+  public var id: Never {
+    switch self {}
   }
 }
 
-extension Never: Hashable {}
+@available(SwiftStdlib 5.9, *)
+@_unavailableInEmbedded
+extension Never: Encodable {
+  @available(SwiftStdlib 5.9, *)
+  public func encode(to encoder: any Encoder) throws {}
+}
+
+@available(SwiftStdlib 5.9, *)
+@_unavailableInEmbedded
+extension Never: Decodable {
+  @available(SwiftStdlib 5.9, *)
+  public init(from decoder: any Decoder) throws {
+    let context = DecodingError.Context(
+      codingPath: decoder.codingPath,
+      debugDescription: "Unable to decode an instance of Never.")
+    throw DecodingError.typeMismatch(Never.self, context)
+  }
+}
 
 //===----------------------------------------------------------------------===//
 // Standardized aliases
@@ -79,7 +135,7 @@ public typealias Float64 = Double
 //===----------------------------------------------------------------------===//
 /// The default type for an otherwise-unconstrained integer literal.
 public typealias IntegerLiteralType = Int
-/// The default type for an otherwise-unconstrained floating point literal.
+/// The default type for an otherwise-unconstrained floating-point literal.
 public typealias FloatLiteralType = Double
 
 /// The default type for an otherwise-unconstrained Boolean literal.
@@ -97,17 +153,20 @@ public typealias FloatLiteralType = Double
 public typealias BooleanLiteralType = Bool
 
 /// The default type for an otherwise-unconstrained unicode scalar literal.
+@_unavailableInEmbedded
 public typealias UnicodeScalarType = String
 /// The default type for an otherwise-unconstrained Unicode extended
 /// grapheme cluster literal.
+@_unavailableInEmbedded
 public typealias ExtendedGraphemeClusterType = String
 /// The default type for an otherwise-unconstrained string literal.
+@_unavailableInEmbedded
 public typealias StringLiteralType = String
 
 //===----------------------------------------------------------------------===//
 // Default types for unconstrained number literals
 //===----------------------------------------------------------------------===//
-#if !os(Windows) && (arch(i386) || arch(x86_64))
+#if !(os(Windows) || os(Android) || ($Embedded && !os(Linux) && !(os(macOS) || os(iOS) || os(watchOS) || os(tvOS)))) && (arch(i386) || arch(x86_64))
 public typealias _MaxBuiltinFloatType = Builtin.FPIEEE80
 #else
 public typealias _MaxBuiltinFloatType = Builtin.FPIEEE64
@@ -318,7 +377,7 @@ public typealias AnyClass = AnyObject.Type
 ///   - lhs: A value to compare.
 ///   - rhs: Another value to compare.
 @_transparent
-public func ~= <T : Equatable>(a: T, b: T) -> Bool {
+public func ~= <T: Equatable>(a: T, b: T) -> Bool {
   return a == b
 }
 
@@ -382,7 +441,7 @@ precedencegroup BitwiseShiftPrecedence {
 // Standard postfix operators.
 postfix operator ++
 postfix operator --
-postfix operator ... : Comparable
+postfix operator ...
 
 // Optional<T> unwrapping operator is built into the compiler as a part of
 // postfix expression grammar.
@@ -392,71 +451,71 @@ postfix operator ... : Comparable
 // Standard prefix operators.
 prefix operator ++
 prefix operator --
-prefix operator ! : Bool
-prefix operator ~ : BinaryInteger
-prefix operator + : AdditiveArithmetic
-prefix operator - : SignedNumeric
-prefix operator ... : Comparable
-prefix operator ..< : Comparable
+prefix operator !
+prefix operator ~
+prefix operator +
+prefix operator -
+prefix operator ...
+prefix operator ..<
 
 // Standard infix operators.
 
 // "Exponentiative"
 
-infix operator  << : BitwiseShiftPrecedence, BinaryInteger
-infix operator &<< : BitwiseShiftPrecedence, FixedWidthInteger
-infix operator  >> : BitwiseShiftPrecedence, BinaryInteger
-infix operator &>> : BitwiseShiftPrecedence, FixedWidthInteger
+infix operator  <<: BitwiseShiftPrecedence
+infix operator &<<: BitwiseShiftPrecedence
+infix operator  >>: BitwiseShiftPrecedence
+infix operator &>>: BitwiseShiftPrecedence
 
 // "Multiplicative"
 
-infix operator   * : MultiplicationPrecedence, Numeric
-infix operator  &* : MultiplicationPrecedence, FixedWidthInteger
-infix operator   / : MultiplicationPrecedence, BinaryInteger, FloatingPoint
-infix operator   % : MultiplicationPrecedence, BinaryInteger
-infix operator   & : MultiplicationPrecedence, BinaryInteger
+infix operator   *: MultiplicationPrecedence
+infix operator  &*: MultiplicationPrecedence
+infix operator   /: MultiplicationPrecedence
+infix operator   %: MultiplicationPrecedence
+infix operator   &: MultiplicationPrecedence
 
 // "Additive"
 
-infix operator   + : AdditionPrecedence, AdditiveArithmetic, String, Array, Strideable
-infix operator  &+ : AdditionPrecedence, FixedWidthInteger
-infix operator   - : AdditionPrecedence, AdditiveArithmetic, Strideable
-infix operator  &- : AdditionPrecedence, FixedWidthInteger
-infix operator   | : AdditionPrecedence, BinaryInteger
-infix operator   ^ : AdditionPrecedence, BinaryInteger
+infix operator   +: AdditionPrecedence
+infix operator  &+: AdditionPrecedence
+infix operator   -: AdditionPrecedence
+infix operator  &-: AdditionPrecedence
+infix operator   |: AdditionPrecedence
+infix operator   ^: AdditionPrecedence
 
 // FIXME: is this the right precedence level for "..." ?
-infix operator  ... : RangeFormationPrecedence, Comparable
-infix operator  ..< : RangeFormationPrecedence, Comparable
+infix operator  ...: RangeFormationPrecedence
+infix operator  ..<: RangeFormationPrecedence
 
 // The cast operators 'as' and 'is' are hardcoded as if they had the
 // following attributes:
-// infix operator as : CastingPrecedence
+// infix operator as: CastingPrecedence
 
 // "Coalescing"
 
-infix operator ?? : NilCoalescingPrecedence
+infix operator ??: NilCoalescingPrecedence
 
 // "Comparative"
 
-infix operator  <  : ComparisonPrecedence, Comparable
-infix operator  <= : ComparisonPrecedence, Comparable
-infix operator  >  : ComparisonPrecedence, Comparable
-infix operator  >= : ComparisonPrecedence, Comparable
-infix operator  == : ComparisonPrecedence, Equatable
-infix operator  != : ComparisonPrecedence, Equatable
-infix operator === : ComparisonPrecedence
-infix operator !== : ComparisonPrecedence
+infix operator  <: ComparisonPrecedence
+infix operator  <=: ComparisonPrecedence
+infix operator  >: ComparisonPrecedence
+infix operator  >=: ComparisonPrecedence
+infix operator  ==: ComparisonPrecedence
+infix operator  !=: ComparisonPrecedence
+infix operator ===: ComparisonPrecedence
+infix operator !==: ComparisonPrecedence
 // FIXME: ~= will be built into the compiler.
-infix operator  ~= : ComparisonPrecedence
+infix operator  ~=: ComparisonPrecedence
 
 // "Conjunctive"
 
-infix operator && : LogicalConjunctionPrecedence, Bool
+infix operator &&: LogicalConjunctionPrecedence
 
 // "Disjunctive"
 
-infix operator || : LogicalDisjunctionPrecedence, Bool
+infix operator ||: LogicalDisjunctionPrecedence
 
 // User-defined ternary operators are not supported. The ? : operator is
 // hardcoded as if it had the following attributes:
@@ -464,25 +523,25 @@ infix operator || : LogicalDisjunctionPrecedence, Bool
 
 // User-defined assignment operators are not supported. The = operator is
 // hardcoded as if it had the following attributes:
-// infix operator = : AssignmentPrecedence
+// infix operator =: AssignmentPrecedence
 
 // Compound
 
-infix operator   *= : AssignmentPrecedence, Numeric
-infix operator  &*= : AssignmentPrecedence, FixedWidthInteger
-infix operator   /= : AssignmentPrecedence, BinaryInteger
-infix operator   %= : AssignmentPrecedence, BinaryInteger
-infix operator   += : AssignmentPrecedence, AdditiveArithmetic, String, Array, Strideable
-infix operator  &+= : AssignmentPrecedence, FixedWidthInteger
-infix operator   -= : AssignmentPrecedence, AdditiveArithmetic, Strideable
-infix operator  &-= : AssignmentPrecedence, FixedWidthInteger
-infix operator  <<= : AssignmentPrecedence, BinaryInteger
-infix operator &<<= : AssignmentPrecedence, FixedWidthInteger
-infix operator  >>= : AssignmentPrecedence, BinaryInteger
-infix operator &>>= : AssignmentPrecedence, FixedWidthInteger
-infix operator   &= : AssignmentPrecedence, BinaryInteger
-infix operator   ^= : AssignmentPrecedence, BinaryInteger
-infix operator   |= : AssignmentPrecedence, BinaryInteger
+infix operator   *=: AssignmentPrecedence
+infix operator  &*=: AssignmentPrecedence
+infix operator   /=: AssignmentPrecedence
+infix operator   %=: AssignmentPrecedence
+infix operator   +=: AssignmentPrecedence
+infix operator  &+=: AssignmentPrecedence
+infix operator   -=: AssignmentPrecedence
+infix operator  &-=: AssignmentPrecedence
+infix operator  <<=: AssignmentPrecedence
+infix operator &<<=: AssignmentPrecedence
+infix operator  >>=: AssignmentPrecedence
+infix operator &>>=: AssignmentPrecedence
+infix operator   &=: AssignmentPrecedence
+infix operator   ^=: AssignmentPrecedence
+infix operator   |=: AssignmentPrecedence
 
 // Workaround for <rdar://problem/14011860> SubTLF: Default
 // implementations in protocols.  Library authors should ensure

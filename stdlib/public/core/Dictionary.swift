@@ -273,7 +273,7 @@
 ///         }
 ///     }
 ///     // Prints "Response 200: OK"
-///     // Prints "Response 403: Access Forbidden"
+///     // Prints "Response 403: Access forbidden"
 ///     // Prints "Unknown response 301"
 ///
 /// You can also update, modify, or remove keys and values from a dictionary
@@ -351,7 +351,7 @@
 /// the corresponding key-value pair as a non-optional tuple.
 ///
 ///     print(imagePaths[glyphIndex!])
-///     // Prints "("star", "/glyphs/star.png")"
+///     // Prints "(key: "star", value: "/glyphs/star.png")"
 ///
 /// A dictionary's indices stay valid across additions to the dictionary as
 /// long as the dictionary has enough capacity to store the added values
@@ -385,7 +385,8 @@
 /// `NSDictionary` and `Dictionary` share buffer using the same copy-on-write
 /// optimization that is used when two instances of `Dictionary` share
 /// buffer.
-@_fixed_layout
+@frozen
+@_eagerMove
 public struct Dictionary<Key: Hashable, Value> {
   /// The element type of a dictionary: a tuple containing an individual
   /// key-value pair.
@@ -608,15 +609,19 @@ extension Dictionary {
   public __consuming func filter(
     _ isIncluded: (Element) throws -> Bool
   ) rethrows -> [Key: Value] {
-    // FIXME(performance): Try building a bitset of elements to keep, so that we
-    // eliminate rehashings during insertion.
-    var result = _NativeDictionary<Key, Value>()
-    for element in self {
-      if try isIncluded(element) {
-        result.insertNew(key: element.key, value: element.value)
+  #if _runtime(_ObjC)
+    guard _variant.isNative else {
+      // Slow path for bridged dictionaries
+      var result = _NativeDictionary<Key, Value>()
+      for element in self {
+        if try isIncluded(element) {
+          result.insertNew(key: element.key, value: element.value)
+        }
       }
+      return Dictionary(_native: result)
     }
-    return Dictionary(_native: result)
+  #endif
+    return Dictionary(_native: try _variant.asNative.filter(isIncluded))
   }
 }
 
@@ -696,7 +701,7 @@ extension Dictionary: Collection {
   ///     } else {
   ///         print("Didn't find 'Japan' as a value in the dictionary.")
   ///     }
-  ///     // Prints "("JP", "Japan")"
+  ///     // Prints "(key: "JP", value: "Japan")"
   ///     // Prints "Japan's country code is 'JP'."
   ///
   /// - Parameter position: The position of the key-value pair to access.
@@ -817,7 +822,6 @@ extension Dictionary: ExpressibleByDictionaryLiteral {
   /// - Parameter elements: The key-value pairs that will make up the new
   ///   dictionary. Each key in `elements` must be unique.
   @inlinable
-  @_effects(readonly)
   @_semantics("optimize.sil.specialize.generic.size.never")
   public init(dictionaryLiteral elements: (Key, Value)...) {
     let native = _NativeDictionary<Key, Value>(capacity: elements.count)
@@ -831,9 +835,8 @@ extension Dictionary: ExpressibleByDictionaryLiteral {
 }
 
 extension Dictionary {
-  /// Accesses the value with the given key. If the dictionary doesn't contain
-  /// the given key, accesses the provided default value as if the key and
-  /// default value existed in the dictionary.
+  /// Accesses the value with the given key, falling back to the given default
+  /// value if the key isn't found.
   ///
   /// Use this subscript when you want either the value for a particular key
   /// or, when that key is not present in the dictionary, a default value. This
@@ -851,7 +854,7 @@ extension Dictionary {
   ///         print("Response \(code): \(message)")
   ///     }
   ///     // Prints "Response 200: OK"
-  ///     // Prints "Response 403: Access Forbidden"
+  ///     // Prints "Response 403: Access forbidden"
   ///     // Prints "Response 301: Unknown response"
   ///
   /// When a dictionary's `Value` type has value semantics, you can use this
@@ -862,11 +865,11 @@ extension Dictionary {
   ///     let message = "Hello, Elle!"
   ///     var letterCounts: [Character: Int] = [:]
   ///     for letter in message {
-  ///         letterCounts[letter, defaultValue: 0] += 1
+  ///         letterCounts[letter, default: 0] += 1
   ///     }
   ///     // letterCounts == ["H": 1, "e": 2, "l": 4, "o": 1, ...]
   ///
-  /// When `letterCounts[letter, defaultValue: 0] += 1` is executed with a
+  /// When `letterCounts[letter, default: 0] += 1` is executed with a
   /// value of `letter` that isn't already a key in `letterCounts`, the
   /// specified default value (`0`) is returned from the subscript,
   /// incremented, and then added to the dictionary under that key.
@@ -879,7 +882,7 @@ extension Dictionary {
   ///   - key: The key the look up in the dictionary.
   ///   - defaultValue: The default value to use if `key` doesn't exist in the
   ///     dictionary.
-  /// - Returns: The value associated with `key` in the dictionary`; otherwise,
+  /// - Returns: The value associated with `key` in the dictionary; otherwise,
   ///   `defaultValue`.
   @inlinable
   public subscript(
@@ -933,7 +936,7 @@ extension Dictionary {
   ///     let data = ["a": "1", "b": "three", "c": "///4///"]
   ///
   ///     let m: [String: Int?] = data.mapValues { str in Int(str) }
-  ///     // ["a": 1, "b": nil, "c": nil]
+  ///     // ["a": Optional(1), "b": nil, "c": nil]
   ///
   ///     let c: [String: Int] = data.compactMapValues { str in Int(str) }
   ///     // ["a": 1]
@@ -1183,7 +1186,7 @@ extension Dictionary {
   /// If the key isn't found in the dictionary, `removeValue(forKey:)` returns
   /// `nil`.
   ///
-  ///     if let value = hues.removeValueForKey("Cerise") {
+  ///     if let value = hues.removeValue(forKey: "Cerise") {
   ///         print("The value \(value) was removed.")
   ///     } else {
   ///         print("No value found for that key.")
@@ -1280,10 +1283,8 @@ extension Dictionary {
   }
 
   /// A view of a dictionary's keys.
-  @_fixed_layout
-  public struct Keys
-    : Collection, Equatable,
-      CustomStringConvertible, CustomDebugStringConvertible {
+  @frozen
+  public struct Keys: Collection, Equatable {
     public typealias Element = Key
     public typealias SubSequence = Slice<Dictionary.Keys>
 
@@ -1396,20 +1397,11 @@ extension Dictionary {
 
       return true
     }
-
-    public var description: String {
-      return _makeCollectionDescription()
-    }
-
-    public var debugDescription: String {
-      return _makeCollectionDescription(withTypeName: "Dictionary.Keys")
-    }
   }
 
   /// A view of a dictionary's values.
-  @_fixed_layout
-  public struct Values
-    : MutableCollection, CustomStringConvertible, CustomDebugStringConvertible {
+  @frozen
+  public struct Values: MutableCollection {
     public typealias Element = Value
 
     @usableFromInline
@@ -1479,14 +1471,6 @@ extension Dictionary {
       return count == 0
     }
 
-    public var description: String {
-      return _makeCollectionDescription()
-    }
-
-    public var debugDescription: String {
-      return _makeCollectionDescription(withTypeName: "Dictionary.Values")
-    }
-
     @inlinable
     public mutating func swapAt(_ i: Index, _ j: Index) {
       guard i != j else { return }
@@ -1504,8 +1488,32 @@ extension Dictionary {
   }
 }
 
+@_unavailableInEmbedded
+extension Dictionary.Keys
+  : CustomStringConvertible, CustomDebugStringConvertible {
+  public var description: String {
+    return _makeCollectionDescription()
+  }
+
+  public var debugDescription: String {
+    return _makeCollectionDescription(withTypeName: "Dictionary.Keys")
+  }
+}
+
+@_unavailableInEmbedded
+extension Dictionary.Values
+  : CustomStringConvertible, CustomDebugStringConvertible {
+  public var description: String {
+    return _makeCollectionDescription()
+  }
+
+  public var debugDescription: String {
+    return _makeCollectionDescription(withTypeName: "Dictionary.Values")
+  }
+}
+
 extension Dictionary.Keys {
-  @_fixed_layout
+  @frozen
   public struct Iterator: IteratorProtocol {
     @usableFromInline
     internal var _base: Dictionary<Key, Value>.Iterator
@@ -1538,7 +1546,7 @@ extension Dictionary.Keys {
 }
 
 extension Dictionary.Values {
-  @_fixed_layout
+  @frozen
   public struct Iterator: IteratorProtocol {
     @usableFromInline
     internal var _base: Dictionary<Key, Value>.Iterator
@@ -1611,6 +1619,7 @@ extension Dictionary: Hashable where Value: Hashable {
   }
 }
 
+@_unavailableInEmbedded
 extension Dictionary: _HasCustomAnyHashableRepresentation
 where Value: Hashable {
   public __consuming func _toCustomAnyHashable() -> AnyHashable? {
@@ -1618,6 +1627,7 @@ where Value: Hashable {
   }
 }
 
+@_unavailableInEmbedded
 internal struct _DictionaryAnyHashableBox<Key: Hashable, Value: Hashable>
   : _AnyHashableBox {
   internal let _value: Dictionary<Key, Value>
@@ -1670,6 +1680,7 @@ internal struct _DictionaryAnyHashableBox<Key: Hashable, Value: Hashable>
   }
 }
 
+@_unavailableInEmbedded
 extension Collection {
   // Utility method for KV collections that wish to implement
   // CustomStringConvertible and CustomDebugStringConvertible using a bracketed
@@ -1678,7 +1689,8 @@ extension Collection {
   internal func _makeKeyValuePairDescription<K, V>(
     withTypeName type: String? = nil
   ) -> String where Element == (key: K, value: V) {
-    if self.count == 0 {
+#if !SWIFT_STDLIB_STATIC_PRINT
+    if self.isEmpty {
       return "[:]"
     }
     
@@ -1696,9 +1708,13 @@ extension Collection {
     }
     result += "]"
     return result
+#else
+    return "(collection printing not available)"
+#endif
   }
 }
 
+@_unavailableInEmbedded
 extension Dictionary: CustomStringConvertible, CustomDebugStringConvertible {
   /// A string that represents the contents of the dictionary.
   public var description: String {
@@ -1713,7 +1729,7 @@ extension Dictionary: CustomStringConvertible, CustomDebugStringConvertible {
 }
 
 @usableFromInline
-@_frozen
+@frozen
 internal enum _MergeError: Error {
   case keyCollision
 }
@@ -1730,7 +1746,7 @@ extension Dictionary {
   /// 2. Subscripting with an index, yielding a key-value pair:
   ///
   ///        (k, v) = d[i]
-  @_fixed_layout
+  @frozen
   public struct Index {
     // Index for native dictionary is efficient.  Index for bridged NSDictionary
     // is not, because neither NSEnumerator nor fast enumeration support moving
@@ -1739,7 +1755,7 @@ extension Dictionary {
     // safe to copy the state.  So, we cannot implement Index that is a value
     // type for bridged NSDictionary in terms of Cocoa enumeration facilities.
 
-    @_frozen
+    @frozen
     @usableFromInline
     internal enum _Variant {
       case native(_HashTable.Index)
@@ -1908,7 +1924,7 @@ extension Dictionary.Index: Hashable {
 
 extension Dictionary {
   /// An iterator over the members of a `Dictionary<Key, Value>`.
-  @_fixed_layout
+  @frozen
   public struct Iterator {
     // Dictionary has a separate IteratorProtocol and Index because of
     // efficiency and implementability reasons.
@@ -1921,7 +1937,7 @@ extension Dictionary {
     // IteratorProtocol, which is being consumed as iteration proceeds.
 
     @usableFromInline
-    @_frozen
+    @frozen
     internal enum _Variant {
       case native(_NativeDictionary<Key, Value>.Iterator)
 #if _runtime(_ObjC)
@@ -2034,6 +2050,7 @@ extension Dictionary.Iterator: IteratorProtocol {
   }
 }
 
+#if SWIFT_ENABLE_REFLECTION
 extension Dictionary.Iterator: CustomReflectable {
   /// A mirror that reflects the iterator.
   public var customMirror: Mirror {
@@ -2050,6 +2067,7 @@ extension Dictionary: CustomReflectable {
     return Mirror(self, unlabeledChildren: self, displayStyle: style)
   }
 }
+#endif
 
 extension Dictionary {
   /// Removes and returns the first key-value pair of the dictionary if the
@@ -2099,3 +2117,18 @@ public typealias DictionaryIndex<Key: Hashable, Value> =
   Dictionary<Key, Value>.Index
 public typealias DictionaryIterator<Key: Hashable, Value> =
   Dictionary<Key, Value>.Iterator
+
+extension Dictionary: @unchecked Sendable
+  where Key: Sendable, Value: Sendable { }
+extension Dictionary.Keys: @unchecked Sendable
+  where Key: Sendable, Value: Sendable { }
+extension Dictionary.Values: @unchecked Sendable
+  where Key: Sendable, Value: Sendable { }
+extension Dictionary.Keys.Iterator: @unchecked Sendable
+  where Key: Sendable, Value: Sendable { }
+extension Dictionary.Values.Iterator: @unchecked Sendable
+  where Key: Sendable, Value: Sendable { }
+extension Dictionary.Index: @unchecked Sendable
+  where Key: Sendable, Value: Sendable { }
+extension Dictionary.Iterator: @unchecked Sendable
+  where Key: Sendable, Value: Sendable { }

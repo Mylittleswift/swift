@@ -7,7 +7,7 @@ func inoutWithCallerSideDefaults(_ x: inout Int, y: Int = #line) {}
 func scalarWithDefaults(_ x: Int, y: Int = 0, z: Int = 0) {}
 func scalarWithCallerSideDefaults(_ x: Int, y: Int = #line) {}
 
-func tupleWithDefaults(x x: (Int, Int), y: Int = 0, z: Int = 0) {}
+func tupleWithDefaults(x: (Int, Int), y: Int = 0, z: Int = 0) {}
 
 func variadicFirst(_ x: Int...) {}
 func variadicSecond(_ x: Int, _ y: Int...) {}
@@ -55,18 +55,20 @@ tupleWithDefaults(x: (x,x))
 
 // CHECK: [[ALLOC_ARRAY:%.*]] = apply {{.*}} -> (@owned Array<τ_0_0>, Builtin.RawPointer)
 // CHECK: ([[ARRAY:%.*]], [[MEMORY:%.*]]) = destructure_tuple [[ALLOC_ARRAY]]
-// CHECK: [[ADDR:%.*]] = pointer_to_address [[MEMORY]]
+// CHECK: [[MDI:%.*]] = mark_dependence [[MEMORY]]
+// CHECK: [[ADDR:%.*]] = pointer_to_address [[MDI]]
 // CHECK: [[READ:%.*]] = begin_access [read] [dynamic] [[X_ADDR]] : $*Int
-// CHECK: [[X:%.*]] = load [trivial] [[READ]]
-// CHECK: store [[X]] to [trivial] [[ADDR]]
+// CHECK: copy_addr [[READ]] to [init] [[ADDR]]
+// CHECK: [[FIN_FN:%.*]] = function_ref @$ss27_finalizeUninitializedArrayySayxGABnlF
+// CHECK: [[FIN_ARR:%.*]] = apply [[FIN_FN]]<Int>([[ARRAY]])
 // CHECK: [[VARIADIC_FIRST:%.*]] = function_ref @$s20scalar_to_tuple_args13variadicFirstyySid_tF
-// CHECK: apply [[VARIADIC_FIRST]]([[ARRAY]])
+// CHECK: apply [[VARIADIC_FIRST]]([[FIN_ARR]])
 variadicFirst(x)
 
-// CHECK: [[ALLOC_ARRAY:%.*]] = apply {{.*}} -> (@owned Array<τ_0_0>, Builtin.RawPointer)
-// CHECK: ([[ARRAY:%.*]], [[MEMORY:%.*]]) = destructure_tuple [[ALLOC_ARRAY]]
 // CHECK: [[READ:%.*]] = begin_access [read] [dynamic] [[X_ADDR]] : $*Int
 // CHECK: [[X:%.*]] = load [trivial] [[READ]]
+// CHECK: [[ALLOC_ARRAY:%.*]] = apply {{.*}} -> (@owned Array<τ_0_0>, Builtin.RawPointer)
+// CHECK: ([[ARRAY:%.*]], [[MEMORY:%.*]]) = destructure_tuple [[ALLOC_ARRAY]]
 // CHECK: [[VARIADIC_SECOND:%.*]] = function_ref @$s20scalar_to_tuple_args14variadicSecondyySi_SidtF
 // CHECK: apply [[VARIADIC_SECOND]]([[X]], [[ARRAY]])
 variadicSecond(x)

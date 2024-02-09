@@ -1,8 +1,16 @@
+// When adding a private protocol method, the interface hash should stay the same
+// The per-type fingerprint should change
+
 // RUN: %empty-directory(%t)
 // RUN: %{python} %utils/split_file.py -o %t %s
-// RUN: %target-swift-frontend -dump-interface-hash -primary-file %t/a.swift 2> %t/a.hash
-// RUN: %target-swift-frontend -dump-interface-hash -primary-file %t/b.swift 2> %t/b.hash
-// RUN: cmp %t/a.hash %t/b.hash
+// RUN: cp %t/{a,x}.swift
+// RUN: %target-swift-frontend -typecheck -primary-file %t/x.swift -emit-reference-dependencies-path %t/x.swiftdeps -module-name main
+// RUN: %{python} %S/../Inputs/process_fine_grained_swiftdeps_with_fingerprints.py %swift-dependency-tool %t/x.swiftdeps > %t/a-processed.swiftdeps
+// RUN: cp %t/{b,x}.swift
+// RUN: %target-swift-frontend -typecheck -primary-file %t/x.swift -emit-reference-dependencies-path %t/x.swiftdeps -module-name main
+// RUN: %{python} %S/../Inputs/process_fine_grained_swiftdeps_with_fingerprints.py %swift-dependency-tool %t/x.swiftdeps > %t/b-processed.swiftdeps
+
+// RUN: cmp %t/a-processed.swiftdeps %t/b-processed.swiftdeps
 
 // BEGIN a.swift
 class C {
@@ -18,3 +26,4 @@ class C {
     return x
   }
 }
+

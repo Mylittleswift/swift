@@ -20,7 +20,7 @@
 
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/ClusteredBitVector.h"
-#include "llvm/ADT/Triple.h"
+#include "llvm/TargetParser/Triple.h"
 #include "IRGen.h"
 
 namespace swift {
@@ -49,6 +49,10 @@ public:
   /// runtime should be used for all accesses to get the ISA from a value.
   bool hasOpaqueISAs() const {
     return ObjCHasOpaqueISAs;
+  }
+
+  bool canUseSwiftAsyncContextAddrIntrinsic() const {
+    return UsableSwiftAsyncContextAddrIntrinsic;
   }
 
   /// The target's object format type.
@@ -84,6 +88,11 @@ public:
   /// Changes to this must be kept in sync with swift/Runtime/Metadata.h.
   uint64_t LeastValidPointerValue;
 
+  /// Poison sentinel value recognized by LLDB as a former reference to a
+  /// potentially deinitialized object. It uses no spare bits and cannot point
+  /// to readable memory.
+  uint64_t ReferencePoisonDebugValue;
+
   /// The maximum number of scalars that we allow to be returned directly.
   unsigned MaxScalarsForDirectResult = 3;
 
@@ -99,11 +108,13 @@ public:
   
   /// The value stored in a Builtin.once predicate to indicate that an
   /// initialization has already happened, if known.
-  Optional<int64_t> OnceDonePredicateValue = None;
-  
+  llvm::Optional<int64_t> OnceDonePredicateValue = llvm::None;
+
   /// True if `swift_retain` and `swift_release` are no-ops when passed
   /// "negative" pointer values.
   bool SwiftRetainIgnoresNegativeValues = false;
+
+  bool UsableSwiftAsyncContextAddrIntrinsic = false;
 };
 
 }

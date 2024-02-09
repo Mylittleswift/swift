@@ -16,11 +16,7 @@
 #include "swift/Basic/NullablePtr.h"
 #include "swift/SIL/Notifications.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/Optional.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
-#include <vector>
 
 namespace swift {
 
@@ -31,7 +27,7 @@ class SILPassManager;
 /// A list of the known analysis.
 struct SILAnalysisKind {
   enum InnerTy {
-#define ANALYSIS(NAME) NAME,
+#define SIL_ANALYSIS(NAME) NAME,
 #include "Analysis.def"
   } value;
 
@@ -40,7 +36,7 @@ struct SILAnalysisKind {
 };
 
 /// The base class for all SIL-level analysis.
-class SILAnalysis : public DeleteNotificationHandler {
+class SILAnalysis {
 public:
   /// This is a list of values that allow passes to communicate to analysis
   /// which traits of the code were invalidated. Based on this information
@@ -68,6 +64,11 @@ public:
     /// has been modified.
     Branches = 0x4,
 
+    /// The function effects.
+    ///
+    /// The computed effects of the function are invalidated.
+    Effects = 0x8,
+
     /// Convenience states:
     FunctionBody = Calls | Branches | Instructions,
 
@@ -75,7 +76,7 @@ public:
 
     BranchesAndInstructions = Branches | Instructions,
 
-    Everything = Calls | Branches | Instructions,
+    Everything = FunctionBody | Effects,
   };
 
 private:
@@ -136,6 +137,8 @@ public:
   /// default so that only functions which are able to provide the function
   /// specific verification will do so.
   virtual void verify(SILFunction *F) const { verify(); }
+
+  virtual void forcePrecompute(SILFunction *F) {}
 
   /// Perform a potentially more expensive verification of the state of this
   /// analysis.
@@ -234,6 +237,15 @@ public:
     return it.second.get();
   }
 
+  virtual void forcePrecompute(SILFunction *f) override {
+    // Check that the analysis can handle this function.
+    verifyFunction(f);
+
+    auto &it = storage.FindAndConstruct(f);
+    if (!it.second)
+      it.second = newFunctionAnalysis(f);
+  }
+
   /// Invalidate all information in this analysis.
   virtual void invalidate() override {
     deleteAllAnalysisProviders();
@@ -322,7 +334,7 @@ public:
   FunctionInfoTy *operator->() { return *this; }
 };
 
-#define ANALYSIS(NAME) SILAnalysis *create##NAME##Analysis(SILModule *);
+#define SIL_ANALYSIS(NAME) SILAnalysis *create##NAME##Analysis(SILModule *);
 #include "Analysis.def"
 
 } // end namespace swift

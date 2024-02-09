@@ -3,6 +3,7 @@
 
 import StdlibUnittest
 
+defer { runAllTests() }
 
 var ProtocolExtensionTestSuite = TestSuite("ProtocolExtensions")
 
@@ -284,7 +285,8 @@ ProtocolExtensionTestSuite.test("ClassInitializer") {
   expectTrue(Sub.self == metatypes[3].1)
 }
 
-// https://bugs.swift.org/browse/SR-617
+// https://github.com/apple/swift/issues/43234
+
 protocol SelfMetadataTest {
   associatedtype T = Int
 
@@ -362,4 +364,12 @@ ProtocolExtensionTestSuite.test("WitnessSelf") {
   }
 }
 
-runAllTests()
+@_marker protocol Addable {}
+extension Addable {
+    func increment(this x: Int) -> Int { return x + 100 }
+}
+extension String: Addable {}
+
+ProtocolExtensionTestSuite.test("MarkerProtocolExtensions") {
+    expectTrue("hello".increment(this: 11) == 111)
+}

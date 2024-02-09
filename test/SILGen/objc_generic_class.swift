@@ -17,7 +17,7 @@ class Generic<T>: NSObject {
   // CHECK-LABEL: sil hidden [ossa] @$s18objc_generic_class7GenericCfD : $@convention(method) <T> (@owned Generic<T>) -> () {
   // CHECK:       bb0({{%.*}} : @owned $Generic<T>):
   // CHECK: } // end sil function '$s18objc_generic_class7GenericCfD'
-  // CHECK-LABEL: sil hidden [thunk] [ossa] @$s18objc_generic_class7GenericCfDTo : $@convention(objc_method) <T> (Generic<T>) -> () {
+  // CHECK-LABEL: sil private [thunk] [ossa] @$s18objc_generic_class7GenericCfDTo : $@convention(objc_method) <T> (Generic<T>) -> () {
   // CHECK:       bb0([[SELF:%.*]] : @unowned $Generic<T>):
   // CHECK:         [[SELF_COPY:%.*]] = copy_value [[SELF]]
   // CHECK:         [[NATIVE:%.*]] = function_ref @$s18objc_generic_class7GenericCfD
@@ -35,9 +35,19 @@ class Generic<T>: NSObject {
 
 // CHECK-LABEL: sil hidden [ossa] @$s18objc_generic_class11SubGeneric1CfD : $@convention(method) <U, V> (@owned SubGeneric1<U, V>) -> () {
 // CHECK:       bb0([[SELF:%.*]] : @owned $SubGeneric1<U, V>):
-// CHECK:         [[SUPER_DEALLOC:%.*]] = objc_super_method [[SELF]] : $SubGeneric1<U, V>, #Generic.deinit!deallocator.1.foreign : <T> (Generic<T>) -> () -> (), $@convention(objc_method) <τ_0_0> (Generic<τ_0_0>) -> ()
+// CHECK:         [[SUPER_DEALLOC:%.*]] = objc_super_method [[SELF]] : $SubGeneric1<U, V>, #Generic.deinit!deallocator.foreign : <T> (Generic<T>) -> () -> (), $@convention(objc_method) <τ_0_0> (Generic<τ_0_0>) -> ()
 // CHECK:         [[SUPER:%.*]] = upcast [[SELF:%.*]] : $SubGeneric1<U, V> to $Generic<Int>
 // CHECK:         apply [[SUPER_DEALLOC]]<Int>([[SUPER]])
 class SubGeneric1<U, V>: Generic<Int> {
 }
 
+
+// Ensure that the verifier doesn't reject @objc functions where all of the
+// generic parameters have been same-typed to concrete types.
+public struct GenericStruct<T> { }
+
+public extension GenericStruct where T == String {
+  public class Y {
+    @objc public func f() -> String { "hello" }
+  }
+}

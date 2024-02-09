@@ -39,7 +39,7 @@ operator<<(raw_ostream &Out, const NodeAnnotation Value) {
   llvm_unreachable("Undefined SDK node kind.");
 }
 
-StringRef swift::ide::api::getDeclKindStr(const DeclKind Value)  {
+static StringRef getDeclKindStrRaw(const DeclKind Value)  {
   switch (Value) {
 #define DECL(X, PARENT) case DeclKind::X: return #X;
 #include "swift/AST/DeclNodes.def"
@@ -47,17 +47,31 @@ StringRef swift::ide::api::getDeclKindStr(const DeclKind Value)  {
   llvm_unreachable("Unhandled DeclKind in switch.");
 }
 
-raw_ostream &swift::ide::api::operator<<(raw_ostream &Out,
-    const DeclKind Value) {
-  return Out << getDeclKindStr(Value);
+StringRef swift::ide::api::getDeclKindStr(const DeclKind Value, bool lower) {
+  if (lower) {
+    switch (Value) {
+#define DECL(X, PARENT) case DeclKind::X: {                                   \
+    static std::string lowered = StringRef(#X).lower();                       \
+    return lowered;                                                           \
+    }
+#include "swift/AST/DeclNodes.def"
+    }
+    llvm_unreachable("Unhandled DeclKind in switch.");
+  } else {
+    return getDeclKindStrRaw(Value);
+  }
 }
 
-Optional<SDKNodeKind> swift::ide::api::parseSDKNodeKind(StringRef Content) {
-  return llvm::StringSwitch<Optional<SDKNodeKind>>(Content)
+raw_ostream &swift::ide::api::operator<<(raw_ostream &Out, const DeclKind Value) {
+  return Out << getDeclKindStrRaw(Value);
+}
+
+llvm::Optional<SDKNodeKind>
+swift::ide::api::parseSDKNodeKind(StringRef Content) {
+  return llvm::StringSwitch<llvm::Optional<SDKNodeKind>>(Content)
 #define NODE_KIND(NAME, VALUE) .Case(#VALUE, SDKNodeKind::NAME)
 #include "swift/IDE/DigesterEnums.def"
-    .Default(None)
-  ;
+      .Default(llvm::None);
 }
 
 NodeAnnotation swift::ide::api::parseSDKNodeAnnotation(StringRef Content) {
@@ -85,9 +99,8 @@ CommonDiffItem(SDKNodeKind NodeKind, NodeAnnotation DiffKind,
   assert(!ChildIndex.empty() && "Child index is empty.");
   llvm::SmallVector<StringRef, 4> Pieces;
   ChildIndex.split(Pieces, ":");
-  std::transform(Pieces.begin(), Pieces.end(),
-                 std::back_inserter(ChildIndexPieces),
-                 [](StringRef Piece) { return std::stoi(Piece); });
+  llvm::transform(Pieces, std::back_inserter(ChildIndexPieces),
+                  [](StringRef Piece) { return std::stoi(Piece.str()); });
 }
 
 StringRef swift::ide::api::CommonDiffItem::head() {
@@ -186,8 +199,8 @@ void swift::ide::api::TypeMemberDiffItem::undef(llvm::raw_ostream &os) {
 }
 
 void swift::ide::api::TypeMemberDiffItem::streamDef(llvm::raw_ostream &os) const {
-  std::string IndexContent = selfIndex.hasValue() ?
-    std::to_string(selfIndex.getValue()) : "";
+  std::string IndexContent = selfIndex.has_value() ?
+    std::to_string(selfIndex.value()) : "";
   os << head() << "("
      << "\"" << usr << "\"" << ", "
      << "\"" << newTypeName << "\"" << ", "
@@ -316,17 +329,17 @@ static APIDiffItemKind parseDiffItemKind(StringRef Content) {
 static StringRef getScalarString(llvm::yaml::Node *N) {
   auto WithQuote = cast<llvm::yaml::ScalarNode>(N)->getRawValue();
   return WithQuote.substr(1, WithQuote.size() - 2);
-};
+}
 
 static int getScalarInt(llvm::yaml::Node *N) {
-  return std::stoi(cast<llvm::yaml::ScalarNode>(N)->getRawValue());
-};
+  return std::stoi(cast<llvm::yaml::ScalarNode>(N)->getRawValue().str());
+}
 
 static APIDiffItem*
 serializeDiffItem(llvm::BumpPtrAllocator &Alloc,
                   llvm::yaml::MappingNode* Node) {
 #define DIFF_ITEM_KEY_KIND_STRING(NAME) StringRef NAME;
-#define DIFF_ITEM_KEY_KIND_INT(NAME) Optional<int> NAME;
+#define DIFF_ITEM_KEY_KIND_INT(NAME) llvm::Optional<int> NAME;
 #include "swift/IDE/DigesterEnums.def"
   for (auto &Pair : *Node) {
     switch(parseKeyKind(getScalarString(Pair.getKey()))) {
@@ -347,19 +360,19 @@ serializeDiffItem(llvm::BumpPtrAllocator &Alloc,
                      LeftUsr, RightUsr, LeftComment, RightComment, ModuleName);
   }
   case APIDiffItemKind::ADK_TypeMemberDiffItem: {
-    Optional<uint8_t> SelfIndexShort;
-    Optional<uint8_t> RemovedIndexShort;
+    llvm::Optional<uint8_t> SelfIndexShort;
+    llvm::Optional<uint8_t> RemovedIndexShort;
     if (SelfIndex)
-      SelfIndexShort = SelfIndex.getValue();
+      SelfIndexShort = SelfIndex.value();
     if (RemovedIndex)
-      RemovedIndexShort = RemovedIndex.getValue();
+      RemovedIndexShort = RemovedIndex.value();
     return new (Alloc.Allocate<TypeMemberDiffItem>())
       TypeMemberDiffItem(Usr, NewTypeName, NewPrintedName, SelfIndexShort,
                          RemovedIndexShort, OldTypeName, OldPrintedName);
   }
   case APIDiffItemKind::ADK_NoEscapeFuncParam: {
     return new (Alloc.Allocate<NoEscapeFuncParam>())
-      NoEscapeFuncParam(Usr, Index.getValue());
+      NoEscapeFuncParam(Usr, Index.value());
   }
   case APIDiffItemKind::ADK_OverloadedFuncInfo: {
     return new (Alloc.Allocate<OverloadedFuncInfo>()) OverloadedFuncInfo(Usr);

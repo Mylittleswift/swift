@@ -320,7 +320,7 @@ template <typename T> class BlotMapVectorTest : public ::testing::Test {
 protected:
   T Map;
 
-  Optional<unsigned> NumExpectedLiveTesters;
+  llvm::Optional<unsigned> NumExpectedLiveTesters;
 
   static typename T::key_type *const dummy_key_ptr;
   static typename T::mapped_type *const dummy_value_ptr;
@@ -367,7 +367,7 @@ typedef ::testing::Types<
         CtorTester, CtorTester, 4,
         llvm::SmallDenseMap<CtorTester, unsigned, 4, CtorTesterMapInfo>>>
     BlotMapVectorTestTypes;
-TYPED_TEST_CASE(BlotMapVectorTest, BlotMapVectorTestTypes);
+TYPED_TEST_SUITE(BlotMapVectorTest, BlotMapVectorTestTypes, );
 
 // Empty map tests
 TYPED_TEST(BlotMapVectorTest, EmptyIntMapTest) {
@@ -458,6 +458,19 @@ TYPED_TEST(BlotMapVectorTest, EraseTest2) {
 // Test insert() method
 TYPED_TEST(BlotMapVectorTest, InsertTest) {
   this->Map.insert(std::make_pair(this->getKey(), this->getValue()));
+  EXPECT_EQ(1u, this->Map.size());
+  EXPECT_EQ(this->getValue(), this->Map[this->getKey()]);
+  EXPECT_EQ(1u, this->Map.size());
+  this->NumExpectedLiveTesters = 1;
+}
+
+// Test try_emplace() method
+TYPED_TEST(BlotMapVectorTest, TryEmplaceTest) {
+  this->Map.try_emplace(this->getKey(), this->getValue());
+  EXPECT_EQ(1u, this->Map.size());
+  EXPECT_EQ(this->getValue(), this->Map[this->getKey()]);
+  EXPECT_EQ(1u, this->Map.size());
+  this->Map.try_emplace(this->getKey(), this->getValue());
   EXPECT_EQ(1u, this->Map.size());
   EXPECT_EQ(this->getValue(), this->Map[this->getKey()]);
   EXPECT_EQ(1u, this->Map.size());
@@ -619,9 +632,9 @@ TEST(BlotMapVectorCustomTest, FindAsTest) {
 
   // Normal lookup tests
   EXPECT_EQ(1u, map.count(1));
-  EXPECT_EQ(1u, map.find(0)->getValue().second);
-  EXPECT_EQ(2u, map.find(1)->getValue().second);
-  EXPECT_EQ(3u, map.find(2)->getValue().second);
+  EXPECT_EQ(1u, map.find(0)->value().second);
+  EXPECT_EQ(2u, map.find(1)->value().second);
+  EXPECT_EQ(3u, map.find(2)->value().second);
   EXPECT_TRUE(map.find(3) == map.end());
 }
 

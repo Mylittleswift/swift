@@ -15,16 +15,16 @@
 #include "swift/SILOptimizer/Analysis/ARCAnalysis.h"
 #include "swift/SIL/DebugUtils.h"
 #include "swift/SIL/InstructionUtils.h"
+#include "swift/SIL/Projection.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILInstruction.h"
-#include "swift/SIL/Projection.h"
 #include "swift/SILOptimizer/Analysis/AliasAnalysis.h"
 #include "swift/SILOptimizer/Analysis/RCIdentityAnalysis.h"
 #include "swift/SILOptimizer/Analysis/ValueTracking.h"
-#include "swift/SILOptimizer/Utils/Local.h"
-#include "llvm/ADT/StringSwitch.h"
+#include "swift/SILOptimizer/Utils/InstOptUtils.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/Debug.h"
 
 using namespace swift;
@@ -91,7 +91,7 @@ bool swift::mayDecrementRefCount(SILInstruction *User,
 //                                Use Analysis
 //===----------------------------------------------------------------------===//
 
-/// Returns true if a builtin apply cannot use reference counted values.
+/// Returns true if a builtin apply can use reference counted values.
 ///
 /// The main case that this handles here are builtins that via read none imply
 /// that they cannot read globals and at the same time do not take any
@@ -103,31 +103,37 @@ static bool canApplyOfBuiltinUseNonTrivialValues(BuiltinInst *BInst) {
 
   auto &II = BInst->getIntrinsicInfo();
   if (II.ID != llvm::Intrinsic::not_intrinsic) {
-    if (II.hasAttribute(llvm::Attribute::ReadNone)) {
+    auto attrs = II.getOrCreateAttributes(F->getASTContext());
+    if (attrs.getMemoryEffects().doesNotAccessMemory()) {
       for (auto &Op : BInst->getAllOperands()) {
         if (!Op.get()->getType().isTrivial(*F)) {
-          return false;
+          return true;
         }
       }
+      return false;
     }
-
     return true;
   }
 
   auto &BI = BInst->getBuiltinInfo();
-  if (BI.isReadNone()) {
-    for (auto &Op : BInst->getAllOperands()) {
-      if (!Op.get()->getType().isTrivial(*F)) {
-        return false;
-      }
+  if (!BI.isReadNone())
+    return true;
+
+  for (auto &Op : BInst->getAllOperands()) {
+    if (!Op.get()->getType().isTrivial(*F)) {
+      return true;
     }
   }
-
-  return true;
+  return false;
 }
 
-/// Returns true if Inst is a function that we know never uses ref count values.
-bool swift::canNeverUseValues(SILInstruction *Inst) {
+/// Returns true if \p Inst may access any indirect object either via an address
+/// or reference.
+///
+/// If these instructions do have an address or reference type operand, then
+/// they only operate on the value of the address itself, not the
+/// memory. i.e. they don't dereference the address.
+bool swift::canUseObject(SILInstruction *Inst) {
   switch (Inst->getKind()) {
   // These instructions do not use other values.
   case SILInstructionKind::FunctionRefInst:
@@ -142,33 +148,37 @@ bool swift::canNeverUseValues(SILInstruction *Inst) {
   case SILInstructionKind::AllocBoxInst:
   case SILInstructionKind::MetatypeInst:
   case SILInstructionKind::WitnessMethodInst:
-    return true;
+    return false;
 
   // DeallocStackInst do not use reference counted values.
   case SILInstructionKind::DeallocStackInst:
-    return true;
+    return false;
 
   // Debug values do not use referenced counted values in a manner we care
   // about.
   case SILInstructionKind::DebugValueInst:
-  case SILInstructionKind::DebugValueAddrInst:
-    return true;
+    return false;
 
   // Casts do not use pointers in a manner that we care about since we strip
   // them during our analysis. The reason for this is if the cast is not dead
   // then there must be some other use after the cast that we will protect if a
   // release is not in between the cast and the use.
+  //
+  // Note: UncheckedRefCastAddrInst moves a reference into a new object. While
+  // the net reference count should be zero, there's no guarantee it won't
+  // access the object.
   case SILInstructionKind::UpcastInst:
   case SILInstructionKind::AddressToPointerInst:
   case SILInstructionKind::PointerToAddressInst:
   case SILInstructionKind::UncheckedRefCastInst:
-  case SILInstructionKind::UncheckedRefCastAddrInst:
   case SILInstructionKind::UncheckedAddrCastInst:
   case SILInstructionKind::RefToRawPointerInst:
   case SILInstructionKind::RawPointerToRefInst:
   case SILInstructionKind::UnconditionalCheckedCastInst:
   case SILInstructionKind::UncheckedBitwiseCastInst:
-    return true;
+  case SILInstructionKind::EndInitLetRefInst:
+  case SILInstructionKind::BeginDeallocRefInst:
+    return false;
 
   // If we have a trivial bit cast between trivial types, it is not something
   // that can use ref count ops in a way we care about. We do need to be careful
@@ -183,7 +193,7 @@ bool swift::canNeverUseValues(SILInstruction *Inst) {
   // safe.
   case SILInstructionKind::UncheckedTrivialBitCastInst: {
     SILValue Op = cast<UncheckedTrivialBitCastInst>(Inst)->getOperand();
-    return Op->getType().isTrivial(*Inst->getFunction());
+    return !Op->getType().isTrivial(*Inst->getFunction());
   }
 
   // Typed GEPs do not use pointers. The user of the typed GEP may but we will
@@ -198,18 +208,18 @@ bool swift::canNeverUseValues(SILInstruction *Inst) {
   case SILInstructionKind::UncheckedEnumDataInst:
   case SILInstructionKind::IndexAddrInst:
   case SILInstructionKind::IndexRawPointerInst:
-      return true;
+    return false;
 
   // Aggregate formation by themselves do not create new uses since it is their
   // users that would create the appropriate uses.
   case SILInstructionKind::EnumInst:
   case SILInstructionKind::StructInst:
   case SILInstructionKind::TupleInst:
-    return true;
+    return false;
 
   // Only uses non reference counted values.
   case SILInstructionKind::CondFailInst:
-    return true;
+    return false;
 
   case SILInstructionKind::BuiltinInst: {
     auto *BI = cast<BuiltinInst>(Inst);
@@ -221,9 +231,9 @@ bool swift::canNeverUseValues(SILInstruction *Inst) {
   // dead, LLVM will clean it up.
   case SILInstructionKind::BranchInst:
   case SILInstructionKind::CondBranchInst:
-    return true;
-  default:
     return false;
+  default:
+    return true;
   }
 }
 
@@ -268,29 +278,20 @@ static bool canTerminatorUseValue(TermInst *TI, SILValue Ptr,
 
 
 bool swift::mayHaveSymmetricInterference(SILInstruction *User, SILValue Ptr, AliasAnalysis *AA) {
-  // Check whether releasing this value can call deinit and interfere with User.
-  if (AA->mayValueReleaseInterfereWithInstruction(User, Ptr))
-    return true;
-  
   // If Inst is an instruction that we know can never use values with reference
-  // semantics, return true.
-  if (canNeverUseValues(User))
+  // semantics, return true. Check this before AliasAnalysis because some memory
+  // operations, like dealloc_stack, don't use ref counted values.
+  if (!canUseObject(User))
     return false;
 
-  // If the user is a load or a store and we can prove that it does not access
-  // the object then return true.
-  // Notice that we need to check all of the values of the object.
-  if (isa<StoreInst>(User)) {
-    if (AA->mayWriteToMemory(User, Ptr))
-      return true;
-    return false;
+  if (auto *LI = dyn_cast<LoadInst>(User)) {
+    return AA->isAddrVisibleFromObject(LI->getOperand(), Ptr);
   }
-
-  if (isa<LoadInst>(User) ) {
-    if (AA->mayReadFromMemory(User, Ptr))
-      return true;
-    return false;
+  if (auto *SI = dyn_cast<StoreInst>(User)) {
+    return AA->isAddrVisibleFromObject(SI->getDest(), Ptr);
   }
+  if (User->mayReadOrWriteMemory())
+    return true;
 
   // If we have a terminator instruction, see if it can use ptr. This currently
   // means that we first show that TI cannot indirectly use Ptr and then use
@@ -357,18 +358,17 @@ bool swift::mustGuaranteedUseValue(SILInstruction *User, SILValue Ptr,
 /// If \p Op has arc uses in the instruction range [Start, End), return the
 /// first such instruction. Otherwise return None. We assume that
 /// Start and End are both in the same basic block.
-Optional<SILBasicBlock::iterator>
-swift::
-valueHasARCUsesInInstructionRange(SILValue Op,
-                                  SILBasicBlock::iterator Start,
-                                  SILBasicBlock::iterator End,
-                                  AliasAnalysis *AA) {
+llvm::Optional<SILBasicBlock::iterator>
+swift::valueHasARCUsesInInstructionRange(SILValue Op,
+                                         SILBasicBlock::iterator Start,
+                                         SILBasicBlock::iterator End,
+                                         AliasAnalysis *AA) {
   assert(Start->getParent() == End->getParent() &&
          "Start and End should be in the same basic block");
 
   // If Start == End, then we have an empty range, return false.
   if (Start == End)
-    return None;
+    return llvm::None;
 
   // Otherwise, until Start != End.
   while (Start != End) {
@@ -381,13 +381,13 @@ valueHasARCUsesInInstructionRange(SILValue Op,
   }
 
   // If all such instructions cannot use Op, return false.
-  return None;
+  return llvm::None;
 }
 
 /// If \p Op has arc uses in the instruction range (Start, End], return the
 /// first such instruction. Otherwise return None. We assume that Start and End
 /// are both in the same basic block.
-Optional<SILBasicBlock::iterator>
+llvm::Optional<SILBasicBlock::iterator>
 swift::valueHasARCUsesInReverseInstructionRange(SILValue Op,
                                                 SILBasicBlock::iterator Start,
                                                 SILBasicBlock::iterator End,
@@ -399,7 +399,7 @@ swift::valueHasARCUsesInReverseInstructionRange(SILValue Op,
 
   // If Start == End, then we have an empty range, return false.
   if (Start == End)
-    return None;
+    return llvm::None;
 
   // Otherwise, until End == Start.
   while (Start != End) {
@@ -412,25 +412,23 @@ swift::valueHasARCUsesInReverseInstructionRange(SILValue Op,
   }
 
   // If all such instructions cannot use Op, return false.
-  return None;
+  return llvm::None;
 }
 
 /// If \p Op has instructions in the instruction range (Start, End] which may
 /// decrement it, return the first such instruction. Returns None
 /// if no such instruction exists. We assume that Start and End are both in the
 /// same basic block.
-Optional<SILBasicBlock::iterator>
-swift::
-valueHasARCDecrementOrCheckInInstructionRange(SILValue Op,
-                                              SILBasicBlock::iterator Start,
-                                              SILBasicBlock::iterator End,
-                                              AliasAnalysis *AA) {
+llvm::Optional<SILBasicBlock::iterator>
+swift::valueHasARCDecrementOrCheckInInstructionRange(
+    SILValue Op, SILBasicBlock::iterator Start, SILBasicBlock::iterator End,
+    AliasAnalysis *AA) {
   assert(Start->getParent() == End->getParent() &&
          "Start and End should be in the same basic block");
 
   // If Start == End, then we have an empty range, return nothing.
   if (Start == End)
-    return None;
+    return llvm::None;
 
   // Otherwise, until Start != End.
   while (Start != End) {
@@ -444,12 +442,35 @@ valueHasARCDecrementOrCheckInInstructionRange(SILValue Op,
   }
 
   // If all such instructions cannot decrement Op, return nothing.
-  return None;
+  return llvm::None;
 }
 
 bool
 swift::
 mayGuaranteedUseValue(SILInstruction *User, SILValue Ptr, AliasAnalysis *AA) {
+  // Instructions that check the ref count are modeled as both a potential
+  // decrement and a use.
+  if (mayCheckRefCount(User)) {
+    switch (User->getKind()) {
+    case SILInstructionKind::IsUniqueInst:
+      // This instruction takes the address of its referent, so there's no way
+      // for the optimizer to reuse the reference across it (it appears to
+      // mutate the reference itself). In fact it's operand's RC root would be
+      // the parent object. This means we can ignore it as a direct RC user.
+      return false;
+    case SILInstructionKind::IsEscapingClosureInst:
+      // FIXME: this is overly conservative. It should return true only of the
+      // RC identity of the single operand matches Ptr.
+      return true;
+    case SILInstructionKind::BeginCOWMutationInst:
+      // begin_cow_mutation takes the argument as owned and produces a new
+      // owned result.
+      return false;
+    default:
+      llvm_unreachable("Unexpected check-ref-count instruction.");
+    }
+  }
+
   // Only full apply sites can require a guaranteed lifetime. If we don't have
   // one, bail.
   if (!isa<FullApplySite>(User))
@@ -479,7 +500,7 @@ mayGuaranteedUseValue(SILInstruction *User, SILValue Ptr, AliasAnalysis *AA) {
   for (unsigned i : indices(Params)) {    
     if (!Params[i].isGuaranteed())
       continue;
-    SILValue Op = FAS.getArgument(i);
+    SILValue Op = FAS.getArgumentsWithoutIndirectResults()[i];
     if (!AA->isNoAlias(Op, Ptr))
       return true;
   }
@@ -664,7 +685,7 @@ findMatchingRetains(SILBasicBlock *BB) {
         SA = nullptr;
 
       for (auto X : R.first->getPredecessorBlocks()) {
-        if (HandledBBs.find(X) != HandledBBs.end())
+        if (HandledBBs.contains(X))
           continue;
         // Try to use the predecessor edge-value.
         if (SA && SA->getIncomingPhiValue(X)) {
@@ -727,17 +748,17 @@ bool ConsumedArgToEpilogueReleaseMatcher::isRedundantRelease(
   auto POp = ProjectionPath::getProjectionPath(Base, Derived);
   // We can not build a projection path from the base to the derived, bail out.
   // and return true so that we can stop the epilogue walking sequence.
-  if (!POp.hasValue())
+  if (!POp.has_value())
     return true;
 
   for (auto &R : Insts) {
     SILValue ROp = R->getOperand(0);
     auto PROp = ProjectionPath::getProjectionPath(Base, ROp); 
-    if (!PROp.hasValue())
+    if (!PROp.has_value())
       return true;
     // If Op is a part of ROp or Rop is a part of Op. then we have seen
     // a redundant release.
-    if (!PROp.getValue().hasNonEmptySymmetricDifference(POp.getValue()))
+    if (!PROp.value().hasNonEmptySymmetricDifference(POp.value()))
       return true;
   }
   return false;
@@ -754,7 +775,7 @@ bool ConsumedArgToEpilogueReleaseMatcher::releaseArgument(
     auto PP = ProjectionPath::getProjectionPath(Arg, I->getOperand(0));
     if (!PP)
       return false;
-    Paths.insert(PP.getValue());
+    Paths.insert(PP.value());
   } 
 
   // Is there an uncovered non-trivial type.
@@ -815,7 +836,7 @@ void ConsumedArgToEpilogueReleaseMatcher::collectMatchingDestroyAddresses(
   SILFunction::iterator anotherEpilogueBB =
       (Kind == ExitKind::Return) ? F->findThrowBB() : F->findReturnBB();
 
-  for (auto *arg : F->begin()->getFunctionArguments()) {
+  for (auto *arg : F->begin()->getSILFunctionArguments()) {
     if (arg->isIndirectResult())
       continue;
     if (arg->getArgumentConvention() != SILArgumentConvention::Indirect_In)
@@ -871,7 +892,7 @@ void ConsumedArgToEpilogueReleaseMatcher::collectMatchingReleases(
   // release.
   bool isTrackingInArgs = isOneOfConventions(SILArgumentConvention::Indirect_In,
                                              ArgumentConventions);
-  for (auto &inst : reversed(*block)) {
+  for (auto &inst : llvm::reverse(*block)) {
     if (isTrackingInArgs && isa<DestroyAddrInst>(inst)) {
       // It is probably a destroy addr for an @in argument.
       continue;
@@ -879,7 +900,7 @@ void ConsumedArgToEpilogueReleaseMatcher::collectMatchingReleases(
     // If we do not have a release_value or strong_release. We can continue
     if (!isa<ReleaseValueInst>(inst) && !isa<StrongReleaseInst>(inst)) {
       // We cannot match a final release if it is followed by a dealloc_ref.
-      if (isa<DeallocRefInst>(inst))
+      if (isa<DeallocRefInst>(inst) || isa<DeallocPartialRefInst>(inst))
         break;
 
       // We do not know what this instruction is, do a simple check to make sure
@@ -909,8 +930,7 @@ void ConsumedArgToEpilogueReleaseMatcher::collectMatchingReleases(
     // we could make this more general by allowing for intervening non-arg
     // releases in the sense that we do not allow for race conditions in between
     // destructors.
-    if (!arg ||
-        !isOneOfConventions(arg->getArgumentConvention(), ArgumentConventions))
+    if (!isOneOfConventions(arg->getArgumentConvention(), ArgumentConventions))
       break;
 
     // Ok, we have a release on a SILArgument that has a consuming convention.
@@ -957,131 +977,6 @@ findMatchingReleases(SILBasicBlock *BB) {
   // We've exited the epilogue sequence, try to find out which parameter we
   // have all the epilogue releases for and which one we did not.
   processMatchingReleases();
-}
-
-//===----------------------------------------------------------------------===//
-//                    Code for Determining Final Releases
-//===----------------------------------------------------------------------===//
-
-// Propagate liveness backwards from an initial set of blocks in our
-// LiveIn set.
-static void propagateLiveness(llvm::SmallPtrSetImpl<SILBasicBlock *> &LiveIn,
-                              SILBasicBlock *DefBB) {
-  // First populate a worklist of predecessors.
-  llvm::SmallVector<SILBasicBlock *, 64> Worklist;
-  for (auto *BB : LiveIn)
-    for (auto Pred : BB->getPredecessorBlocks())
-      Worklist.push_back(Pred);
-
-  // Now propagate liveness backwards until we hit the alloc_box.
-  while (!Worklist.empty()) {
-    auto *BB = Worklist.pop_back_val();
-
-    // If it's already in the set, then we've already queued and/or
-    // processed the predecessors.
-    if (BB == DefBB || !LiveIn.insert(BB).second)
-      continue;
-
-    for (auto Pred : BB->getPredecessorBlocks())
-      Worklist.push_back(Pred);
-  }
-}
-
-// Is any successor of BB in the LiveIn set?
-static bool successorHasLiveIn(SILBasicBlock *BB,
-                               llvm::SmallPtrSetImpl<SILBasicBlock *> &LiveIn) {
-  for (auto &Succ : BB->getSuccessors())
-    if (LiveIn.count(Succ))
-      return true;
-
-  return false;
-}
-
-// Walk backwards in BB looking for the last use of a given
-// value, and add it to the set of release points.
-static bool addLastUse(SILValue V, SILBasicBlock *BB,
-                       ReleaseTracker &Tracker) {
-  for (auto I = BB->rbegin(); I != BB->rend(); ++I) {
-    if (Tracker.isUser(&*I)) {
-      Tracker.trackLastRelease(&*I);
-      return true;
-    }
-  }
-
-  llvm_unreachable("BB is expected to have a use of a closure");
-  return false;
-}
-
-/// TODO: Refactor this code so the decision on whether or not to accept an
-/// instruction.
-bool swift::getFinalReleasesForValue(SILValue V, ReleaseTracker &Tracker) {
-  llvm::SmallPtrSet<SILBasicBlock *, 16> LiveIn;
-  llvm::SmallPtrSet<SILBasicBlock *, 16> UseBlocks;
-
-  // First attempt to get the BB where this value resides.
-  auto *DefBB = V->getParentBlock();
-  if (!DefBB)
-    return false;
-
-  bool seenRelease = false;
-  SILInstruction *OneRelease = nullptr;
-
-  // We'll treat this like a liveness problem where the value is the def. Each
-  // block that has a use of the value has the value live-in unless it is the
-  // block with the value.
-  SmallVector<Operand *, 8> Uses(V->getUses());
-  while (!Uses.empty()) {
-    auto *Use = Uses.pop_back_val();
-    auto *User = Use->getUser();
-    auto *BB = User->getParent();
-
-    if (Tracker.isUserTransitive(User)) {
-      Tracker.trackUser(User);
-      auto *CastInst = cast<SingleValueInstruction>(User);
-      Uses.append(CastInst->getUses().begin(), CastInst->getUses().end());
-      continue;
-    }
-
-    if (!Tracker.isUserAcceptable(User))
-      return false;
-
-    Tracker.trackUser(User);
-
-    if (BB != DefBB)
-      LiveIn.insert(BB);
-
-    // Also keep track of the blocks with uses.
-    UseBlocks.insert(BB);
-
-    // Try to speed up the trivial case of single release/dealloc.
-    if (isa<StrongReleaseInst>(User) || isa<DeallocBoxInst>(User) ||
-        isa<DestroyValueInst>(User) || isa<ReleaseValueInst>(User)) {
-      if (!seenRelease)
-        OneRelease = User;
-      else
-        OneRelease = nullptr;
-
-      seenRelease = true;
-    }
-  }
-
-  // Only a single release/dealloc? We're done!
-  if (OneRelease) {
-    Tracker.trackLastRelease(OneRelease);
-    return true;
-  }
-
-  propagateLiveness(LiveIn, DefBB);
-
-  // Now examine each block we saw a use in. If it has no successors
-  // that are in LiveIn, then the last use in the block is the final
-  // release/dealloc.
-  for (auto *BB : UseBlocks)
-    if (!successorHasLiveIn(BB, LiveIn))
-      if (!addLastUse(V, BB, Tracker))
-        return false;
-
-  return true;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1152,129 +1047,3 @@ bool swift::isARCInertTrapBB(const SILBasicBlock *BB) {
   // ARC perspective in an unreachable BB.
   return true;
 }
-
-//===----------------------------------------------------------------------===//
-//             Analysis of builtin "unsafeGuaranteed" instructions
-//===----------------------------------------------------------------------===//
-std::pair<SingleValueInstruction *, SingleValueInstruction *>
-swift::getSingleUnsafeGuaranteedValueResult(BuiltinInst *BI) {
-  assert(BI->getBuiltinKind() &&
-         *BI->getBuiltinKind() == BuiltinValueKind::UnsafeGuaranteed &&
-         "Expecting a unsafeGuaranteed builtin");
-
-  SingleValueInstruction *GuaranteedValue = nullptr;
-  SingleValueInstruction *Token = nullptr;
-
-  auto Failed = std::make_pair(nullptr, nullptr);
-
-  for (auto *Operand : getNonDebugUses(BI)) {
-    auto *Usr = Operand->getUser();
-    if (isa<ReleaseValueInst>(Usr) || isa<RetainValueInst>(Usr))
-      continue;
-
-    auto *TE = dyn_cast<TupleExtractInst>(Usr);
-    if (!TE || TE->getOperand() != BI)
-      return Failed;
-
-    if (TE->getFieldNo() == 0 && !GuaranteedValue) {
-      GuaranteedValue = TE;
-      continue;
-    }
-    if (TE->getFieldNo() == 1 && !Token) {
-      Token = TE;
-      continue;
-    }
-    return Failed;
-  }
-
-  if (!GuaranteedValue || !Token)
-    return Failed;
-
-  return std::make_pair(GuaranteedValue, Token);
-}
-
-BuiltinInst *swift::getUnsafeGuaranteedEndUser(SILValue UnsafeGuaranteedToken) {
-  BuiltinInst *UnsafeGuaranteedEndI = nullptr;
-
-  for (auto *Operand : getNonDebugUses(UnsafeGuaranteedToken)) {
-    if (UnsafeGuaranteedEndI) {
-      LLVM_DEBUG(llvm::dbgs() << "  multiple unsafeGuaranteedEnd users\n");
-      UnsafeGuaranteedEndI = nullptr;
-      break;
-    }
-    auto *BI = dyn_cast<BuiltinInst>(Operand->getUser());
-    if (!BI || !BI->getBuiltinKind() ||
-        *BI->getBuiltinKind() != BuiltinValueKind::UnsafeGuaranteedEnd) {
-      LLVM_DEBUG(llvm::dbgs() << "  wrong unsafeGuaranteed token user "
-                 << *Operand->getUser());
-      break;
-    }
-
-    UnsafeGuaranteedEndI = BI;
-  }
-  return UnsafeGuaranteedEndI;
-}
-
-static bool hasUnsafeGuaranteedOperand(SILValue UnsafeGuaranteedValue,
-                                       SILValue UnsafeGuaranteedValueOperand,
-                                       RCIdentityFunctionInfo &RCII,
-                                       SILInstruction &Release) {
-  assert(isa<StrongReleaseInst>(Release) ||
-         isa<ReleaseValueInst>(Release) && "Expecting a release");
-
-  auto RCRoot = RCII.getRCIdentityRoot(Release.getOperand(0));
-
-  return RCRoot == UnsafeGuaranteedValue ||
-         RCRoot == UnsafeGuaranteedValueOperand;
-}
-
-SILInstruction *swift::findReleaseToMatchUnsafeGuaranteedValue(
-    SILInstruction *UnsafeGuaranteedEndI, SILInstruction *UnsafeGuaranteedI,
-    SILValue UnsafeGuaranteedValue, SILBasicBlock &BB,
-    RCIdentityFunctionInfo &RCFI) {
-
-  auto UnsafeGuaranteedRoot = RCFI.getRCIdentityRoot(UnsafeGuaranteedValue);
-  auto UnsafeGuaranteedOpdRoot =
-      RCFI.getRCIdentityRoot(UnsafeGuaranteedI->getOperand(0));
-
-  // Try finding it after the "unsafeGuaranteedEnd".
-  for (auto ForwardIt = std::next(UnsafeGuaranteedEndI->getIterator()),
-            End = BB.end();
-       ForwardIt != End; ++ForwardIt) {
-    SILInstruction &CurInst = *ForwardIt;
-
-    // Is this a release?
-    if (isa<ReleaseValueInst>(CurInst) || isa<StrongReleaseInst>(CurInst)) {
-      if (hasUnsafeGuaranteedOperand(UnsafeGuaranteedRoot,
-                                     UnsafeGuaranteedOpdRoot, RCFI, CurInst))
-        return &CurInst;
-      continue;
-    }
-
-    if (CurInst.mayHaveSideEffects() && !isa<DebugValueInst>(CurInst) &&
-        !isa<DebugValueAddrInst>(CurInst))
-      break;
-  }
-
-  // Otherwise, Look before the "unsafeGuaranteedEnd".
-  for (auto ReverseIt = ++UnsafeGuaranteedEndI->getIterator().getReverse(),
-            End = BB.rend();
-       ReverseIt != End; ++ReverseIt) {
-    SILInstruction &CurInst = *ReverseIt;
-
-    // Is this a release?
-    if (isa<ReleaseValueInst>(CurInst) || isa<StrongReleaseInst>(CurInst)) {
-      if (hasUnsafeGuaranteedOperand(UnsafeGuaranteedRoot,
-                                     UnsafeGuaranteedOpdRoot, RCFI, CurInst))
-        return &CurInst;
-      continue;
-    }
-
-    if (CurInst.mayHaveSideEffects() && !isa<DebugValueInst>(CurInst) &&
-        !isa<DebugValueAddrInst>(CurInst))
-      break;
-  }
-
-  return nullptr;
-}
-

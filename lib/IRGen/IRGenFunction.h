@@ -18,16 +18,18 @@
 #ifndef SWIFT_IRGEN_IRGENFUNCTION_H
 #define SWIFT_IRGEN_IRGENFUNCTION_H
 
-#include "swift/Basic/LLVM.h"
-#include "swift/AST/Type.h"
+#include "DominancePoint.h"
+#include "GenPack.h"
+#include "IRBuilder.h"
+#include "LocalTypeDataKind.h"
 #include "swift/AST/ReferenceCounting.h"
+#include "swift/AST/Type.h"
+#include "swift/Basic/LLVM.h"
 #include "swift/SIL/SILLocation.h"
 #include "swift/SIL/SILType.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/IR/CallingConv.h"
-#include "IRBuilder.h"
-#include "LocalTypeDataKind.h"
-#include "DominancePoint.h"
 
 namespace llvm {
   class AllocaInst;
@@ -72,6 +74,7 @@ public:
   /// If != OptimizationMode::NotSet, the optimization mode specified with an
   /// function attribute.
   OptimizationMode OptMode;
+  bool isPerformanceConstraint;
 
   llvm::Function *CurFn;
   ModuleDecl *getSwiftModule() const;
@@ -80,34 +83,62 @@ public:
   const IRGenOptions &getOptions() const;
 
   IRGenFunction(IRGenModule &IGM, llvm::Function *fn,
+                bool isPerformanceConstraint = false,
                 OptimizationMode Mode = OptimizationMode::NotSet,
                 const SILDebugScope *DbgScope = nullptr,
-                Optional<SILLocation> DbgLoc = None);
+                llvm::Optional<SILLocation> DbgLoc = llvm::None);
   ~IRGenFunction();
 
   void unimplemented(SourceLoc Loc, StringRef Message);
 
   friend class Scope;
 
-//--- Function prologue and epilogue -------------------------------------------
+  Address createErrorResultSlot(SILType errorType, bool isAsync, bool setSwiftErrorFlag = true, bool isTypedError = false);
+
+  //--- Function prologue and epilogue
+  //-------------------------------------------
 public:
   Explosion collectParameters();
-  void emitScalarReturn(SILType resultTy, Explosion &scalars,
-                        bool isSwiftCCReturn, bool isOutlined);
+  void emitScalarReturn(SILType returnResultType, SILType funcResultType,
+                        Explosion &scalars, bool isSwiftCCReturn,
+                        bool isOutlined);
   void emitScalarReturn(llvm::Type *resultTy, Explosion &scalars);
   
   void emitBBForReturn();
   bool emitBranchToReturnBB();
 
-  /// Return the error result slot, given an error type.  There's
-  /// always only one error type.
-  Address getErrorResultSlot(SILType errorType);
+  llvm::BasicBlock *createExceptionUnwindBlock();
+
+  void setCallsThunksWithForeignExceptionTraps() {
+    callsAnyAlwaysInlineThunksWithForeignExceptionTraps = true;
+  }
+
+  void createExceptionTrapScope(
+      llvm::function_ref<void(llvm::BasicBlock *, llvm::BasicBlock *)>
+          invokeEmitter);
+
+  void emitAllExtractValues(llvm::Value *aggValue, llvm::StructType *type,
+                            Explosion &out);
+
+  /// Return the error result slot to be passed to the callee, given an error
+  /// type.  There's always only one error type.
+  ///
+  /// For async functions, this is different from the caller result slot because
+  /// that is a gep into the %swift.context.
+  Address getCalleeErrorResultSlot(SILType errorType,
+                                   bool isTypedError);
 
   /// Return the error result slot provided by the caller.
   Address getCallerErrorResultSlot();
 
-  /// Set the error result slot.
-  void setErrorResultSlot(llvm::Value *address);
+  /// Set the error result slot for the current function.
+  void setCallerErrorResultSlot(Address address);
+  /// Set the error result slot for a typed throw for the current function.
+  void setCallerTypedErrorResultSlot(Address address);
+
+  Address getCallerTypedErrorResultSlot();
+  Address getCalleeTypedErrorResultSlot(SILType errorType);
+  void setCalleeTypedErrorResultSlot(Address addr);
 
   /// Are we currently emitting a coroutine?
   bool isCoroutine() {
@@ -123,15 +154,89 @@ public:
     assert(handle != nullptr && "setting a null handle");
     CoroutineHandle = handle;
   }
-  
+
+  llvm::Value *getAsyncTask();
+  llvm::Value *getAsyncContext();
+  void storeCurrentAsyncContext(llvm::Value *context);
+
+  llvm::CallInst *emitSuspendAsyncCall(unsigned swiftAsyncContextIndex,
+                                       llvm::StructType *resultTy,
+                                       ArrayRef<llvm::Value *> args,
+                                       bool restoreCurrentContext = true);
+
+  llvm::Value *emitAsyncResumeProjectContext(llvm::Value *callerContextAddr);
+  llvm::Function *getOrCreateResumePrjFn(bool forPrologue = false);
+  llvm::Function *createAsyncDispatchFn(const FunctionPointer &fnPtr,
+                                        ArrayRef<llvm::Value *> args);
+  llvm::Function *createAsyncDispatchFn(const FunctionPointer &fnPtr,
+                                        ArrayRef<llvm::Type *> argTypes);
+
+  void emitGetAsyncContinuation(SILType resumeTy,
+                                StackAddress optionalResultAddr,
+                                Explosion &out,
+                                bool canThrow);
+
+  void emitAwaitAsyncContinuation(SILType resumeTy,
+                                  bool isIndirectResult,
+                                  Explosion &outDirectResult,
+                                  llvm::BasicBlock *&normalBB,
+                                  llvm::PHINode *&optionalErrorPhi,
+                                  llvm::BasicBlock *&optionalErrorBB);
+
+  void emitResumeAsyncContinuationReturning(llvm::Value *continuation,
+                                            llvm::Value *srcPtr,
+                                            SILType valueTy,
+                                            bool throwing);
+
+  void emitResumeAsyncContinuationThrowing(llvm::Value *continuation,
+                                           llvm::Value *error);
+
+  FunctionPointer
+  getFunctionPointerForResumeIntrinsic(llvm::Value *resumeIntrinsic);
+
+  void emitSuspensionPoint(Explosion &executor, llvm::Value *asyncResume);
+  llvm::Function *getOrCreateResumeFromSuspensionFn();
+  llvm::Function *createAsyncSuspendFn();
+
 private:
   void emitPrologue();
   void emitEpilogue();
 
   Address ReturnSlot;
   llvm::BasicBlock *ReturnBB;
-  llvm::Value *ErrorResultSlot = nullptr;
+  Address CalleeErrorResultSlot;
+  Address AsyncCalleeErrorResultSlot;
+  Address CallerErrorResultSlot;
+  Address CallerTypedErrorResultSlot;
+  Address CalleeTypedErrorResultSlot;
   llvm::Value *CoroutineHandle = nullptr;
+  llvm::Value *AsyncCoroutineCurrentResume = nullptr;
+  llvm::Value *AsyncCoroutineCurrentContinuationContext = nullptr;
+
+protected:
+  // Whether pack metadata stack promotion is disabled for this function in
+  // particular.
+  bool packMetadataStackPromotionDisabled = false;
+
+  /// The on-stack pack metadata allocations emitted so far awaiting cleanup.
+  llvm::SmallSetVector<StackPackAlloc, 2> OutstandingStackPackAllocs;
+
+private:
+  Address asyncContextLocation;
+
+  /// The unique block that calls @llvm.coro.end.
+  llvm::BasicBlock *CoroutineExitBlock = nullptr;
+
+  /// The blocks that handle thrown exceptions from all throwing foreign calls
+  /// in this function.
+  llvm::SmallVector<llvm::BasicBlock *, 4> ExceptionUnwindBlocks;
+
+  /// True if this function calls any always inline thunks that have a foreign
+  /// exception trap.
+  bool callsAnyAlwaysInlineThunksWithForeignExceptionTraps = false;
+
+public:
+  void emitCoroutineOrAsyncExit();
 
 //--- Helper methods -----------------------------------------------------------
 public:
@@ -145,17 +250,26 @@ public:
     return getEffectiveOptimizationMode() == OptimizationMode::ForSize;
   }
 
+  /// Whether metadata/wtable packs allocated on the stack must be eagerly
+  /// heapified.
+  bool canStackPromotePackMetadata() const;
+
+  bool outliningCanCallValueWitnesses() const;
+
+  void setupAsync(unsigned asyncContextIndex);
+  bool isAsync() const { return asyncContextLocation.isValid(); }
+
   Address createAlloca(llvm::Type *ty, Alignment align,
                        const llvm::Twine &name = "");
   Address createAlloca(llvm::Type *ty, llvm::Value *arraySize, Alignment align,
                        const llvm::Twine &name = "");
-  Address createFixedSizeBufferAlloca(const llvm::Twine &name);
 
   StackAddress emitDynamicAlloca(SILType type, const llvm::Twine &name = "");
   StackAddress emitDynamicAlloca(llvm::Type *eltTy, llvm::Value *arraySize,
-                                 Alignment align,
+                                 Alignment align, bool allowTaskAlloc = true,
                                  const llvm::Twine &name = "");
-  void emitDeallocateDynamicAlloca(StackAddress address);
+  void emitDeallocateDynamicAlloca(StackAddress address,
+                                   bool allowTaskDealloc = true);
 
   llvm::BasicBlock *createBasicBlock(const llvm::Twine &Name);
   const TypeInfo &getTypeInfoForUnlowered(Type subst);
@@ -189,11 +303,13 @@ public:
                                               Address addr,
                                               bool isFar);
 
+  llvm::Value *emitLoadOfRelativePointer(Address addr, bool isFar,
+                                         llvm::Type *expectedPointedToType,
+                                         const llvm::Twine &name = "");
   llvm::Value *
-  emitLoadOfRelativeIndirectablePointer(Address addr, bool isFar,
-                                        llvm::PointerType *expectedType,
-                                        const llvm::Twine &name = "");
-
+  emitLoadOfCompactFunctionPointer(Address addr, bool isFar,
+                                   llvm::Type *expectedPointedToType,
+                                   const llvm::Twine &name = "");
 
   llvm::Value *emitAllocObjectCall(llvm::Value *metadata, llvm::Value *size,
                                    llvm::Value *alignMask,
@@ -222,6 +338,10 @@ public:
   void emitDeallocBoxCall(llvm::Value *box, llvm::Value *typeMetadata);
 
   void emitTSanInoutAccessCall(llvm::Value *address);
+
+  llvm::Value *emitTargetOSVersionAtLeastCall(llvm::Value *major,
+                                              llvm::Value *minor,
+                                              llvm::Value *patch);
 
   llvm::Value *emitProjectBoxCall(llvm::Value *box, llvm::Value *typeMetadata);
 
@@ -273,6 +393,17 @@ public:
                                               llvm::Value *&metadataSlot,
                                               ValueWitness index);
 
+  llvm::Value *optionallyLoadFromConditionalProtocolWitnessTable(
+    llvm::Value *wtable);
+
+  llvm::Value *emitPackShapeExpression(CanType type);
+
+  void recordStackPackMetadataAlloc(StackAddress addr, llvm::Value *shape);
+  void eraseStackPackMetadataAlloc(StackAddress addr, llvm::Value *shape);
+
+  void recordStackPackWitnessTableAlloc(StackAddress addr, llvm::Value *shape);
+  void eraseStackPackWitnessTableAlloc(StackAddress addr, llvm::Value *shape);
+
   /// Emit a load of a reference to the given Objective-C selector.
   llvm::Value *emitObjCSelectorRefLoad(StringRef selector);
 
@@ -280,6 +411,7 @@ public:
   const SILDebugScope *getDebugScope() const { return DbgScope; }
   llvm::Value *coerceValue(llvm::Value *value, llvm::Type *toTy,
                            const llvm::DataLayout &);
+  Explosion coerceValueTo(SILType fromTy, Explosion &from, SILType toTy);
 
   /// Mark a load as invariant.
   void setInvariantLoad(llvm::LoadInst *load);
@@ -287,13 +419,25 @@ public:
   void setDereferenceableLoad(llvm::LoadInst *load, unsigned size);
 
   /// Emit a non-mergeable trap call, optionally followed by a terminator.
-  void emitTrap(bool EmitUnreachable);
+  void emitTrap(StringRef failureMessage, bool EmitUnreachable);
 
 private:
   llvm::Instruction *AllocaIP;
   const SILDebugScope *DbgScope;
+  /// The insertion point where we should but instructions we would normally put
+  /// at the beginning of the function. LLVM's coroutine lowering really does
+  /// not like it if we put instructions with side-effectrs before the
+  /// coro.begin.
+  llvm::Instruction *EarliestIP;
 
-//--- Reference-counting methods -----------------------------------------------
+public:
+  void setEarliestInsertionPoint(llvm::Instruction *inst) { EarliestIP = inst; }
+  /// Returns the first insertion point before which we should insert
+  /// instructions which have side-effects.
+  llvm::Instruction *getEarliestInsertionPoint() const { return EarliestIP; }
+
+  //--- Reference-counting methods
+  //-----------------------------------------------
 public:
   // Returns the default atomicity of the module.
   Atomicity getDefaultAtomicity();
@@ -416,6 +560,9 @@ public:
   llvm::Value *emitBlockCopyCall(llvm::Value *value);
   void emitBlockRelease(llvm::Value *value);
 
+  void emitForeignReferenceTypeLifetimeOperation(ValueDecl *fn,
+                                                 llvm::Value *value);
+
   // Routines for an unknown reference-counting style (meaning,
   // dynamically something compatible with either the ObjC or Swift styles).
   //   - strong references
@@ -430,24 +577,22 @@ public:
   void emitErrorStrongRetain(llvm::Value *value);
   void emitErrorStrongRelease(llvm::Value *value);
 
-  llvm::Value *emitIsUniqueCall(llvm::Value *value, SourceLoc loc,
-                                bool isNonNull);
+  llvm::Value *emitIsUniqueCall(llvm::Value *value, ReferenceCounting style,
+                                SourceLoc loc, bool isNonNull);
 
   llvm::Value *emitIsEscapingClosureCall(llvm::Value *value, SourceLoc loc,
                                          unsigned verificationType);
+
+  Address emitTaskAlloc(llvm::Value *size,
+                        Alignment alignment);
+  void emitTaskDealloc(Address address);
+
+  llvm::Value *alignUpToMaximumAlignment(llvm::Type *sizeTy, llvm::Value *val);
 
   //--- Expression emission
   //------------------------------------------------------
 public:
   void emitFakeExplosion(const TypeInfo &type, Explosion &explosion);
-
-//--- Declaration emission -----------------------------------------------------
-public:
-
-  void bindArchetype(ArchetypeType *type,
-                     llvm::Value *metadata,
-                     MetadataState metadataState,
-                     ArrayRef<llvm::Value*> wtables);
 
 //--- Type emission ------------------------------------------------------------
 public:
@@ -533,7 +678,8 @@ public:
   MetadataResponse tryGetConcreteLocalTypeData(LocalTypeDataKey key,
                                                DynamicMetadataRequest request);
   void setUnscopedLocalTypeData(LocalTypeDataKey key, MetadataResponse value);
-  void setScopedLocalTypeData(LocalTypeDataKey key, MetadataResponse value);
+  void setScopedLocalTypeData(LocalTypeDataKey key, MetadataResponse value,
+                              bool mayEmitDebugInfo = true);
 
   /// Given a concrete type metadata node, add all the local type data
   /// that we can reach from it.
@@ -633,8 +779,8 @@ public:
     ~ConditionalDominanceScope();
   };
 
-  /// The kind of value LocalSelf is.
-  enum LocalSelfKind {
+  /// The kind of value DynamicSelf is.
+  enum DynamicSelfKind {
     /// An object reference.
     ObjectReference,
     /// A Swift metatype.
@@ -643,8 +789,9 @@ public:
     ObjCMetatype,
   };
 
-  llvm::Value *getLocalSelfMetadata();
-  void setLocalSelfMetadata(llvm::Value *value, LocalSelfKind kind);
+  llvm::Value *getDynamicSelfMetadata();
+  void setDynamicSelfMetadata(CanType selfBaseTy, bool selfIsExact,
+                              llvm::Value *value, DynamicSelfKind kind);
 
 private:
   LocalTypeDataCache &getOrCreateLocalTypeData();
@@ -658,10 +805,12 @@ private:
   DominancePoint ActiveDominancePoint = DominancePoint::universal();
   ConditionalDominanceScope *ConditionalDominance = nullptr;
   
-  /// The value that satisfies metadata lookups for dynamic Self.
-  llvm::Value *LocalSelf = nullptr;
-  
-  LocalSelfKind SelfKind;
+  /// The value that satisfies metadata lookups for DynamicSelfType.
+  llvm::Value *SelfValue = nullptr;
+  /// If set, the dynamic Self type is assumed to be equivalent to this exact class.
+  CanType SelfType;
+  bool SelfTypeIsExact = false;
+  DynamicSelfKind SelfKind;
 };
 
 using ConditionalDominanceScope = IRGenFunction::ConditionalDominanceScope;

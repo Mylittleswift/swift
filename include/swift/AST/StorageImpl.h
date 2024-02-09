@@ -45,6 +45,8 @@ enum class AccessorKind {
 #define ACCESSOR(ID) ID,
 #define LAST_ACCESSOR(ID) Last = ID
 #include "swift/AST/AccessorKinds.def"
+#undef ACCESSOR
+#undef LAST_ACCESSOR
 };
 
 const unsigned NumAccessorKinds = unsigned(AccessorKind::Last) + 1;
@@ -52,6 +54,22 @@ const unsigned NumAccessorKinds = unsigned(AccessorKind::Last) + 1;
 static inline IntRange<AccessorKind> allAccessorKinds() {
   return IntRange<AccessorKind>(AccessorKind(0),
                                 AccessorKind(NumAccessorKinds));
+}
+
+/// \returns a user-readable string name for the accessor kind
+static inline StringRef accessorKindName(AccessorKind ak) {
+  switch(ak) {
+
+#define ACCESSOR(ID) ID
+#define SINGLETON_ACCESSOR(ID, KEYWORD)                                        \
+  case AccessorKind::ID:                                                       \
+    return #KEYWORD;
+
+#include "swift/AST/AccessorKinds.def"
+
+#undef ACCESSOR_KEYWORD
+#undef SINGLETON_ACCESSOR
+  }
 }
 
 /// Whether an access to storage is for reading, writing, or both.
@@ -63,7 +81,7 @@ enum class AccessKind : uint8_t {
   Write,
 
   /// The access may require either reading or writing the current value.
-  ReadWrite
+  ReadWrite,
 };
 
 /// Produce the aggregate access kind of the combination of two accesses.
@@ -92,6 +110,10 @@ public:
     /// separately performing a Read into a temporary variable followed by
     /// a Write access back into the storage.
     MaterializeToTemporary,
+
+    /// The access is to a computed distributed property, and thus the
+    /// get-accessor is a distributed thunk which may perform a remote call.
+    DispatchToDistributedThunk,
   };
 
 private:
@@ -131,6 +153,10 @@ public:
     return { dispatched ? DispatchToAccessor : DirectToAccessor, accessor };
   }
 
+  static AccessStrategy getDistributedThunkDispatchStrategy() {
+    return {DispatchToDistributedThunk, AccessorKind::Get};
+  }
+
   static AccessStrategy getMaterializeToTemporary(AccessStrategy read,
                                                   AccessStrategy write) {
     return { read, write };
@@ -139,7 +165,8 @@ public:
   Kind getKind() const { return TheKind; }
 
   bool hasAccessor() const {
-    return TheKind == DirectToAccessor || TheKind == DispatchToAccessor;
+    return TheKind == DirectToAccessor || TheKind == DispatchToAccessor ||
+           TheKind == DispatchToDistributedThunk;
   }
 
   AccessorKind getAccessor() const {
@@ -176,8 +203,6 @@ enum class ReadImplKind {
 };
 enum { NumReadImplKindBits = 4 };
 
-StringRef getReadImplKindName(ReadImplKind kind);
-
 /// How are simple write accesses implemented?
 enum class WriteImplKind {
   /// It's immutable.
@@ -204,8 +229,6 @@ enum class WriteImplKind {
 };
 enum { NumWriteImplKindBits = 4 };
 
-StringRef getWriteImplKindName(WriteImplKind kind);
-
 /// How are read-write accesses implemented?
 enum class ReadWriteImplKind {
   /// It's immutable.
@@ -222,10 +245,14 @@ enum class ReadWriteImplKind {
 
   /// There's a modify coroutine.
   Modify,
+
+  /// We have a didSet, so we're either going to use
+  /// MaterializeOrTemporary or the "simple didSet"
+  // access pattern.
+  StoredWithDidSet,
+  InheritedWithDidSet,
 };
 enum { NumReadWriteImplKindBits = 4 };
-
-StringRef getReadWriteImplKindName(ReadWriteImplKind kind);
 
 class StorageImplInfo {
   using IntType = uint16_t;
@@ -266,12 +293,14 @@ public:
 
     case WriteImplKind::StoredWithObservers:
       assert(readImpl == ReadImplKind::Stored);
-      assert(readWriteImpl == ReadWriteImplKind::MaterializeToTemporary);
+      assert(readWriteImpl == ReadWriteImplKind::MaterializeToTemporary ||
+             readWriteImpl == ReadWriteImplKind::StoredWithDidSet);
       return;
 
     case WriteImplKind::InheritedWithObservers:
       assert(readImpl == ReadImplKind::Inherited);
-      assert(readWriteImpl == ReadWriteImplKind::MaterializeToTemporary);
+      assert(readWriteImpl == ReadWriteImplKind::MaterializeToTemporary ||
+             readWriteImpl == ReadWriteImplKind::InheritedWithDidSet);
       return;
 
     case WriteImplKind::Set:
@@ -382,6 +411,9 @@ private:
     llvm_unreachable("bad read-ownership kind");
   }
 };
+
+StringRef getAccessorLabel(AccessorKind kind);
+void simple_display(llvm::raw_ostream &out, AccessorKind kind);
 
 } // end namespace swift
 

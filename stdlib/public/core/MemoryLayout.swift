@@ -37,9 +37,9 @@
 ///
 ///     let count = 4
 ///     let pointPointer = UnsafeMutableRawPointer.allocate(
-///             bytes: count * MemoryLayout<Point>.stride,
-///             alignedTo: MemoryLayout<Point>.alignment)
-@_frozen // namespace
+///             byteCount: count * MemoryLayout<Point>.stride,
+///             alignment: MemoryLayout<Point>.alignment)
+@frozen // namespace
 public enum MemoryLayout<T> {
   /// The contiguous memory footprint of `T`, in bytes.
   ///
@@ -224,6 +224,7 @@ extension MemoryLayout {
   ///   `nil`, it can be because `key` is computed, has observers, requires
   ///   reabstraction, or overlaps storage with other properties.
   @_transparent
+  @_unavailableInEmbedded
   public static func offset(of key: PartialKeyPath<T>) -> Int? {
     return key._storedInlineOffset
   }

@@ -1,10 +1,10 @@
-// RUN: %target-swift-emit-silgen  -parse-as-library -verify-sil-ownership %s -verify | %FileCheck %s
-// RUN: %target-swift-emit-ir  -parse-as-library -verify-sil-ownership %s
+// RUN: %target-swift-emit-silgen  -parse-as-library %s -verify | %FileCheck %s
+// RUN: %target-swift-emit-ir  -parse-as-library %s
 
 func function1() {
   return
 
-  class UnreachableClass {} // expected-warning {{code after 'return' will never be executed}}
+  class LocalClass {}
 }
 
 func function2() {
@@ -19,4 +19,4 @@ func function2() {
 
 // CHECK-LABEL: sil private [transparent] [ossa] @$s11local_types9function2yyFyycfU_1SL_V1xSivpfi : $@convention(thin) () -> Int
 
-// CHECK-LABEL: sil_vtable UnreachableClass
+// CHECK-LABEL: sil_vtable LocalClass

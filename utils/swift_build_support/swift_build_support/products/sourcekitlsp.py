@@ -10,8 +10,18 @@
 #
 # ----------------------------------------------------------------------------
 
+from . import cmark
+from . import foundation
 from . import indexstoredb
+from . import libcxx
+from . import libdispatch
+from . import libicu
+from . import llbuild
+from . import llvm
 from . import product
+from . import swift
+from . import swiftpm
+from . import xctest
 
 
 class SourceKitLSP(product.Product):
@@ -23,11 +33,45 @@ class SourceKitLSP(product.Product):
     def is_build_script_impl_product(cls):
         return False
 
-    def do_build(self, host_target):
+    @classmethod
+    def is_before_build_script_impl_product(cls):
+        return False
+
+    @classmethod
+    def is_swiftpm_unified_build_product(cls):
+        return True
+
+    def should_build(self, host_target):
+        return True
+
+    def build(self, host_target):
         indexstoredb.run_build_script_helper(
             'build', host_target, self, self.args)
 
-    def do_test(self, host_target):
-        if self.args.test and self.args.test_sourcekitlsp:
-            indexstoredb.run_build_script_helper(
-                'test', host_target, self, self.args)
+    def should_test(self, host_target):
+        return self.args.test_sourcekitlsp
+
+    def test(self, host_target):
+        indexstoredb.run_build_script_helper(
+            'test', host_target, self, self.args,
+            self.args.test_sourcekitlsp_sanitize_all, clean=False)
+
+    def should_install(self, host_target):
+        return self.args.install_sourcekitlsp
+
+    def install(self, host_target):
+        indexstoredb.run_build_script_helper(
+            'install', host_target, self, self.args, clean=False)
+
+    @classmethod
+    def get_dependencies(cls):
+        return [cmark.CMark,
+                llvm.LLVM,
+                libcxx.LibCXX,
+                libicu.LibICU,
+                swift.Swift,
+                libdispatch.LibDispatch,
+                foundation.Foundation,
+                xctest.XCTest,
+                llbuild.LLBuild,
+                swiftpm.SwiftPM]

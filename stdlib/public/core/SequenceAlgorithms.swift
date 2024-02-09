@@ -96,7 +96,7 @@ extension Sequence {
   ///     let hues = ["Heliotrope": 296, "Coral": 16, "Aquamarine": 156]
   ///     let leastHue = hues.min { a, b in a.value < b.value }
   ///     print(leastHue)
-  ///     // Prints "Optional(("Coral", 16))"
+  ///     // Prints "Optional((key: "Coral", value: 16))"
   ///
   /// - Parameter areInIncreasingOrder: A predicate that returns `true`
   ///   if its first argument should be ordered before its second
@@ -141,7 +141,7 @@ extension Sequence {
   ///     let hues = ["Heliotrope": 296, "Coral": 16, "Aquamarine": 156]
   ///     let greatestHue = hues.max { a, b in a.value < b.value }
   ///     print(greatestHue)
-  ///     // Prints "Optional(("Heliotrope", 296))"
+  ///     // Prints "Optional((key: "Heliotrope", value: 296))"
   ///
   /// - Parameter areInIncreasingOrder:  A predicate that returns `true` if its
   ///   first argument should be ordered before its second argument;
@@ -335,7 +335,7 @@ extension Sequence {
   }
 }
 
-extension Sequence where Element : Equatable {
+extension Sequence where Element: Equatable {
   /// Returns a Boolean value indicating whether this sequence and another
   /// sequence contain the same elements in the same order.
   ///
@@ -412,25 +412,23 @@ extension Sequence {
     var iter1 = self.makeIterator()
     var iter2 = other.makeIterator()
     while true {
-      if let e1 = iter1.next() {
-        if let e2 = iter2.next() {
-          if try areInIncreasingOrder(e1, e2) {
-            return true
-          }
-          if try areInIncreasingOrder(e2, e1) {
-            return false
-          }
-          continue // Equivalent
-        }
+      guard let e1 = iter1.next() else {
+        return iter2.next() != nil
+      }
+      guard let e2 = iter2.next() else {
         return false
       }
-
-      return iter2.next() != nil
+      if try areInIncreasingOrder(e1, e2) {
+        return true
+      }
+      if try areInIncreasingOrder(e2, e1) {
+        return false
+      }
     }
   }
 }
 
-extension Sequence where Element : Comparable {
+extension Sequence where Element: Comparable {
   /// Returns a Boolean value indicating whether the sequence precedes another
   /// sequence in a lexicographical (dictionary) ordering, using the
   /// less-than operator (`<`) to compare elements.
@@ -529,6 +527,8 @@ extension Sequence {
   ///     let allHaveAtLeastFive = names.allSatisfy({ $0.count >= 5 })
   ///     // allHaveAtLeastFive == true
   ///
+  /// If the sequence is empty, this method returns `true`.
+  ///
   /// - Parameter predicate: A closure that takes an element of the sequence
   ///   as its argument and returns a Boolean value that indicates whether
   ///   the passed element satisfies a condition.
@@ -544,7 +544,7 @@ extension Sequence {
   }
 }
 
-extension Sequence where Element : Equatable {
+extension Sequence where Element: Equatable {
   /// Returns a Boolean value indicating whether the sequence contains the
   /// given element.
   ///
@@ -751,7 +751,7 @@ extension Sequence {
   /// - Complexity: O(*m* + *n*), where *n* is the length of this sequence
   ///   and *m* is the length of the result.
   @inlinable
-  public func flatMap<SegmentOfResult : Sequence>(
+  public func flatMap<SegmentOfResult: Sequence>(
     _ transform: (Element) throws -> SegmentOfResult
   ) rethrows -> [SegmentOfResult.Element] {
     var result: [SegmentOfResult.Element] = []
@@ -785,8 +785,7 @@ extension Sequence {
   /// - Returns: An array of the non-`nil` results of calling `transform`
   ///   with each element of the sequence.
   ///
-  /// - Complexity: O(*m* + *n*), where *n* is the length of this sequence
-  ///   and *m* is the length of the result.
+  /// - Complexity: O(*n*), where *n* is the length of this sequence.
   @inlinable // protocol-only
   public func compactMap<ElementOfResult>(
     _ transform: (Element) throws -> ElementOfResult?
@@ -794,8 +793,8 @@ extension Sequence {
     return try _compactMap(transform)
   }
 
-  // The implementation of flatMap accepting a closure with an optional result.
-  // Factored out into a separate functions in order to be used in multiple
+  // The implementation of compactMap accepting a closure with an optional result.
+  // Factored out into a separate function in order to be used in multiple
   // overloads.
   @inlinable // protocol-only
   @inline(__always)

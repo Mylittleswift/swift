@@ -1,4 +1,5 @@
 // RUN: %target-swift-frontend %s -g -emit-ir -o - | %FileCheck %s
+// RUN: %target-swift-frontend %s -g -emit-ir -o - | %FileCheck --check-prefix=CHECK2 %s
 
 func markUsed<T>(_ t: T) {}
 
@@ -14,4 +15,14 @@ let r = foo(
             foo(2, 42)  // CHECK: ![[ARG2]] = !DILocation(line: [[@LINE]],
            )            // CHECK: ![[OUTER]] = !DILocation(line: [[@LINE-3]],
 markUsed(r)
+
+struct MyType {}
+func bar(x: MyType = MyType()) {}
+
+// Room for improvement:
+// Because the default argument is implicit it inherits the previous source location.
+// CHECK2: call {{.*}}MyType{{.*}}, !dbg ![[DEFAULTARG:.*]]
+// CHECK2: call {{.*}}bar{{.*}}, !dbg ![[BARCALL:.*]]
+bar() // CHECK2: ![[DEFAULTARG]] = !DILocation(line: [[@LINE-9]]
+      // CHECK2: ![[BARCALL]] = !DILocation(line: [[@LINE-1]], column: 1
 

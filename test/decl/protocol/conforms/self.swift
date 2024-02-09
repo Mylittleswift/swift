@@ -7,6 +7,8 @@ protocol P {
   func returnsSelf() -> Self
   func hasDefaultTakesT(_: T)
   func returnsSelfTakesT(_: T) -> Self
+
+  subscript(_: T) -> Self { get }
 }
 
 extension P {
@@ -21,23 +23,33 @@ extension P {
   func returnsSelfTakesT(_: T) -> Self { // expected-note {{'returnsSelfTakesT' declared here}}
     return self
   }
+
+  subscript(_: T) -> Self { self } // expected-note {{'subscript(_:)' declared here}}
 }
 
 // This fails
-class Class : P {} // expected-error {{method 'returnsSelfTakesT' in non-final class 'Class' cannot be implemented in a protocol extension because it returns 'Self' and has associated type requirements}}
+class Class : P {}
+// expected-error@-1 {{method 'returnsSelfTakesT' in non-final class 'Class' cannot be implemented in a protocol extension because it returns 'Self' and has associated type requirements}}
+// expected-error@-2 {{subscript 'subscript(_:)' in non-final class 'Class' cannot be implemented in a protocol extension because it returns 'Self' and has associated type requirements}}
 
 // This succeeds, because the class is final
 final class FinalClass : P {}
 
-// This succeeds, because we're not using the default implementation
+// This succeeds, because we're not using the default implementations
 class NonFinalClass : P {
+  // FIXME: An explicit type witness is necessary to avoid an unrelated
+  // associated type inference bug.
+  typealias T = Never
+
   func returnsSelfTakesT(_: T) -> Self {
     return self
   }
+
+  subscript(_: T) -> Self { self }
 }
 
-// Test for default implementation that comes from a constrained extension
-// - https://bugs.swift.org/browse/SR-7422
+// (https://github.com/apple/swift/issues/49965) Test for default implementation
+// that comes from a constrained extension.
 
 // FIXME: Better error message here?
 
@@ -45,12 +57,12 @@ class SillyClass {}
 
 protocol HasDefault {
   func foo()
-  // expected-note@-1 {{protocol requires function 'foo()' with type '() -> ()'; do you want to add a stub?}}
+  // expected-note@-1 {{protocol requires function 'foo()' with type '() -> ()'; add a stub for conformance}}
 }
 
 extension HasDefault where Self == SillyClass {
   func foo() {}
-  // expected-note@-1 {{candidate has non-matching type '<Self> () -> ()'}}
+  // expected-note@-1 {{candidate would match if 'SillyClass' conformed to 'HasDefault'}}
 }
 
 extension SillyClass : HasDefault {}
@@ -66,7 +78,7 @@ extension HasDefault where Self : SeriousClass {
 
 extension SeriousClass : HasDefault {}
 
-// https://bugs.swift.org/browse/SR-7428
+// https://github.com/apple/swift/issues/49971
 
 protocol Node {
   associatedtype ValueType = Int
@@ -82,28 +94,30 @@ extension Node {
 
 class IntNode: Node {}
 
-// SR-8902
-protocol P8902 {
-    associatedtype A // expected-note {{protocol requires nested type 'A'; do you want to add it?}}
+// https://github.com/apple/swift/issues/51408
+
+protocol P_51408 {
+    associatedtype A
     func f(_ x: A) -> Self
 }
-struct S : P8902 {
-    func f(_ x: Bool) -> S { fatalError() }
+struct S : P_51408 {
+    func f(_ x: Bool) -> S {}
 }
-class C8902 : P8902 { // expected-error {{type 'C8902' does not conform to protocol 'P8902'}}
-    func f(_ x: Bool) -> C8902 { fatalError() }
+class C1_51408 : P_51408 {
+    func f(_ x: Bool) -> C1_51408 {} // expected-error {{method 'f' in non-final class 'C1_51408' must return 'Self' to conform to protocol 'P_51408'}}
 }
-final class C8902b : P8902 {
-    func f(_ x: Bool) -> C8902b { fatalError() }
+final class C2_51408 : P_51408 {
+    func f(_ x: Bool) -> C2_51408 {}
 }
-class C8902c : P8902 {
-    func f(_ x: Bool) -> Self { fatalError() }
+class C3_51408 : P_51408 {
+    func f(_ x: Bool) -> Self {}
 }
-protocol P8902complex {
+
+protocol P_51408_Complex {
   associatedtype A
   func f() -> (A, Self?)
 }
-final class C8902complex : P8902complex {
-  func f() -> (Bool, C8902complex?) { fatalError() }
+final class C_51408_Complex : P_51408_Complex {
+  func f() -> (Bool, C_51408_Complex?) {}
 }
 

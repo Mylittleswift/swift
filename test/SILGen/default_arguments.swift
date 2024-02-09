@@ -6,6 +6,14 @@
 // CHECK-LABEL: sil [ossa] @main
 // CHECK:         string_literal utf8 "default_arguments"
 
+// Test at top level.
+testMagicLiterals()
+closure { testMagicLiterals() }
+autoclosure(testMagicLiterals())
+
+// CHECK: string_literal utf8 "default_arguments"
+let y : String = #function
+
 // Default argument for first parameter.
 // CHECK-LABEL: sil hidden [ossa] @$s17default_arguments7defarg11i1d1sySi_SdSStFfA_ : $@convention(thin) () -> Int
 // CHECK: [[LIT:%[0-9]+]] = integer_literal $Builtin.IntLiteral, 17
@@ -84,6 +92,26 @@ func testMagicLiterals(file: String = #file,
 //
 // NEGATIVE-NOT: sil hidden [ossa] @$s17default_arguments17testMagicLiteralsySS4file_SS8functionSi4lineSi6columntFfA2_
 
+// https://github.com/apple/swift/issues/54034
+
+func genericMagicLiteral<T : ExpressibleByIntegerLiteral>(_ x: T = #column) -> T { x }
+
+// CHECK-LABEL: sil hidden [ossa] @$s17default_arguments23testGenericMagicLiteralyyF
+func testGenericMagicLiteral() {
+  // CHECK:      [[RET:%[0-9]+]] = alloc_stack $Int
+  // CHECK-NEXT: [[RAWLIT:%[0-9]+]] = integer_literal $Builtin.IntLiteral, 35
+  // CHECK-NEXT: [[INTTY:%[0-9]+]] = metatype $@thin Int.Type
+  // CHECK-NEXT: // function_ref Swift.Int.init(_builtinIntegerLiteral: Builtin.IntLiteral) -> Swift.Int
+  // CHECK-NEXT: [[LITFN:%[0-9]+]] = function_ref @$sSi22_builtinIntegerLiteralSiBI_tcfC
+  // CHECK-NEXT: [[LIT:%[0-9]+]] = apply [[LITFN]]([[RAWLIT]], [[INTTY]]) : $@convention(method) (Builtin.IntLiteral, @thin Int.Type) -> Int
+  // CHECK-NEXT: [[LITARG:%[0-9]+]] = alloc_stack $Int
+  // CHECK-NEXT: store [[LIT]] to [trivial] [[LITARG]] : $*Int
+  // CHECK-NEXT: // function_ref default_arguments.genericMagicLiteral<A where A: Swift.ExpressibleByIntegerLiteral>(A) -> A
+  // CHECK-NEXT: [[FN:%[0-9]+]] = function_ref @$s17default_arguments19genericMagicLiteralyxxs020ExpressibleByIntegerE0RzlF : $@convention(thin) <τ_0_0 where τ_0_0 : ExpressibleByIntegerLiteral> (@in_guaranteed τ_0_0) -> @out τ_0_0
+  // CHECK-NEXT: apply [[FN]]<Int>([[RET]], [[LITARG]]) : $@convention(thin) <τ_0_0 where τ_0_0 : ExpressibleByIntegerLiteral> (@in_guaranteed τ_0_0) -> @out τ_0_0
+  let _: Int = genericMagicLiteral()
+}
+
 func closure(_: () -> ()) {}
 func autoclosure(_: @autoclosure () -> ()) {}
 
@@ -137,19 +165,11 @@ class Foo {
     return x
   }
  
-  // CHECK-LABEL: sil private [ossa] @globalinit_33_E52D764B1F2009F2390B2B8DF62DAEB8_func0
+  // CHECK-LABEL: sil private [global_init_once_fn] [ossa] @{{.*}}WZ
   // CHECK:         string_literal utf8 "Foo" 
   static let x = Foo(int:0)
 
 }
-
-// Test at top level.
-testMagicLiterals()
-closure { testMagicLiterals() }
-autoclosure(testMagicLiterals())
-
-// CHECK: string_literal utf8 "default_arguments"
-let y : String = #function 
 
 // CHECK-LABEL: sil hidden [ossa] @$s17default_arguments16testSelectorCall_17withMagicLiteralsySi_SitF
 // CHECK:         string_literal utf8 "testSelectorCall(_:withMagicLiterals:)"
@@ -199,7 +219,7 @@ func takeDSOHandle(_ handle: UnsafeRawPointer = #dsohandle) { }
 
 // CHECK-LABEL: sil hidden [ossa] @$s17default_arguments13testDSOHandleyyF
 func testDSOHandle() {
-  // CHECK: [[DSO_HANDLE:%[0-9]+]] = global_addr @__dso_handle : $*Builtin.RawPointer
+  // CHECK: [[DSO_HANDLE:%[0-9]+]] = global_addr {{@__dso_handle|@__ImageBase}} : $*Builtin.RawPointer
   takeDSOHandle()
 }
 
@@ -217,16 +237,18 @@ class ReabstractDefaultArgument<T> {
 
 // CHECK-LABEL: sil hidden [ossa] @$s17default_arguments32testDefaultArgumentReabstractionyyF
 // function_ref default_arguments.ReabstractDefaultArgument.__allocating_init <A>(default_arguments.ReabstractDefaultArgument<A>.Type)(a : (A, A) -> Swift.Bool) -> default_arguments.ReabstractDefaultArgument<A>
-// CHECK: [[FN:%.*]] = function_ref @$s17default_arguments25ReabstractDefaultArgument{{.*}} : $@convention(thin) <τ_0_0> () -> @owned @callee_guaranteed (@in_guaranteed τ_0_0, @in_guaranteed τ_0_0) -> Bool
-// CHECK-NEXT: [[RESULT:%.*]] = apply [[FN]]<Int>() : $@convention(thin) <τ_0_0> () -> @owned @callee_guaranteed (@in_guaranteed τ_0_0, @in_guaranteed τ_0_0) -> Bool
+// CHECK: [[FN:%.*]] = function_ref @$s17default_arguments25ReabstractDefaultArgument{{.*}} : $@convention(thin) <τ_0_0> () -> @owned @callee_guaranteed @substituted <τ_0_0, τ_0_1> (@in_guaranteed τ_0_0, @in_guaranteed τ_0_1) -> Bool for <τ_0_0, τ_0_0>
+// CHECK-NEXT: [[RESULT:%.*]] = apply [[FN]]<Int>() : $@convention(thin) <τ_0_0> () -> @owned @callee_guaranteed @substituted <τ_0_0, τ_0_1> (@in_guaranteed τ_0_0, @in_guaranteed τ_0_1) -> Bool for <τ_0_0, τ_0_0>
+// CHECK-NEXT: [[RESULT_CONV:%.*]] = convert_function [[RESULT]]
 // CHECK-NEXT: function_ref reabstraction thunk helper from @escaping @callee_guaranteed (@in_guaranteed Swift.Int, @in_guaranteed Swift.Int) -> (@unowned Swift.Bool) to @escaping @callee_guaranteed (@unowned Swift.Int, @unowned Swift.Int) -> (@unowned Swift.Bool)
 // CHECK-NEXT: [[THUNK:%.*]] = function_ref @$sS2iSbIegnnd_S2iSbIegyyd_TR : $@convention(thin) (Int, Int, @guaranteed @callee_guaranteed (@in_guaranteed Int, @in_guaranteed Int) -> Bool) -> Bool
-// CHECK-NEXT: [[FN:%.*]] = partial_apply [callee_guaranteed] [[THUNK]]([[RESULT]]) : $@convention(thin) (Int, Int, @guaranteed @callee_guaranteed (@in_guaranteed Int, @in_guaranteed Int) -> Bool) -> Bool
+// CHECK-NEXT: [[FN:%.*]] = partial_apply [callee_guaranteed] [[THUNK]]([[RESULT_CONV]]) : $@convention(thin) (Int, Int, @guaranteed @callee_guaranteed (@in_guaranteed Int, @in_guaranteed Int) -> Bool) -> Bool
 // CHECK-NEXT: [[CONV_FN:%.*]] = convert_escape_to_noescape [not_guaranteed] [[FN]]
 // function_ref reabstraction thunk helper from @callee_guaranteed (@unowned Swift.Int, @unowned Swift.Int) -> (@unowned Swift.Bool) to @callee_guaranteed (@in_guaranteed Swift.Int, @in_guaranteed Swift.Int) -> (@unowned Swift.Bool)
-// CHECK: [[THUNK:%.*]] = function_ref @$sS2iSbIgyyd_S2iSbIegnnd_TR : $@convention(thin) (@in_guaranteed Int, @in_guaranteed Int, @noescape @callee_guaranteed (Int, Int) -> Bool) -> Bool
-// CHECK-NEXT: [[FN:%.*]] = partial_apply [callee_guaranteed] [[THUNK]]([[CONV_FN]]) : $@convention(thin) (@in_guaranteed Int, @in_guaranteed Int, @noescape @callee_guaranteed (Int, Int) -> Bool) -> Bool
-// CHECK-NEXT: [[CONV_FN:%.*]] = convert_escape_to_noescape [not_guaranteed] [[FN]]
+// CHECK: [[THUNK:%.*]] = function_ref @$sS2iSbIgyyd_S2iSbIegnnd_TR :
+// CHECK-NEXT: [[FN:%.*]] = partial_apply [callee_guaranteed] [[THUNK]]([[CONV_FN]]) :
+// CHECK-NEXT: [[CONV_FN_0:%.*]] = convert_function [[FN]]
+// CHECK-NEXT: [[CONV_FN:%.*]] = convert_escape_to_noescape [not_guaranteed] [[CONV_FN_0]]
 // CHECK: [[INITFN:%[0-9]+]] = function_ref @$s17default_arguments25ReabstractDefaultArgumentC{{[_0-9a-zA-Z]*}}fC
 // CHECK-NEXT: apply [[INITFN]]<Int>([[CONV_FN]], 
 
@@ -263,7 +285,7 @@ func test_r18400194() {
 //   Don't add capture arguments to local default argument generators.
 func localFunctionWithDefaultArg() {
   var z = 5
-  func bar(_ x: Int? = nil) {
+  func bar(_ x: Int? = (nil)) {
     z += 1
   }
   bar()
@@ -271,12 +293,12 @@ func localFunctionWithDefaultArg() {
 // CHECK-LABEL: sil private [ossa] @$s17default_arguments27localFunctionWithDefaultArgyyF3barL_yySiSgFfA_
 // CHECK-SAME: $@convention(thin) () -> Optional<Int>
 
-// CHECK-LABEL: sil hidden [ossa] @$s17default_arguments15throwingDefault7closureySbyKXE_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error Error)
+// CHECK-LABEL: sil hidden [ossa] @$s17default_arguments15throwingDefault7closureySbyKXE_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error any Error)
 func throwingDefault(closure: () throws -> Bool  = {  return true }) throws {
   try _ = closure()
 }
 
-// CHECK-LABEL: sil hidden [ossa] @$s17default_arguments26throwingAutoclosureDefault7closureySbyKXK_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error Error)
+// CHECK-LABEL: sil hidden [ossa] @$s17default_arguments26throwingAutoclosureDefault7closureySbyKXK_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error any Error)
 func throwingAutoclosureDefault(closure: @autoclosure () throws -> Bool  = true ) throws {
   try _ = closure()
 }
@@ -291,12 +313,12 @@ func autoclosureDefaultArg(closure: @autoclosure () -> Bool  = true ) {
   _ = closure()
 }
 
-// CHECK-LABEL: sil hidden [ossa] @$s17default_arguments23throwingDefaultEscaping7closureySbyKc_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error Error)
+// CHECK-LABEL: sil hidden [ossa] @$s17default_arguments23throwingDefaultEscaping7closureySbyKc_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error any Error)
 func throwingDefaultEscaping(closure: @escaping () throws -> Bool  = {  return true }) throws {
   try _ = closure()
 }
 
-// CHECK-LABEL: sil hidden [ossa] @$s17default_arguments34throwingAutoclosureDefaultEscaping7closureySbyKXA_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error Error)
+// CHECK-LABEL: sil hidden [ossa] @$s17default_arguments34throwingAutoclosureDefaultEscaping7closureySbyKXA_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error any Error)
 func throwingAutoclosureDefaultEscaping(closure: @escaping @autoclosure () throws -> Bool  = true ) throws {
   try _ = closure()
 }
@@ -311,40 +333,40 @@ func autoclosureDefaultEscaping(closure: @escaping @autoclosure () -> Bool  = tr
   _ = closure()
 }
 
-// CHECK-LABEL: sil hidden [ossa] @{{.*}}callThem{{.*}} : $@convention(thin) () -> @error Error
+// CHECK-LABEL: sil hidden [ossa] @{{.*}}callThem{{.*}} : $@convention(thin) () -> @error any Error
 
-// CHECK:  [[F:%.*]] = function_ref @$s17default_arguments15throwingDefault7closureySbyKXE_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error Error)
-// CHECK:  [[C:%.*]] = apply [[F]]() : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error Error)
+// CHECK:  [[F:%.*]] = function_ref @$s17default_arguments15throwingDefault7closureySbyKXE_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error any Error)
+// CHECK:  [[C:%.*]] = apply [[F]]() : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error any Error)
 // CHECK:  [[E:%.*]] = convert_escape_to_noescape [not_guaranteed] [[C]]
-// CHECK:  [[R:%.*]] = function_ref @$s17default_arguments15throwingDefault7closureySbyKXE_tKF : $@convention(thin) (@noescape @callee_guaranteed () -> (Bool, @error Error)) -> @error Error
+// CHECK:  [[R:%.*]] = function_ref @$s17default_arguments15throwingDefault7closureySbyKXE_tKF :
 // CHECK:  try_apply [[R]]([[E]])
 
-// CHECK:  [[F:%.*]] = function_ref @$s17default_arguments26throwingAutoclosureDefault7closureySbyKXK_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error Error)
-// CHECK:  [[C:%.*]] = apply [[F]]() : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error Error)
+// CHECK:  [[F:%.*]] = function_ref @$s17default_arguments26throwingAutoclosureDefault7closureySbyKXK_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error any Error)
+// CHECK:  [[C:%.*]] = apply [[F]]() : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error any Error)
 // CHECK:  [[E:%.*]] = convert_escape_to_noescape [not_guaranteed] [[C]]
-// CHECK:  [[R:%.*]] = function_ref @$s17default_arguments26throwingAutoclosureDefault7closureySbyKXK_tKF : $@convention(thin) (@noescape @callee_guaranteed () -> (Bool, @error Error)) -> @error Error
+// CHECK:  [[R:%.*]] = function_ref @$s17default_arguments26throwingAutoclosureDefault7closureySbyKXK_tKF :
 // CHECK:  try_apply [[R]]([[E]])
 
 // CHECK:   [[F:%.*]] = function_ref @$s17default_arguments0A3Arg7closureySbyXE_tFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> Bool
 // CHECK:   [[C:%.*]] = apply [[F]]() : $@convention(thin) () -> @owned @callee_guaranteed () -> Bool
 // CHECK:   [[E:%.*]] = convert_escape_to_noescape [not_guaranteed] [[C]]
-// CHECK:   [[R:%.*]] = function_ref @$s17default_arguments0A3Arg7closureySbyXE_tF : $@convention(thin) (@noescape @callee_guaranteed () -> Bool) -> ()
+// CHECK:   [[R:%.*]] = function_ref @$s17default_arguments0A3Arg7closureySbyXE_tF :
 // CHECK:   apply [[R]]([[E]])
 
 // CHECK:  [[F:%.*]] = function_ref @$s17default_arguments21autoclosureDefaultArg7closureySbyXK_tFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> Boo
 // CHECK:  [[C:%.*]] = apply [[F]]() : $@convention(thin) () -> @owned @callee_guaranteed () -> Bool
 // CHECK:  [[E:%.*]] = convert_escape_to_noescape [not_guaranteed] [[C]]
-// CHECK:  [[R:%.*]] = function_ref @$s17default_arguments21autoclosureDefaultArg7closureySbyXK_tF : $@convention(thin) (@noescape @callee_guaranteed () -> Bool) -> ()
+// CHECK:  [[R:%.*]] = function_ref @$s17default_arguments21autoclosureDefaultArg7closureySbyXK_tF :
 // CHECK:  apply [[R]]([[E]])
 
-// CHECK:  [[F:%.*]] = function_ref @$s17default_arguments23throwingDefaultEscaping7closureySbyKc_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error Error)
-// CHECK:  [[E:%.*]] = apply [[F]]() : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error Error)
-// CHECK:  [[R:%.*]] = function_ref @$s17default_arguments23throwingDefaultEscaping7closureySbyKc_tKF : $@convention(thin) (@guaranteed @callee_guaranteed () -> (Bool, @error Error)) -> @error Erro
+// CHECK:  [[F:%.*]] = function_ref @$s17default_arguments23throwingDefaultEscaping7closureySbyKc_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error any Error)
+// CHECK:  [[E:%.*]] = apply [[F]]() : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error any Error)
+// CHECK:  [[R:%.*]] = function_ref @$s17default_arguments23throwingDefaultEscaping7closureySbyKc_tKF : $@convention(thin) (@guaranteed @callee_guaranteed () -> (Bool, @error any Error)) -> @error any Error
 // CHECK:  try_apply [[R]]([[E]])
 
-// CHECK:  [[F:%.*]] = function_ref @$s17default_arguments34throwingAutoclosureDefaultEscaping7closureySbyKXA_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error Error)
-// CHECK:  [[E:%.*]] = apply [[F]]() : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error Error)
-// CHECK:  [[R:%.*]] = function_ref @$s17default_arguments34throwingAutoclosureDefaultEscaping7closureySbyKXA_tKF : $@convention(thin) (@guaranteed @callee_guaranteed () -> (Bool, @error Error)) -> @error Error
+// CHECK:  [[F:%.*]] = function_ref @$s17default_arguments34throwingAutoclosureDefaultEscaping7closureySbyKXA_tKFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error any Error)
+// CHECK:  [[E:%.*]] = apply [[F]]() : $@convention(thin) () -> @owned @callee_guaranteed () -> (Bool, @error any Error)
+// CHECK:  [[R:%.*]] = function_ref @$s17default_arguments34throwingAutoclosureDefaultEscaping7closureySbyKXA_tKF : $@convention(thin) (@guaranteed @callee_guaranteed () -> (Bool, @error any Error)) -> @error any Error
 // CHECK:  try_apply [[R]]([[E]])
 
 // CHECK:  [[F:%.*]] = function_ref @$s17default_arguments0A8Escaping7closureySbyc_tFfA_ : $@convention(thin) () -> @owned @callee_guaranteed () -> Bool
@@ -383,3 +405,68 @@ func stupidGames(x: Int = 3) -> Int {
   return x
 }
 stupidGames(x:)()
+
+func genericMagic<T : ExpressibleByStringLiteral>(x: T = #file) -> T {
+  return x
+}
+
+let _: String = genericMagic()
+
+// https://github.com/apple/swift/issues/54185
+
+struct CallableWithDefault {
+  func callAsFunction(x: Int = 4) {}
+  func callAsFunction(y: Int, z: String = #function) {}
+}
+
+// CHECK-LABEL: sil hidden [ossa] @$s17default_arguments23testCallableWithDefaultyyAA0deF0VF : $@convention(thin) (CallableWithDefault) -> ()
+func testCallableWithDefault(_ x: CallableWithDefault) {
+  // CHECK: [[DEF_FN:%[0-9]+]] = function_ref @$s17default_arguments19CallableWithDefaultV14callAsFunction1xySi_tFfA_ : $@convention(thin) () -> Int
+  // CHECK: [[DEF:%[0-9]+]] = apply [[DEF_FN]]() : $@convention(thin) () -> Int
+  // CHECK: [[CALL_AS_FN:%[0-9]+]] = function_ref @$s17default_arguments19CallableWithDefaultV14callAsFunction1xySi_tF : $@convention(method) (Int, CallableWithDefault) -> ()
+  // CHECK: apply [[CALL_AS_FN]]([[DEF]], {{%[0-9]+}})
+  x()
+
+  // CHECK: [[RAW_I:%[0-9]+]] = integer_literal $Builtin.IntLiteral, 5
+  // CHECK: [[I:%[0-9]+]] = apply {{%[0-9]+}}([[RAW_I]], {{%[0-9]+}}) : $@convention(method) (Builtin.IntLiteral, @thin Int.Type) -> Int
+  // CHECK: [[RAW_STR:%[0-9]+]] = string_literal utf8 "testCallableWithDefault(_:)"
+  // CHECK: [[STR:%[0-9]+]] = apply {{%[0-9]+}}([[RAW_STR]], {{%[0-9]+}}, {{%[0-9]+}}, {{%[0-9]+}}) : $@convention(method) (Builtin.RawPointer, Builtin.Word, Builtin.Int1, @thin String.Type) -> @owned String
+  // CHECK: [[CALL_AS_FN:%[0-9]+]] = function_ref @$s17default_arguments19CallableWithDefaultV14callAsFunction1y1zySi_SStF : $@convention(method) (Int, @guaranteed String, CallableWithDefault) -> ()
+  // CHECK: apply [[CALL_AS_FN]]([[I]], [[STR]], {{%[0-9]+}})
+  x(y: 5)
+}
+
+enum E {
+  // CHECK-LABEL: sil hidden [ossa] @$s17default_arguments1EO6ResultV4name9platformsAESS_SaySiGtcfcfA0_ : $@convention(thin) () -> @owned Array<Int>
+  struct Result {
+    var name: String
+    var platforms: [Int] = []
+  }
+
+  // CHECK-LABEL: sil hidden [ossa] @$s17default_arguments1EO4testyyFZ : $@convention(method) (@thin E.Type) -> ()
+  static func test() {
+    // CHECK: function_ref @$s17default_arguments1EO6ResultV4name9platformsAESS_SaySiGtcfcfA0_ : $@convention(thin) () -> @owned Array<Int>
+    // CHECK: function_ref @$s17default_arguments1EO6ResultV4name9platformsAESS_SaySiGtcfC : $@convention(method) (@owned String, @owned Array<Int>, @thin E.Result.Type) -> @owned E.Result
+
+    var result = Self.Result(name: "")
+  }
+  // CHECK: end sil function '$s17default_arguments1EO4testyyFZ'
+}
+
+// FIXME: Arguably we shouldn't allow calling a constructor like this, as
+// we usually require the user write an explicit '.init'.
+struct WeirdUMEInitCase {
+  static let ty = WeirdUMEInitCase.self
+  init(_ x: Int = 0) {}
+}
+
+let _: WeirdUMEInitCase = .ty()
+let _: WeirdUMEInitCase = .ty(5)
+
+struct KeyPathLiteralAsFunctionDefaultArg {
+    var x: Int
+
+    func doStuff(with prop: (KeyPathLiteralAsFunctionDefaultArg) -> Int = \.x) {}
+}
+
+KeyPathLiteralAsFunctionDefaultArg(x: 1738).doStuff()

@@ -1,8 +1,11 @@
-// RUN: %target-typecheck-verify-swift -solver-expression-time-threshold=1 -solver-disable-shrink -disable-constraint-solver-performance-hacks -solver-enable-operator-designated-types
-// REQUIRES: tools-release,no_asserts
-// REQUIRES: rdar38378503
+// RUN: %target-typecheck-verify-swift -solver-expression-time-threshold=1
+// REQUIRES: tools-release,no_asan
+
+// UNSUPPORTED: OS=linux-gnu
 
 // expected-no-diagnostics
+
+// REQUIRES: 33958047
 
 let a: [Double] = []
 _ = a.map { $0 - 1.0 }

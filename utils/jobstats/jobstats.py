@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 #
 # ==-- jobstats - support for reading the contents of stats dirs --==#
 #
@@ -66,17 +66,17 @@ class JobStats(JobData):
 
     def driver_jobs_ran(self):
         """Return the count of a driver job's ran sub-jobs"""
-        assert(self.is_driver_job())
+        assert self.is_driver_job()
         return self.stats.get("Driver.NumDriverJobsRun", 0)
 
     def driver_jobs_skipped(self):
         """Return the count of a driver job's skipped sub-jobs"""
-        assert(self.is_driver_job())
+        assert self.is_driver_job()
         return self.stats.get("Driver.NumDriverJobsSkipped", 0)
 
     def driver_jobs_total(self):
         """Return the total count of a driver job's ran + skipped sub-jobs"""
-        assert(self.is_driver_job())
+        assert self.is_driver_job()
         return self.driver_jobs_ran() + self.driver_jobs_skipped()
 
     def merged_with(self, other, merge_by="sum"):
@@ -90,7 +90,7 @@ class JobStats(JobData):
                                     else max(a, b)),
                "max": lambda a, b: max(a, b)}
         op = ops[merge_by]
-        for k, v in self.stats.items() + other.stats.items():
+        for k, v in list(self.stats.items()) + list(other.stats.items()):
             if k in merged_stats:
                 merged_stats[k] = op(v, merged_stats[k])
             else:
@@ -126,7 +126,7 @@ class JobStats(JobData):
     def incrementality_percentage(self):
         """Assuming the job is a driver job, return the amount of
         jobs that actually ran, as a percentage of the total number."""
-        assert(self.is_driver_job())
+        assert self.is_driver_job()
         ran = self.driver_jobs_ran()
         total = self.driver_jobs_total()
         return round((float(ran) / float(total)) * 100.0, 2)
@@ -317,8 +317,7 @@ def load_stats_dir(path, select_module=[], select_stat=[],
             jobargs = [mg["input"], mg["triple"], mg["out"], mg["opt"]]
 
             if platform.system() == 'Windows':
-                p = unicode(u"\\\\?\\%s" % os.path.abspath(os.path.join(root,
-                                                                        f)))
+                p = str(u"\\\\?\\%s" % os.path.abspath(os.path.join(root, f)))
             else:
                 p = os.path.join(root, f)
 
@@ -329,11 +328,12 @@ def load_stats_dir(path, select_module=[], select_stat=[],
             for (k, v) in j.items():
                 if sre.search(k) is None:
                     continue
+                if k.startswith('time.'):
+                    v = int(1000000.0 * float(v))
                 if k.startswith('time.') and exclude_timers:
                     continue
                 tm = match_timerpat(k)
                 if tm:
-                    v = int(1000000.0 * float(v))
                     if tm['jobkind'] == jobkind and \
                        tm['timerkind'] == 'wall':
                         dur_usec = v

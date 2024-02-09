@@ -11,7 +11,8 @@
 //===----------------------------------------------------------------------===//
 //
 // This file defines macros used for macro-metaprogramming with compiler-known
-// protocols.
+// protocols. Note that this mechanism does not look through an overlay into its
+// underlying module, so it typically cannot find Objective-C protocols.
 //
 //===----------------------------------------------------------------------===//
 
@@ -40,6 +41,14 @@
     PROTOCOL_WITH_NAME(Id, Name)
 #endif
 
+/// \def INVERTIBLE_PROTOCOL_WITH_NAME(id, name)
+/// \param Name a string literal with the external name of this protocol
+/// \param Id the internal "enum name" of this protocol.
+#ifndef INVERTIBLE_PROTOCOL_WITH_NAME
+#define INVERTIBLE_PROTOCOL_WITH_NAME(Id, Name) \
+    PROTOCOL_WITH_NAME(Id, Name)
+#endif
+
 
 #define PROTOCOL(name) PROTOCOL_WITH_NAME(name, #name)
 #define PROTOCOL_(name) PROTOCOL_WITH_NAME(name, "_" #name)
@@ -57,7 +66,10 @@
 #define BUILTIN_EXPRESSIBLE_BY_LITERAL_PROTOCOL_(name) \
     BUILTIN_EXPRESSIBLE_BY_LITERAL_PROTOCOL_WITH_NAME(name, "_" #name)
 
+PROTOCOL(Actor)
+PROTOCOL(AnyActor)
 PROTOCOL(Sequence)
+PROTOCOL(Identifiable)
 PROTOCOL(IteratorProtocol)
 PROTOCOL(RawRepresentable)
 PROTOCOL(Equatable)
@@ -67,7 +79,15 @@ PROTOCOL(Error)
 PROTOCOL_(ErrorCodeProtocol)
 PROTOCOL(OptionSet)
 PROTOCOL(CaseIterable)
+PROTOCOL(SIMD)
 PROTOCOL(SIMDScalar)
+PROTOCOL(BinaryInteger)
+PROTOCOL(FixedWidthInteger)
+PROTOCOL(RangeReplaceableCollection)
+PROTOCOL(Executor)
+PROTOCOL(SerialExecutor)
+PROTOCOL(TaskExecutor)
+PROTOCOL(GlobalActor)
 
 PROTOCOL_(BridgedNSError)
 PROTOCOL_(BridgedStoredNSError)
@@ -77,10 +97,48 @@ PROTOCOL(CodingKey)
 PROTOCOL(Encodable)
 PROTOCOL(Decodable)
 
+PROTOCOL(Sendable)
+PROTOCOL(UnsafeSendable)
+
 PROTOCOL_(ObjectiveCBridgeable)
 PROTOCOL_(DestructorSafeContainer)
 
 PROTOCOL(StringInterpolationProtocol)
+
+PROTOCOL(AdditiveArithmetic)
+PROTOCOL(Differentiable)
+
+// Distributed Actors
+PROTOCOL(DistributedActor)
+PROTOCOL(DistributedActorSystem)
+PROTOCOL(DistributedTargetInvocationEncoder)
+PROTOCOL(DistributedTargetInvocationDecoder)
+PROTOCOL(DistributedTargetInvocationResultHandler)
+
+// C++ Standard Library Overlay:
+PROTOCOL(CxxConvertibleToBool)
+PROTOCOL(CxxConvertibleToCollection)
+PROTOCOL(CxxDictionary)
+PROTOCOL(CxxOptional)
+PROTOCOL(CxxPair)
+PROTOCOL(CxxSet)
+PROTOCOL(CxxRandomAccessCollection)
+PROTOCOL(CxxSequence)
+PROTOCOL(CxxUniqueSet)
+PROTOCOL(CxxVector)
+PROTOCOL(UnsafeCxxInputIterator)
+PROTOCOL(UnsafeCxxMutableInputIterator)
+PROTOCOL(UnsafeCxxRandomAccessIterator)
+PROTOCOL(UnsafeCxxMutableRandomAccessIterator)
+
+PROTOCOL(AsyncSequence)
+PROTOCOL(AsyncIteratorProtocol)
+
+PROTOCOL(FloatingPoint)
+
+INVERTIBLE_PROTOCOL_WITH_NAME(Copyable, "Copyable")
+INVERTIBLE_PROTOCOL_WITH_NAME(Escapable, "Escapable")
+PROTOCOL_(BitwiseCopyable)
 
 EXPRESSIBLE_BY_LITERAL_PROTOCOL(ExpressibleByArrayLiteral, "Array", false)
 EXPRESSIBLE_BY_LITERAL_PROTOCOL(ExpressibleByBooleanLiteral, "BooleanLiteralType", true)
@@ -109,6 +167,7 @@ BUILTIN_EXPRESSIBLE_BY_LITERAL_PROTOCOL_(ExpressibleByBuiltinUnicodeScalarLitera
 #undef EXPRESSIBLE_BY_LITERAL_PROTOCOL_WITH_NAME
 #undef BUILTIN_EXPRESSIBLE_BY_LITERAL_PROTOCOL_
 #undef BUILTIN_EXPRESSIBLE_BY_LITERAL_PROTOCOL_WITH_NAME
+#undef INVERTIBLE_PROTOCOL_WITH_NAME
 #undef PROTOCOL
 #undef PROTOCOL_
 #undef PROTOCOL_WITH_NAME

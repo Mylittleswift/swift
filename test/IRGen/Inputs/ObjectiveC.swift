@@ -1,8 +1,10 @@
 // This is an overlay Swift module.
 @_exported import ObjectiveC
 
+@frozen
 public struct ObjCBool : CustomStringConvertible {
-#if os(macOS) || (os(iOS) && (arch(i386) || arch(arm)))
+#if (os(macOS) && arch(x86_64)) || (os(iOS) && (arch(i386) || arch(arm) || targetEnvironment(macCatalyst)))
+
   // On macOS and 32-bit iOS, Objective-C's BOOL type is a "signed char".
   private var value: Int8
 
@@ -33,6 +35,7 @@ public struct ObjCBool : CustomStringConvertible {
   }
 }
 
+@frozen
 public struct Selector {
   private var ptr : OpaquePointer
 }

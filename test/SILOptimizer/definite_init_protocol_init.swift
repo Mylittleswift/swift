@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-sil %s -swift-version 5 -verify | %FileCheck %s
+// RUN: %target-swift-frontend -enable-copy-propagation=requested-passes-only -enable-lexical-lifetimes=false -emit-sil %s -swift-version 5 -verify | %FileCheck %s
 
 // Ensure that convenience initializers on concrete types can
 // delegate to factory initializers defined in protocol
@@ -35,10 +35,10 @@ class TrivialClass : TriviallyConstructible {
   // CHECK-NEXT:  [[FN:%.*]] = function_ref @$s023definite_init_protocol_B022TriviallyConstructiblePAAE6middlexSi_tcfC
   // CHECK-NEXT:  apply [[FN]]<@dynamic_self TrivialClass>([[RESULT]], %0, [[METATYPE]])
   // CHECK-NEXT:  [[NEW_SELF:%.*]] = load [[RESULT]]
-  // CHECK-NEXT:  store [[NEW_SELF]] to [[SELF_BOX]]
-  // CHECK-NEXT:  dealloc_stack [[RESULT]]
   // TODO: Once we restore arbitrary takes, the strong_retain/destroy_addr pair below will go away.
   // CHECK-NEXT:  strong_retain [[NEW_SELF]]
+  // CHECK-NEXT:  store [[NEW_SELF]] to [[SELF_BOX]]
+  // CHECK-NEXT:  dealloc_stack [[RESULT]]
   // CHECK-NEXT:  destroy_addr [[SELF_BOX]]
   // CHECK-NEXT:  dealloc_stack [[SELF_BOX]]
   // CHECK-NEXT:  return [[NEW_SELF]]
@@ -97,9 +97,9 @@ struct AddressOnlyStruct : TriviallyConstructible {
 // CHECK-NEXT: [[METATYPE:%.*]] = metatype $@thick AddressOnlyStruct.Type
 // CHECK:      [[FN:%.*]] = function_ref @$s023definite_init_protocol_B022TriviallyConstructiblePAAE6middlexSi_tcfC
 // CHECK-NEXT: apply [[FN]]<AddressOnlyStruct>([[SELF_BOX]], %1, [[METATYPE]])
-// CHECK-NEXT: copy_addr [take] [[SELF_BOX]] to [initialization] [[SELF]]
+// CHECK-NEXT: copy_addr [take] [[SELF_BOX]] to [init] [[SELF]]
 // CHECK-NEXT: dealloc_stack [[SELF_BOX]]
-// CHECK-NEXT: copy_addr [take] [[SELF]] to [initialization] %0
+// CHECK-NEXT: copy_addr [take] [[SELF]] to [init] %0
 // CHECK-NEXT: dealloc_stack [[SELF]]
 // CHECK-NEXT: [[RESULT:%.*]] = tuple ()
 // CHECK-NEXT: return [[RESULT]]

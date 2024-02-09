@@ -98,3 +98,43 @@ public func recaptureStack() -> Int {
 // The second [read] access is static. Same as `captureStack` above.
 //
 // CHECK: Static Access: %{{.*}} = begin_access [read] [static] %{{.*}} : $*Int
+
+
+// -----------------------------------------------------------------------------
+// Inout access in a recursive non-escaping closure currently has
+// static enforcement.
+
+public protocol Apply {
+    func apply(_ body: (Apply) -> ())
+}
+
+// CHECK-LABEL: sil private @$s28access_enforcement_selection20testRecursiveClosure1a1xyAA5Apply_p_SiztF9localFuncL_1byAaE_p_tF : $@convention(thin) (@in_guaranteed any Apply, @inout_aliasable Int) -> () {
+// CHECK: bb0(%0 : $*any Apply, %1 : @closureCapture $*Int):
+// CHECK:   begin_access [modify] [static] %1 : $*Int
+// CHECK-LABEL: } // end sil function '$s28access_enforcement_selection20testRecursiveClosure1a1xyAA5Apply_p_SiztF9localFuncL_1byAaE_p_tF'
+public func testRecursiveClosure(a: Apply, x: inout Int) {
+    func localFunc(b: Apply) {
+        x += 1
+        let closure = { (c: Apply) in
+            c.apply(localFunc)
+        }
+        b.apply(closure)
+    }
+    a.apply(localFunc)
+}
+
+// CHECK-LABEL: sil private @$s28access_enforcement_selection25testRecursiveLocalCapture1iys5Int64Vz_tF6local2L_yyF : $@convention(thin) (@inout_aliasable Int64) -> () {
+// CHECK: begin_access [modify] [static] %0 : $*Int64
+// CHECK-LABEL: } // end sil function '$s28access_enforcement_selection25testRecursiveLocalCapture1iys5Int64Vz_tF6local2L_yyF'
+func testRecursiveLocalCapture(i: inout Int64) {
+  func local1() {
+    if i < 1 {
+      local2()
+    }
+  }
+  func local2() {
+    i = i + 1
+    local1()
+  }
+  local1()
+}

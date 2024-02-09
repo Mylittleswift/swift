@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 #if defined(swiftRemoteMirror_EXPORTS)
-# if defined(__ELF__)
+# if defined(__ELF__) || defined(__WASM__)
 #   define SWIFT_REMOTE_MIRROR_LINKAGE __attribute__((__visibility__("protected")))
 # elif defined(__MACH__)
 #   define SWIFT_REMOTE_MIRROR_LINKAGE __attribute__((__visibility__("default")))
@@ -30,9 +30,7 @@ extern "C" {
 #   endif
 # endif
 #else
-# if defined(__ELF__)
-#   define SWIFT_REMOTE_MIRROR_LINKAGE __attribute__((__visibility__("default")))
-# elif defined(__MACH__)
+# if defined(__ELF__) || defined(__MACH__) || defined(__WASM__)
 #   define SWIFT_REMOTE_MIRROR_LINKAGE __attribute__((__visibility__("default")))
 # else
 #   if defined(_WINDLL)
@@ -41,6 +39,13 @@ extern "C" {
 #     define SWIFT_REMOTE_MIRROR_LINKAGE
 #   endif
 # endif
+#endif
+
+#if defined(__clang__)
+#define SWIFT_REMOTE_MIRROR_DEPRECATED(MSG, FIX)                               \
+  __attribute__((__deprecated__(MSG, FIX)))
+#else
+#define SWIFT_REMOTE_MIRROR_DEPRECATED(MSG, FIX) [[deprecated(MSG)]]
 #endif
 
 #if defined(__cplusplus)

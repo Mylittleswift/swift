@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2021 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -25,11 +25,13 @@ let setAB = Set(0 ..< size)                              //   0 ..< 400
 let setCD = Set(size ..< 2 * size)                       // 400 ..< 800
 let setBC = Set(size - quarter ..< 2 * size - quarter)   // 300 ..< 700
 let setB = Set(size - quarter ..< size)                  // 300 ..< 400
+let setCDS = Set(size ..< (size + (size/4)))             // 400 ..< 500
 
 let setOAB = Set(setAB.map(Box.init))
 let setOCD = Set(setCD.map(Box.init))
 let setOBC = Set(setBC.map(Box.init))
 let setOB = Set(setB.map(Box.init))
+let setOCDS = Set(setCDS.map(Box.init))
 
 let countA = size - quarter        // 300
 let countB = quarter               // 100
@@ -55,7 +57,42 @@ let setQ: Set<Int> = {
   return set
 }()
 
-public let SetTests = [
+// Construction of empty array.
+let arrayE: Array<Int> = []
+let arrayOE: Array<Box<Int>> = []
+
+// Construction kit for arrays with 25% overlap
+let arrayAB = Array(0 ..< size)                              //   0 ..< 400
+let arrayCD = Array(size ..< 2 * size)                       // 400 ..< 800
+let arrayBC = Array(size - quarter ..< 2 * size - quarter)   // 300 ..< 700
+let arrayB = Array(size - quarter ..< size)                  // 300 ..< 400
+
+let arrayOAB = arrayAB.map(Box.init)
+let arrayOCD = arrayCD.map(Box.init)
+let arrayOBC = arrayBC.map(Box.init)
+let arrayOB = arrayB.map(Box.init)
+
+// Construction kit for arrays with 50% overlap
+let arrayXY = Array(0 ..< size)           //   0 ..< 400
+let arrayYZ = Array(half ..< size + half) // 200 ..< 600
+let arrayY = Array(half ..< size)         // 200 ..< 400
+
+let arrayP = Array(0 ..< size)
+
+// Construction of flexible sets.
+var set: Set<Int> = []
+var setBox: Set<Box<Int>> = []
+
+func set(_ size: Int) {
+  set = Set(0 ..< size)
+}
+
+func setBox(_ size: Int) {
+  setBox = Set(Set(0 ..< size).map(Box.init))
+}
+
+
+public let benchmarks = [
   // Mnemonic: number after name is percentage of common elements in input sets.
   BenchmarkInfo(
     name: "Set.isSubset.Empty.Int",
@@ -99,6 +136,211 @@ public let SetTests = [
     setUpFunction: { blackHole([setP, setQ]) }),
 
   BenchmarkInfo(
+    name: "Set.isSubset.Seq.Empty.Int",
+    runFunction: { n in run_SetIsSubsetSeqInt(setE, arrayAB, true, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setE, arrayAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSubset.Seq.Int.Empty",
+    runFunction: { n in run_SetIsSubsetSeqInt(setAB, arrayE, false, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, arrayE] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSubset.Seq.Int0",
+    runFunction: { n in run_SetIsSubsetSeqInt(setAB, arrayCD, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, arrayCD] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSubset.Seq.Box0",
+    runFunction: { n in run_SetIsSubsetSeqBox(setOAB, arrayOCD, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOAB, arrayOCD] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSubset.Seq.Int25",
+    runFunction: { n in run_SetIsSubsetSeqInt(setB, arrayBC, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setB, arrayBC] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSubset.Seq.Box25",
+    runFunction: { n in run_SetIsSubsetSeqBox(setOB, arrayOBC, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOB, arrayOBC] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSubset.Seq.Int50",
+    runFunction: { n in run_SetIsSubsetSeqInt(setY, arrayYZ, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setY, arrayYZ] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSubset.Seq.Int100",
+    runFunction: { n in run_SetIsSubsetSeqInt(setP, arrayP, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setP, arrayP] as [Any]) }),
+
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Empty.Int",
+    runFunction: { n in run_SetIsStrictSubsetInt(setE, setAB, true, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setE, setAB]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Int.Empty",
+    runFunction: { n in run_SetIsStrictSubsetInt(setAB, setE, false, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, setE]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Int0",
+    runFunction: { n in run_SetIsStrictSubsetInt(setAB, setCD, false, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, setCD]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Box0",
+    runFunction: { n in run_SetIsStrictSubsetBox(setOAB, setOCD, false, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOAB, setOCD]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Int25",
+    runFunction: { n in run_SetIsStrictSubsetInt(setB, setAB, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setB, setAB]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Box25",
+    runFunction: { n in run_SetIsStrictSubsetBox(setOB, setOAB, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOB, setOAB]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Int50",
+    runFunction: { n in run_SetIsStrictSubsetInt(setY, setXY, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setY, setXY]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Int100",
+    runFunction: { n in run_SetIsStrictSubsetInt(setP, setQ, false, 5000 * n) },
+    tags: [.validation, .api, .Set, .skip],
+    setUpFunction: { blackHole([setP, setQ]) }),
+
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Seq.Empty.Int",
+    runFunction: { n in run_SetIsStrictSubsetSeqInt(setE, arrayAB, true, 5000 * n) },
+    tags: [.validation, .api, .Set, .skip],
+    setUpFunction: { blackHole([setE, arrayAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Seq.Int.Empty",
+    runFunction: { n in run_SetIsStrictSubsetSeqInt(setAB, arrayE, false, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, arrayE] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Seq.Int0",
+    runFunction: { n in run_SetIsStrictSubsetSeqInt(setAB, arrayCD, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, arrayCD] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Seq.Box0",
+    runFunction: { n in run_SetIsStrictSubsetSeqBox(setOAB, arrayOCD, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOAB, arrayOCD] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Seq.Int25",
+    runFunction: { n in run_SetIsStrictSubsetSeqInt(setB, arrayBC, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setB, arrayBC] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Seq.Box25",
+    runFunction: { n in run_SetIsStrictSubsetSeqBox(setOB, arrayOBC, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOB, arrayOBC] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Seq.Int50",
+    runFunction: { n in run_SetIsStrictSubsetSeqInt(setY, arrayYZ, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setY, arrayYZ] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSubset.Seq.Int100",
+    runFunction: { n in run_SetIsStrictSubsetSeqInt(setP, arrayP, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setP, arrayP] as [Any]) }),
+
+  BenchmarkInfo(
+    name: "Set.isSuperset.Seq.Empty.Int",
+    runFunction: { n in run_SetIsSupersetSeqInt(setAB, arrayE, true, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, arrayE] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSuperset.Seq.Int.Empty",
+    runFunction: { n in run_SetIsSupersetSeqInt(setE, arrayAB, false, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setE, arrayAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSuperset.Seq.Int0",
+    runFunction: { n in run_SetIsSupersetSeqInt(setCD, arrayAB, false, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setCD, arrayAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSuperset.Seq.Box0",
+    runFunction: { n in run_SetIsSupersetSeqBox(setOCD, arrayOAB, false, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOCD, arrayOAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSuperset.Seq.Int25",
+    runFunction: { n in run_SetIsSupersetSeqInt(setB, arrayBC, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setB, arrayBC] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSuperset.Seq.Box25",
+    runFunction: { n in run_SetIsSupersetSeqBox(setOB, arrayOBC, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOB, arrayOBC] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSuperset.Seq.Int50",
+    runFunction: { n in run_SetIsSupersetSeqInt(setY, arrayYZ, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setY, arrayYZ] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isSuperset.Seq.Int100",
+    runFunction: { n in run_SetIsSupersetSeqInt(setP, arrayP, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setP, arrayP] as [Any]) }),
+
+  BenchmarkInfo(
+    name: "Set.isStrictSuperset.Seq.Empty.Int",
+    runFunction: { n in run_SetIsStrictSupersetSeqInt(setAB, arrayE, true, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, arrayE] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSuperset.Seq.Int.Empty",
+    runFunction: { n in run_SetIsStrictSupersetSeqInt(setE, arrayAB, false, 5000 * n) },
+    tags: [.validation, .api, .Set, .skip],
+    setUpFunction: { blackHole([setE, arrayAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSuperset.Seq.Int0",
+    runFunction: { n in run_SetIsStrictSupersetSeqInt(setCD, arrayAB, false, 500 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setCD, arrayAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSuperset.Seq.Box0",
+    runFunction: { n in run_SetIsStrictSupersetSeqBox(setOCD, arrayOAB, false, 500 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOCD, arrayOAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSuperset.Seq.Int25",
+    runFunction: { n in run_SetIsStrictSupersetSeqInt(setB, arrayBC, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setB, arrayBC] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSuperset.Seq.Box25",
+    runFunction: { n in run_SetIsStrictSupersetSeqBox(setOB, arrayOBC, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOB, arrayOBC] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSuperset.Seq.Int50",
+    runFunction: { n in run_SetIsStrictSupersetSeqInt(setY, arrayYZ, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setY, arrayYZ] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isStrictSuperset.Seq.Int100",
+    runFunction: { n in run_SetIsStrictSupersetSeqInt(setP, arrayP, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setP, arrayP] as [Any]) }),
+
+  BenchmarkInfo(
     name: "Set.isDisjoint.Empty.Int",
     runFunction: { n in run_SetIsDisjointInt(setE, setAB, true, 5000 * n) },
     tags: [.validation, .api, .Set],
@@ -129,6 +371,16 @@ public let SetTests = [
     tags: [.validation, .api, .Set],
     setUpFunction: { blackHole([setOAB, setOCD]) }),
   BenchmarkInfo(
+    name: "Set.isDisjoint.Smaller.Int0",
+    runFunction: { n in run_SetIsDisjointIntCommutative(setAB, setCDS, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, setCDS]) }),
+  BenchmarkInfo(
+    name: "Set.isDisjoint.Smaller.Box0",
+    runFunction: { n in run_SetIsDisjointBoxCommutative(setOAB, setOCDS, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOAB, setOCDS]) }),
+  BenchmarkInfo(
     name: "Set.isDisjoint.Int25",
     runFunction: { n in run_SetIsDisjointInt(setB, setAB, false, 5000 * n) },
     tags: [.validation, .api, .Set],
@@ -148,6 +400,57 @@ public let SetTests = [
     runFunction: { n in run_SetIsDisjointInt(setP, setQ, false, 5000 * n) },
     tags: [.validation, .api, .Set],
     setUpFunction: { blackHole([setP, setQ]) }),
+
+  BenchmarkInfo(
+    name: "Set.isDisjoint.Seq.Empty.Int",
+    runFunction: { n in run_SetIsDisjointSeqInt(setE, arrayAB, true, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setE, arrayAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isDisjoint.Seq.Int.Empty",
+    runFunction: { n in run_SetIsDisjointSeqInt(setAB, arrayE, true, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, arrayE] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isDisjoint.Seq.Empty.Box",
+    runFunction: { n in run_SetIsDisjointSeqBox(setOE, arrayOAB, true, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOE, arrayOAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isDisjoint.Seq.Box.Empty",
+    runFunction: { n in run_SetIsDisjointSeqBox(setOAB, arrayOE, true, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOAB, arrayOE] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isDisjoint.Seq.Int0",
+    runFunction: { n in run_SetIsDisjointSeqInt(setAB, arrayCD, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, arrayCD] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isDisjoint.Seq.Box0",
+    runFunction: { n in run_SetIsDisjointSeqBox(setOAB, arrayOCD, true, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOAB, arrayOCD] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isDisjoint.Seq.Int25",
+    runFunction: { n in run_SetIsDisjointSeqInt(setB, arrayAB, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setB, arrayAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isDisjoint.Seq.Box25",
+    runFunction: { n in run_SetIsDisjointSeqBox(setOB, arrayOAB, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOB, arrayOAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isDisjoint.Seq.Int50",
+    runFunction: { n in run_SetIsDisjointSeqInt(setY, arrayXY, false, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setY, arrayXY] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.isDisjoint.Seq.Int100",
+    runFunction: { n in run_SetIsDisjointSeqInt(setP, arrayP, false, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setP, arrayP] as [Any]) }),
 
   BenchmarkInfo(
     name: "SetSymmetricDifferenceInt0",
@@ -210,6 +513,37 @@ public let SetTests = [
     runFunction: { n in run_SetIntersectionInt(setP, setQ, size, 10 * n) },
     tags: [.validation, .api, .Set],
     setUpFunction: { blackHole([setP, setQ]) }),
+
+  BenchmarkInfo(
+    name: "Set.intersection.Seq.Int0",
+    runFunction: { n in run_SetIntersectionSeqInt(setAB, arrayCD, 0, 10 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, arrayCD] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.intersection.Seq.Box0",
+    runFunction: { n in run_SetIntersectionSeqBox(setOAB, arrayOCD, 0, 10 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOAB, arrayOCD] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.intersection.Seq.Int25",
+    runFunction: { n in run_SetIntersectionSeqInt(setAB, arrayBC, countB, 10 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, arrayBC] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.intersection.Seq.Box25",
+    runFunction: { n in run_SetIntersectionSeqBox(setOAB, arrayOBC, countB, 10 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOAB, arrayOBC] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.intersection.Seq.Int50",
+    runFunction: { n in run_SetIntersectionSeqInt(setXY, arrayYZ, half, 10 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setXY, arrayYZ] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.intersection.Seq.Int100",
+    runFunction: { n in run_SetIntersectionSeqInt(setP, arrayP, size, 10 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setP, arrayP] as [Any]) }),
 
   BenchmarkInfo(
     name: "SetUnionInt0",
@@ -293,6 +627,98 @@ public let SetTests = [
     tags: [.validation, .api, .Set],
     setUpFunction: { blackHole([setP, setQ]) }),
 
+  BenchmarkInfo(
+    name: "Set.subtracting.Seq.Empty.Int",
+    runFunction: { n in run_SetSubtractingSeqInt(setE, arrayAB, 0, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setE, arrayAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.subtracting.Seq.Int.Empty",
+    runFunction: { n in run_SetSubtractingSeqInt(setAB, arrayE, countAB, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, arrayE] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.subtracting.Seq.Empty.Box",
+    runFunction: { n in run_SetSubtractingSeqBox(setOE, arrayOAB, 0, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOE, arrayOAB] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.subtracting.Seq.Box.Empty",
+    runFunction: { n in run_SetSubtractingSeqBox(setOAB, arrayOE, countAB, 5000 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOAB, arrayOE] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.subtracting.Seq.Int0",
+    runFunction: { n in run_SetSubtractingSeqInt(setAB, arrayCD, countAB, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, arrayCD] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.subtracting.Seq.Box0",
+    runFunction: { n in run_SetSubtractingSeqBox(setOAB, arrayOCD, countAB, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOAB, arrayOCD] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.subtracting.Seq.Int25",
+    runFunction: { n in run_SetSubtractingSeqInt(setAB, arrayBC, countA, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setAB, arrayBC] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.subtracting.Seq.Box25",
+    runFunction: { n in run_SetSubtractingSeqBox(setOAB, arrayOBC, countA, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setOAB, arrayOBC] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.subtracting.Seq.Int50",
+    runFunction: { n in run_SetSubtractingSeqInt(setXY, arrayYZ, half, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setXY, arrayYZ] as [Any]) }),
+  BenchmarkInfo(
+    name: "Set.subtracting.Seq.Int100",
+    runFunction: { n in run_SetSubtractingSeqInt(setP, arrayP, 0, 50 * n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { blackHole([setP, arrayP] as [Any]) }),
+
+    BenchmarkInfo(
+    name: "Set.filter.Int50.16k",
+    runFunction: { n in run_SetFilterInt50(n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { set(16_000) }),
+  BenchmarkInfo(
+    name: "Set.filter.Int50.20k",
+    runFunction: { n in run_SetFilterInt50(n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { set(20_000) }),
+  BenchmarkInfo(
+    name: "Set.filter.Int50.24k",
+    runFunction: { n in run_SetFilterInt50(n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { set(24_000) }),
+  BenchmarkInfo(
+    name: "Set.filter.Int50.28k",
+    runFunction: { n in run_SetFilterInt50(n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { set(28_000) }),
+  BenchmarkInfo(
+    name: "Set.filter.Int100.16k",
+    runFunction: { n in run_SetFilterInt100(n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { set(16_000) }),
+  BenchmarkInfo(
+    name: "Set.filter.Int100.20k",
+    runFunction: { n in run_SetFilterInt100(n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { set(20_000) }),
+  BenchmarkInfo(
+    name: "Set.filter.Int100.24k",
+    runFunction: { n in run_SetFilterInt100(n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { set(24_000) }),
+  BenchmarkInfo(
+    name: "Set.filter.Int100.28k",
+    runFunction: { n in run_SetFilterInt100(n) },
+    tags: [.validation, .api, .Set],
+    setUpFunction: { set(28_000) }),
+
   // Legacy benchmarks, kept for continuity with previous releases.
   BenchmarkInfo(
     name: "SetExclusiveOr", // ~"SetSymmetricDifferenceInt0"
@@ -329,7 +755,67 @@ public func run_SetIsSubsetInt(
   _ n: Int) {
   for _ in 0 ..< n {
     let isSubset = a.isSubset(of: identity(b))
-    CheckResults(isSubset == r)
+    check(isSubset == r)
+  }
+}
+
+@inline(never)
+public func run_SetIsSubsetSeqInt(
+  _ a: Set<Int>,
+  _ b: Array<Int>,
+  _ r: Bool,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let isSubset = a.isSubset(of: identity(b))
+    check(isSubset == r)
+  }
+}
+
+@inline(never)
+public func run_SetIsStrictSubsetInt(
+  _ a: Set<Int>,
+  _ b: Set<Int>,
+  _ r: Bool,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let isStrictSubset = a.isStrictSubset(of: identity(b))
+    check(isStrictSubset == r)
+  }
+}
+
+@inline(never)
+public func run_SetIsStrictSubsetSeqInt(
+  _ a: Set<Int>,
+  _ b: Array<Int>,
+  _ r: Bool,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let isStrictSubset = a.isStrictSubset(of: identity(b))
+    check(isStrictSubset == r)
+  }
+}
+
+@inline(never)
+public func run_SetIsSupersetSeqInt(
+  _ a: Set<Int>,
+  _ b: Array<Int>,
+  _ r: Bool,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let isSuperset = a.isSuperset(of: identity(b))
+    check(isSuperset == r)
+  }
+}
+
+@inline(never)
+public func run_SetIsStrictSupersetSeqInt(
+  _ a: Set<Int>,
+  _ b: Array<Int>,
+  _ r: Bool,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let isStrictSuperset = a.isStrictSuperset(of: identity(b))
+    check(isStrictSuperset == r)
   }
 }
 
@@ -341,7 +827,7 @@ public func run_SetSymmetricDifferenceInt(
   _ n: Int) {
   for _ in 0 ..< n {
     let diff = a.symmetricDifference(identity(b))
-    CheckResults(diff.count == r)
+    check(diff.count == r)
   }
 }
 
@@ -353,7 +839,7 @@ public func run_SetUnionInt(
   _ n: Int) {
   for _ in 0 ..< n {
     let or = a.union(identity(b))
-    CheckResults(or.count == r)
+    check(or.count == r)
   }
 }
 
@@ -365,7 +851,19 @@ public func run_SetIntersectionInt(
   _ n: Int) {
   for _ in 0 ..< n {
     let and = a.intersection(identity(b))
-    CheckResults(and.count == r)
+    check(and.count == r)
+  }
+}
+
+@inline(never)
+public func run_SetIntersectionSeqInt(
+  _ a: Set<Int>,
+  _ b: Array<Int>,
+  _ r: Int,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let and = a.intersection(identity(b))
+    check(and.count == r)
   }
 }
 
@@ -377,7 +875,19 @@ public func run_SetSubtractingInt(
   _ n: Int) {
   for _ in 0 ..< n {
     let and = a.subtracting(identity(b))
-    CheckResults(and.count == r)
+    check(and.count == r)
+  }
+}
+
+@inline(never)
+public func run_SetSubtractingSeqInt(
+  _ a: Set<Int>,
+  _ b: Array<Int>,
+  _ r: Int,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let and = a.subtracting(identity(b))
+    check(and.count == r)
   }
 }
 
@@ -389,8 +899,52 @@ public func run_SetIsDisjointInt(
     _ n: Int) {
     for _ in 0 ..< n {
         let isDisjoint = a.isDisjoint(with: identity(b))
-        CheckResults(isDisjoint == r)
+        check(isDisjoint == r)
     }
+}
+
+// Run isDisjoint Int switching the order of the two sets.  
+@inline(never)
+public func run_SetIsDisjointIntCommutative(
+    _ a: Set<Int>,
+    _ b: Set<Int>,
+    _ r: Bool,
+    _ n: Int) {
+    for _ in 0 ..< n {
+      let isDisjointA = a.isDisjoint(with: identity(b))
+      check(isDisjointA == r)
+  
+      let isDisjointB = b.isDisjoint(with: identity(a))
+      check(isDisjointB == r)
+    }
+}
+
+@inline(never)
+public func run_SetIsDisjointSeqInt(
+    _ a: Set<Int>,
+    _ b: Array<Int>,
+    _ r: Bool,
+    _ n: Int) {
+    for _ in 0 ..< n {
+        let isDisjoint = a.isDisjoint(with: identity(b))
+        check(isDisjoint == r)
+    }
+}
+
+@inline(never)
+public func run_SetFilterInt50(_ n: Int) {
+  for _ in 0 ..< n {
+    let half = set.filter { $0 % 2 == 0 }
+    check(set.count == half.count * 2)
+  }
+}
+
+@inline(never)
+public func run_SetFilterInt100(_ n: Int) {
+  for _ in 0 ..< n {
+    let copy = set.filter { _ in true }
+    check(set.count == copy.count)
+  }
 }
 
 class Box<T : Hashable> : Hashable {
@@ -417,7 +971,67 @@ func run_SetIsSubsetBox(
   _ n: Int) {
   for _ in 0 ..< n {
     let isSubset = a.isSubset(of: identity(b))
-    CheckResults(isSubset == r)
+    check(isSubset == r)
+  }
+}
+
+@inline(never)
+func run_SetIsSubsetSeqBox(
+  _ a: Set<Box<Int>>,
+  _ b: Array<Box<Int>>,
+  _ r: Bool,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let isSubset = a.isSubset(of: identity(b))
+    check(isSubset == r)
+  }
+}
+
+@inline(never)
+func run_SetIsStrictSubsetBox(
+  _ a: Set<Box<Int>>,
+  _ b: Set<Box<Int>>,
+  _ r: Bool,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let isStrictSubset = a.isStrictSubset(of: identity(b))
+    check(isStrictSubset == r)
+  }
+}
+
+@inline(never)
+func run_SetIsStrictSubsetSeqBox(
+  _ a: Set<Box<Int>>,
+  _ b: Array<Box<Int>>,
+  _ r: Bool,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let isStrictSubset = a.isStrictSubset(of: identity(b))
+    check(isStrictSubset == r)
+  }
+}
+
+@inline(never)
+func run_SetIsSupersetSeqBox(
+  _ a: Set<Box<Int>>,
+  _ b: Array<Box<Int>>,
+  _ r: Bool,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let isSuperset = a.isSuperset(of: identity(b))
+    check(isSuperset == r)
+  }
+}
+
+@inline(never)
+func run_SetIsStrictSupersetSeqBox(
+  _ a: Set<Box<Int>>,
+  _ b: Array<Box<Int>>,
+  _ r: Bool,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let isStrictSuperset = a.isStrictSuperset(of: identity(b))
+    check(isStrictSuperset == r)
   }
 }
 
@@ -429,7 +1043,7 @@ func run_SetSymmetricDifferenceBox(
   _ n: Int) {
   for _ in 0 ..< n {
     let diff = a.symmetricDifference(identity(b))
-    CheckResults(diff.count == r)
+    check(diff.count == r)
   }
 }
 
@@ -441,7 +1055,7 @@ func run_SetUnionBox(
   _ n: Int) {
   for _ in 0 ..< n {
     let or = a.union(identity(b))
-    CheckResults(or.count == r)
+    check(or.count == r)
   }
 }
 
@@ -453,7 +1067,19 @@ func run_SetIntersectionBox(
   _ n: Int) {
   for _ in 0 ..< n {
     let and = a.intersection(b)
-    CheckResults(and.count == r)
+    check(and.count == r)
+  }
+}
+
+@inline(never)
+func run_SetIntersectionSeqBox(
+  _ a: Set<Box<Int>>,
+  _ b: Array<Box<Int>>,
+  _ r: Int,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let and = a.intersection(identity(b))
+    check(and.count == r)
   }
 }
 
@@ -465,7 +1091,19 @@ func run_SetSubtractingBox(
   _ n: Int) {
   for _ in 0 ..< n {
     let and = a.subtracting(b)
-    CheckResults(and.count == r)
+    check(and.count == r)
+  }
+}
+
+@inline(never)
+func run_SetSubtractingSeqBox(
+  _ a: Set<Box<Int>>,
+  _ b: Array<Box<Int>>,
+  _ r: Int,
+  _ n: Int) {
+  for _ in 0 ..< n {
+    let and = a.subtracting(identity(b))
+    check(and.count == r)
   }
 }
 
@@ -477,6 +1115,34 @@ func run_SetIsDisjointBox(
     _ n: Int) {
     for _ in 0 ..< n {
         let isDisjoint = a.isDisjoint(with: identity(b))
-        CheckResults(isDisjoint == r)
+        check(isDisjoint == r)
+    }
+}
+
+// Run isDisjoint Box switching the order of the two sets.  
+@inline(never)
+func run_SetIsDisjointBoxCommutative(
+    _ a: Set<Box<Int>>,
+    _ b: Set<Box<Int>>,
+    _ r: Bool,
+    _ n: Int) {
+    for _ in 0 ..< n {
+        let isDisjointA = a.isDisjoint(with: identity(b))
+        check(isDisjointA == r)
+  
+        let isDisjointB = b.isDisjoint(with: identity(a))
+        check(isDisjointB == r)
+    }
+}
+
+@inline(never)
+func run_SetIsDisjointSeqBox(
+    _ a: Set<Box<Int>>,
+    _ b: Array<Box<Int>>,
+    _ r: Bool,
+    _ n: Int) {
+    for _ in 0 ..< n {
+        let isDisjoint = a.isDisjoint(with: identity(b))
+        check(isDisjoint == r)
     }
 }

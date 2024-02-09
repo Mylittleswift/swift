@@ -10,7 +10,6 @@ SET(SWIFT_SPHINX_PAPER_SIZE "letter"
   CACHE STRING "Paper size for generated documentation")
 
 SET(SPHINX_ARGS
-  -W
   -D latex_elements.papersize=${SWIFT_SPHINX_PAPER_SIZE}
   -d ${CMAKE_BINARY_DIR}/doctrees)
 
@@ -68,8 +67,9 @@ if (DOXYGEN_FOUND)
     add_dependencies(doxygen doxygen-swift)
   endif()
 
-  swift_install_in_component(dev
-      DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/doxygen/html"
-      DESTINATION "docs/html")
+  add_dependencies(dev doxygen-swift)
+  swift_install_in_component(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/doxygen/html"
+                             DESTINATION "docs/html"
+                             COMPONENT dev)
 endif()
 endif()

@@ -17,14 +17,17 @@
 
 #include "swift/Sema/SourceLoader.h"
 #include "swift/Subsystems.h"
+#include "swift/AST/ASTContext.h"
 #include "swift/AST/DiagnosticsSema.h"
 #include "swift/AST/Module.h"
-#include "swift/Parse/DelayedParsingCallbacks.h"
+#include "swift/AST/ModuleDependencies.h"
+#include "swift/AST/SourceFile.h"
 #include "swift/Parse/PersistentParserState.h"
 #include "swift/Basic/SourceManager.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/PrefixMapper.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include <system_error>
 
@@ -33,13 +36,20 @@ using namespace swift;
 // FIXME: Basically the same as SerializedModuleLoader.
 using FileOrError = llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>>;
 
-static FileOrError findModule(ASTContext &ctx, StringRef moduleID,
+static FileOrError findModule(ASTContext &ctx, Identifier moduleID,
                               SourceLoc importLoc) {
   llvm::SmallString<128> inputFilename;
+  // Find a module with an actual, physical name on disk, in case
+  // -module-alias is used (otherwise same).
+  //
+  // For example, if '-module-alias Foo=Bar' is passed in to the frontend,
+  // and a source file has 'import Foo', a module called Bar (real name)
+  // should be searched.
+  StringRef moduleNameRef = ctx.getRealModuleName(moduleID).str();
 
-  for (auto Path : ctx.SearchPathOpts.ImportSearchPaths) {
+  for (const auto &Path : ctx.SearchPathOpts.getImportSearchPaths()) {
     inputFilename = Path;
-    llvm::sys::path::append(inputFilename, moduleID);
+    llvm::sys::path::append(inputFilename, moduleNameRef);
     inputFilename.append(".swift");
     llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> FileBufOrErr =
       ctx.SourceMgr.getFileSystem()->getBufferForFile(inputFilename.str());
@@ -56,52 +66,51 @@ static FileOrError findModule(ASTContext &ctx, StringRef moduleID,
   return make_error_code(std::errc::no_such_file_or_directory);
 }
 
-namespace {
+void SourceLoader::collectVisibleTopLevelModuleNames(
+    SmallVectorImpl<Identifier> &names) const {
+  // TODO: Implement?
+}
 
-/// Don't parse any function bodies except those that are transparent.
-class SkipNonTransparentFunctions : public DelayedParsingCallbacks {
-  bool shouldDelayFunctionBodyParsing(Parser &TheParser,
-                                      AbstractFunctionDecl *AFD,
-                                      const DeclAttributes &Attrs,
-                                      SourceRange BodyRange) override {
-    return Attrs.hasAttribute<TransparentAttr>();
-  }
-};
+bool SourceLoader::canImportModule(ImportPath::Module path,
+                                   ModuleVersionInfo *versionInfo,
+                                   bool isTestableDependencyLookup) {
+  // FIXME: Swift submodules?
+  if (path.hasSubmodule())
+    return false;
 
-} // unnamed namespace
-
-bool SourceLoader::canImportModule(std::pair<Identifier, SourceLoc> ID) {
+  auto ID = path[0];
   // Search the memory buffers to see if we can find this file on disk.
-  FileOrError inputFileOrError = findModule(Ctx, ID.first.str(),
-                                            ID.second);
+  FileOrError inputFileOrError = findModule(Ctx, ID.Item,
+                                            ID.Loc);
   if (!inputFileOrError) {
     auto err = inputFileOrError.getError();
     if (err != std::errc::no_such_file_or_directory) {
-      Ctx.Diags.diagnose(ID.second, diag::sema_opening_import,
-                         ID.first, err.message());
+      Ctx.Diags.diagnose(ID.Loc, diag::sema_opening_import,
+                         ID.Item, err.message());
     }
 
     return false;
   }
+
   return true;
 }
 
 ModuleDecl *SourceLoader::loadModule(SourceLoc importLoc,
-                                     ArrayRef<std::pair<Identifier,
-                                     SourceLoc>> path) {
+                                     ImportPath::Module path,
+                                     bool AllowMemoryCache) {
   // FIXME: Swift submodules?
   if (path.size() > 1)
     return nullptr;
 
   auto moduleID = path[0];
 
-  FileOrError inputFileOrError = findModule(Ctx, moduleID.first.str(),
-                                            moduleID.second);
+  FileOrError inputFileOrError = findModule(Ctx, moduleID.Item,
+                                            moduleID.Loc);
   if (!inputFileOrError) {
     auto err = inputFileOrError.getError();
     if (err != std::errc::no_such_file_or_directory) {
-      Ctx.Diags.diagnose(moduleID.second, diag::sema_opening_import,
-                         moduleID.first, err.message());
+      Ctx.Diags.diagnose(moduleID.Loc, diag::sema_opening_import,
+                         moduleID.Item, err.message());
     }
 
     return nullptr;
@@ -113,51 +122,29 @@ ModuleDecl *SourceLoader::loadModule(SourceLoc importLoc,
     dependencyTracker->addDependency(inputFile->getBufferIdentifier(),
                                      /*isSystem=*/false);
 
-  // Turn off debugging while parsing other modules.
-  llvm::SaveAndRestore<bool> turnOffDebug(Ctx.LangOpts.DebugConstraintSolver,
-                                          false);
-
   unsigned bufferID;
   if (auto BufID =
        Ctx.SourceMgr.getIDForBufferIdentifier(inputFile->getBufferIdentifier()))
-    bufferID = BufID.getValue();
+    bufferID = BufID.value();
   else
     bufferID = Ctx.SourceMgr.addNewSourceBuffer(std::move(inputFile));
 
-  auto *importMod = ModuleDecl::create(moduleID.first, Ctx);
+  ImplicitImportInfo importInfo;
+  importInfo.StdlibKind = Ctx.getStdlibModule() ? ImplicitStdlibKind::Stdlib
+                                                : ImplicitStdlibKind::None;
+
+  auto *importMod = ModuleDecl::create(moduleID.Item, Ctx, importInfo);
   if (EnableLibraryEvolution)
     importMod->setResilienceStrategy(ResilienceStrategy::Resilient);
-  Ctx.LoadedModules[moduleID.first] = importMod;
+  Ctx.addLoadedModule(importMod);
 
-  auto implicitImportKind = SourceFile::ImplicitModuleImportKind::Stdlib;
-  if (!Ctx.getStdlibModule())
-    implicitImportKind = SourceFile::ImplicitModuleImportKind::None;
-
-  auto *importFile = new (Ctx) SourceFile(*importMod, SourceFileKind::Library,
-                                          bufferID, implicitImportKind,
-                                          Ctx.LangOpts.CollectParsedToken,
-                                          Ctx.LangOpts.BuildSyntaxTree);
+  auto *importFile =
+      new (Ctx) SourceFile(*importMod, SourceFileKind::Library, bufferID,
+                           SourceFile::getDefaultParsingOptions(Ctx.LangOpts));
   importMod->addFile(*importFile);
-
-  bool done;
-  PersistentParserState persistentState(Ctx);
-  SkipNonTransparentFunctions delayCallbacks;
-  parseIntoSourceFile(*importFile, bufferID, &done, nullptr, &persistentState,
-                      SkipBodies ? &delayCallbacks : nullptr);
-  assert(done && "Parser returned early?");
-  (void)done;
-
-  if (SkipBodies)
-    performDelayedParsing(importMod, persistentState, nullptr);
-
-  // FIXME: Support recursive definitions in immediate modes by making type
-  // checking even lazier.
-  if (SkipBodies)
-    performNameBinding(*importFile);
-  else
-    performTypeChecking(*importFile, persistentState.getTopLevelContext(),
-                        None);
+  performImportResolution(*importFile);
   importMod->setHasResolvedImports();
+  bindExtensions(*importMod);
   return importMod;
 }
 
@@ -165,4 +152,17 @@ void SourceLoader::loadExtensions(NominalTypeDecl *nominal,
                                   unsigned previousGeneration) {
   // Type-checking the source automatically loads all extensions; there's
   // nothing to do here.
+}
+
+ModuleDependencyVector
+SourceLoader::getModuleDependencies(Identifier moduleName,
+                                    StringRef moduleOutputPath,
+                                    llvm::IntrusiveRefCntPtr<llvm::cas::CachingOnDiskFileSystem> CacheFS,
+                                    const llvm::DenseSet<clang::tooling::dependencies::ModuleID> &alreadySeenClangModules,
+                                    clang::tooling::dependencies::DependencyScanningTool &clangScanningTool,
+                                    InterfaceSubContextDelegate &delegate,
+                                    llvm::TreePathPrefixMapper* mapper,
+                                    bool isTestableImport) {
+  // FIXME: Implement?
+  return {};
 }

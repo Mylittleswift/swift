@@ -29,7 +29,6 @@
 // RUN: %target-run %t/main2 %t/%target-library-name(resilient_struct_wmo) %t/%target-library-name(resilient_class_wmo) %t/%target-library-name(fixed_layout_class_wmo)
 
 // REQUIRES: executable_test
-// REQUIRES: rdar49026933
 
 import StdlibUnittest
 
@@ -289,7 +288,7 @@ ResilientClassTestSuite.test("TypeByName") {
              == ChildOfOutsideParentWithResilientStoredProperty.self)
 }
 
-@_fixed_layout
+@frozen
 public struct Empty {}
 
 // rdar://48031465
@@ -325,8 +324,9 @@ ResilientClassTestSuite.test("ResilientThenEmpty") {
   expectEqual(c.resilient.i, 17)
 }
 
-// This test triggers SR-815 (rdar://problem/25318716) on macOS 10.9 and iOS 7.
-// Disable it for now when testing on those versions.
+// This test triggers https://github.com/apple/swift/issues/43427
+// (rdar://problem/25318716) on macOS 10.9 and iOS 7. Disable it for now when
+// testing on those versions.
 if #available(macOS 10.10, iOS 8, *) {
   runAllTests()
 } else {

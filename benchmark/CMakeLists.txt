@@ -1,6 +1,6 @@
 # -*- mode: cmake -*-
 
-cmake_minimum_required(VERSION 2.8.12)
+cmake_minimum_required(VERSION 3.19.6)
 
 # Add path for custom CMake modules.
 list(APPEND CMAKE_MODULE_PATH
@@ -37,12 +37,16 @@ set(SWIFT_BENCH_MODULES
     single-source/ArrayOfGenericRef
     single-source/ArrayOfPOD
     single-source/ArrayOfRef
+    single-source/ArrayRemoveAll
     single-source/ArraySetElement
     single-source/ArraySubscript
     single-source/BinaryFloatingPointConversionFromBinaryInteger
     single-source/BinaryFloatingPointProperties
     single-source/BitCount
     single-source/Breadcrumbs
+    single-source/BucketSort
+    single-source/BufferFill
+    single-source/BufferFind
     single-source/ByteSwap
     single-source/COWTree
     single-source/COWArrayGuaranteedParameterOverhead
@@ -50,16 +54,19 @@ set(SWIFT_BENCH_MODULES
     single-source/CSVParsing
     single-source/Calculator
     single-source/CaptureProp
+    single-source/ChaCha
     single-source/ChainedFilterMap
     single-source/CharacterLiteralsLarge
     single-source/CharacterLiteralsSmall
     single-source/CharacterProperties
+    single-source/CharacterRecognizer
     single-source/Chars
     single-source/ClassArrayGetter
-    single-source/Codable
+    single-source/CodableTest
     single-source/Combos
     single-source/DataBenchmarks
     single-source/DeadArray
+    single-source/DevirtualizeProtocolComposition
     single-source/DictOfArraysToArrayOfDicts
     single-source/DictTest
     single-source/DictTest2
@@ -72,11 +79,14 @@ set(SWIFT_BENCH_MODULES
     single-source/DictionaryCopy
     single-source/DictionaryGroup
     single-source/DictionaryKeysContains
-    single-source/DictionaryLiteral
+    single-source/DictionaryLiteralTest
     single-source/DictionaryOfAnyHashableStrings
     single-source/DictionaryRemove
     single-source/DictionarySubscriptDefault
     single-source/DictionarySwap
+    single-source/Differentiation
+    single-source/Diffing
+    single-source/DiffingMyers
     single-source/DropFirst
     single-source/DropLast
     single-source/DropWhile
@@ -84,27 +94,37 @@ set(SWIFT_BENCH_MODULES
     single-source/Exclusivity
     single-source/ExistentialPerformance
     single-source/Fibonacci
+    single-source/FindStringNaive
     single-source/FlattenList
+    single-source/FloatingPointConversion
+    single-source/FloatingPointParsing
     single-source/FloatingPointPrinting
     single-source/Hanoi
     single-source/Hash
     single-source/Histogram
-    single-source/InsertCharacter  
+    single-source/HTTP2StateMachine
+    single-source/IndexPathTest
+    single-source/InsertCharacter
+    single-source/IntegerParsing
     single-source/Integrate
     single-source/IterateData
     single-source/Join
+    single-source/KeyPathPerformanceTests
     single-source/LazyFilter
     single-source/LinkedList
     single-source/LuhnAlgoEager
     single-source/LuhnAlgoLazy
     single-source/MapReduce
     single-source/Memset
+    single-source/MirrorTest
     single-source/MonteCarloE
     single-source/MonteCarloPi
     single-source/NSDictionaryCastToSwift
-    single-source/NSError
+    single-source/NSErrorTest
     single-source/NSStringConversion
+    single-source/NaiveRangeReplaceableCollectionConformance
     single-source/NibbleSort
+    single-source/NIOChannelPipeline
     single-source/NopDeinit
     single-source/ObjectAllocation
     single-source/ObjectiveCBridging
@@ -124,13 +144,16 @@ set(SWIFT_BENCH_MODULES
     single-source/Prefix
     single-source/PrefixWhile
     single-source/Prims
+    single-source/PrimsNonStrongRef
+    single-source/ProtocolConformance
     single-source/ProtocolDispatch
     single-source/ProtocolDispatch2
-    single-source/Queue
+    single-source/QueueTest
     single-source/RC4
     single-source/RGBHistogram
     single-source/Radix2CooleyTukey
     single-source/RandomShuffle
+    single-source/RandomTree
     single-source/RandomValues
     single-source/RangeAssignment
     single-source/RangeIteration
@@ -141,10 +164,15 @@ set(SWIFT_BENCH_MODULES
     single-source/RemoveWhere
     single-source/ReversedCollections
     single-source/RomanNumbers
+    single-source/SIMDRandomMask
+    single-source/SIMDReduceInteger
+    # Disabled while layout prespecializations are experimental
+    #single-source/SimpleArraySpecialization
     single-source/SequenceAlgos
     single-source/SetTests
     single-source/SevenBoom
     single-source/Sim2DArray
+    single-source/SortArrayInClass
     single-source/SortIntPyramids
     single-source/SortLargeExistentials
     single-source/SortLettersInPlace
@@ -155,22 +183,33 @@ set(SWIFT_BENCH_MODULES
     single-source/StrToInt
     single-source/StringBuilder
     single-source/StringComparison
+    single-source/StringDistance
     single-source/StringEdits
     single-source/StringEnum
     single-source/StringInterpolation
     single-source/StringMatch
     single-source/StringRemoveDupes
+    single-source/StringRepeating
+    single-source/StringReplaceSubrange
+    single-source/StringSplitting
+    single-source/StringSwitch
     single-source/StringTests
     single-source/StringWalk
-    single-source/Substring
+    single-source/SubstringTest
     single-source/Suffix
     single-source/SuperChars
     single-source/TwoSum
     single-source/TypeFlood
     single-source/UTF8Decode
+    single-source/UTF16Decode
     single-source/Walsh
     single-source/WordCount
     single-source/XorLoop
+    cxx-source/CreateObjects
+    cxx-source/CxxSetToCollection
+    cxx-source/CxxStringConversion
+    cxx-source/CxxVectorSum
+    cxx-source/ReadAccessor
 )
 
 set(SWIFT_MULTISOURCE_SWIFT_BENCHES
@@ -188,6 +227,8 @@ endif()
 
 set(BENCH_LIBRARY_MODULES
     utils/TestsUtils
+    # Disabled while layout prespecializations are experimental
+    #utils/SimpleArray
 )
 
 set(BENCH_DRIVER_LIBRARY_MODULES
@@ -214,6 +255,9 @@ endif()
 set(SWIFT_BENCHMARK_EXTRA_FLAGS "" CACHE STRING
     "Extra options to pass to swiftc when building the benchmarks")
 
+set(SWIFT_BENCHMARK_UNOPTIMIZED_DRIVER NO CACHE BOOL
+    "Build the benchmark driver utilities without optimization (default: no)")
+
 if (SWIFT_BENCHMARK_BUILT_STANDALONE)
   # This option's value must match the value of the same option used when
   # building the swift runtime.
@@ -237,6 +281,10 @@ option(SWIFT_BENCHMARK_GENERATE_OPT_VIEW
 set(SWIFT_BENCHMARK_OPT_VIEWER "" CACHE FILEPATH
   "Path to opt-viewer")
 
+option(SWIFT_BENCHMARK_GENERATE_DEBUG_INFO
+  "Produce debug info for benchmarks"
+  TRUE)
+
 if(SWIFT_BENCHMARK_OPT_VIEWER)
   # If the path to the opt-viewer was specified manually and we have no access
   # to the LLVM tree, assume we have the modules for the opt-viewer installed.
@@ -253,6 +301,10 @@ set(BENCHOPTS_MULTITHREADED
     "-whole-module-optimization" "-num-threads" "4")
 set(BENCHOPTS_SINGLEFILE "")
 
+option(SWIFT_BENCHMARK_USE_OS_LIBRARIES
+  "Runtime link against the Swift libraries on the target (/usr/lib/swift)."
+  FALSE)
+
 configure_build()
 
 #===-----------------------------------------------------------------------===#
@@ -268,10 +320,18 @@ configure_sdks()
 message("--")
 message("-- Swift Benchmark Suite:")
 message("--   SWIFT_BENCHMARK_BUILT_STANDALONE = ${SWIFT_BENCHMARK_BUILT_STANDALONE}")
-message("--   SWIFT_EXEC = ${SWIFT_EXEC}")
-message("--   SWIFT_BENCHMARK_EXTRA_FLAGS = ${SWIFT_BENCHMARK_EXTRA_FLAGS}")
+message("--   SWIFT_BENCHMARK_USE_OS_LIBRARIES = ${SWIFT_BENCHMARK_USE_OS_LIBRARIES}")
+message("--   SWIFT_EXEC         = ${SWIFT_EXEC}")
 message("--   SWIFT_LIBRARY_PATH = ${SWIFT_LIBRARY_PATH}")
-message("--   CLANG_EXEC = ${CLANG_EXEC}")
+if (SWIFT_RPATH_BASE)
+message("--   SWIFT_RPATH_BASE   = ${SWIFT_RPATH_BASE}")
+endif()
+if (SWIFT_RPATH)
+message("--   SWIFT_RPATH        = ${SWIFT_RPATH}")
+message("---  ** WARNING ** Benchmarking against Swift-in-the-OS")
+endif()
+message("--   CLANG_EXEC         = ${CLANG_EXEC}")
+message("--   SWIFT_BENCHMARK_EXTRA_FLAGS = ${SWIFT_BENCHMARK_EXTRA_FLAGS}")
 message("--   SWIFT_OPTIMIZATION_LEVELS = ${SWIFT_OPTIMIZATION_LEVELS}")
 message("--   ONLY_PLATFORMS = ${ONLY_PLATFORMS}")
 message("--   PAGE_ALIGNMENT_OPTION = ${PAGE_ALIGNMENT_OPTION}")

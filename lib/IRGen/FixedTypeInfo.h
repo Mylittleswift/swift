@@ -42,10 +42,12 @@ private:
 protected:
   FixedTypeInfo(llvm::Type *type, Size size,
                 const SpareBitVector &spareBits,
-                Alignment align, IsPOD_t pod, IsBitwiseTakable_t bt,
+                Alignment align, IsTriviallyDestroyable_t pod,
+                IsBitwiseTakable_t bt,
+                IsCopyable_t copy,
                 IsFixedSize_t alwaysFixedSize,
                 SpecialTypeInfoKind stik = SpecialTypeInfoKind::Fixed)
-      : TypeInfo(type, align, pod, bt, alwaysFixedSize, IsABIAccessible, stik),
+      : TypeInfo(type, align, pod, bt, copy, alwaysFixedSize, IsABIAccessible, stik),
         SpareBits(spareBits) {
     assert(SpareBits.size() == size.getValueInBits());
     assert(isFixedSize());
@@ -55,10 +57,12 @@ protected:
 
   FixedTypeInfo(llvm::Type *type, Size size,
                 SpareBitVector &&spareBits,
-                Alignment align, IsPOD_t pod, IsBitwiseTakable_t bt,
+                Alignment align, IsTriviallyDestroyable_t pod,
+                IsBitwiseTakable_t bt,
+                IsCopyable_t copy,
                 IsFixedSize_t alwaysFixedSize,
                 SpecialTypeInfoKind stik = SpecialTypeInfoKind::Fixed)
-      : TypeInfo(type, align, pod, bt, alwaysFixedSize, IsABIAccessible, stik),
+      : TypeInfo(type, align, pod, bt, copy, alwaysFixedSize, IsABIAccessible, stik),
         SpareBits(std::move(spareBits)) {
     assert(SpareBits.size() == size.getValueInBits());
     assert(isFixedSize());
@@ -78,6 +82,8 @@ public:
 
   StackAddress allocateStack(IRGenFunction &IGF, SILType T,
                              const llvm::Twine &name) const override;
+  StackAddress allocateVector(IRGenFunction &IGF, SILType T,
+                              llvm::Value *capacity, const Twine &name) const override;
   void deallocateStack(IRGenFunction &IGF, StackAddress addr, SILType T) const override;
   void destroyStack(IRGenFunction &IGF, StackAddress addr, SILType T,
                     bool isOutlined) const override;
@@ -90,7 +96,7 @@ public:
   llvm::Value *getSize(IRGenFunction &IGF, SILType T) const override;
   llvm::Value *getAlignmentMask(IRGenFunction &IGF, SILType T) const override;
   llvm::Value *getStride(IRGenFunction &IGF, SILType T) const override;
-  llvm::Value *getIsPOD(IRGenFunction &IGF, SILType T) const override;
+  llvm::Value *getIsTriviallyDestroyable(IRGenFunction &IGF, SILType T) const override;
   llvm::Value *getIsBitwiseTakable(IRGenFunction &IGF, SILType T) const override;
   llvm::Value *isDynamicallyPackedInline(IRGenFunction &IGF,
                                          SILType T) const override;
@@ -147,7 +153,7 @@ public:
 
   /// Get the bit mask that must be applied before testing an extra inhabitant.
   virtual APInt getFixedExtraInhabitantMask(IRGenModule &IGM) const {
-    return APInt::getAllOnesValue(getFixedSize().getValueInBits());
+    return APInt::getAllOnes(getFixedSize().getValueInBits());
   }
 
   /// Create a constant of the given bit width holding one of the extra
@@ -213,19 +219,11 @@ public:
   ///   SpareBitVector spareBits;
   ///   for (EnumElementDecl *elt : u->getAllElements())
   ///     getFragileTypeInfo(elt->getArgumentType())
-  ///       .applyFixedSpareBitsMask(spareBits, 0);
+  ///       .applyFixedSpareBitsMask(IGM, spareBits);
   ///
   /// and end up with a spare bits mask for the entire enum.
-  void applyFixedSpareBitsMask(SpareBitVector &mask) const;
-  
-  /// Applies a fixed spare bits mask to the given BitVector,
-  /// clearing any bits used by valid representations of the type.
-  ///
-  /// If the bitvector is empty or smaller than this type, it is grown and
-  /// filled with bits direct from the spare bits mask. If the bitvector is
-  /// larger than this type, the trailing bits are untouched.
-  static void applyFixedSpareBitsMask(SpareBitVector &mask,
-                                      const SpareBitVector &spareBits);
+  void applyFixedSpareBitsMask(const IRGenModule &IGM,
+                               SpareBitVector &mask) const;
 
   void collectMetadataForOutlining(OutliningMetadataCollector &collector,
                                    SILType T) const override {
@@ -247,11 +245,32 @@ public:
   static bool classof(const TypeInfo *type) { return type->isFixedSize(); }
 };
 
+llvm::Value *getFixedTypeEnumTagSinglePayload(
+    IRGenFunction &IGF, llvm::Value *numEmptyCases, Address enumAddr,
+    llvm::Value *size, Size fixedSize, unsigned fixedExtraInhabitantCount,
+    llvm::function_ref<llvm::Value *(Address)> getExtraInhabitantIndex,
+    bool isOutlined);
+
 llvm::Value *getFixedTypeEnumTagSinglePayload(IRGenFunction &IGF,
                                               const FixedTypeInfo &fixedTI,
                                               llvm::Value *numEmptyCases,
                                               Address enumAddr,
                                               SILType T, bool isOutlined);
+void storeFixedTypeEnumTagSinglePayload(
+    IRGenFunction &IGF, llvm::Value *whichCase, llvm::Value *numEmptyCases,
+    Address enumAddr, llvm::Value *size, Size fixedSize,
+    unsigned fixedExtraInhabitantCount,
+    llvm::function_ref<void(llvm::Value *, Address)> storeExtraInhabitant,
+    bool isOutlined);
+
+llvm::Value *emitLoad1to4Bytes(IRGenFunction &IGF, Address from,
+                               llvm::Value *size);
+void emitStore1to4Bytes(IRGenFunction &IGF, Address to, llvm::Value *val,
+                        llvm::Value *size);
+
+llvm::Value *emitGetTag(IRGenFunction &IGF, Address from, llvm::Value *size);
+void emitSetTag(IRGenFunction &IGF, Address to, llvm::Value *val,
+                llvm::Value *size);
 
 void storeFixedTypeEnumTagSinglePayload(IRGenFunction &IGF,
                                         const FixedTypeInfo &fixedTI,

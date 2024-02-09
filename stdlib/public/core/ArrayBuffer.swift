@@ -23,8 +23,15 @@ internal typealias _ArrayBridgeStorage
   = _BridgeStorage<__ContiguousArrayStorageBase>
 
 @usableFromInline
-@_fixed_layout
-internal struct _ArrayBuffer<Element> : _ArrayBufferProtocol {
+@frozen
+internal struct _ArrayBuffer<Element>: _ArrayBufferProtocol {
+  @usableFromInline
+  internal var _storage: _ArrayBridgeStorage
+
+  @inlinable
+  internal init(storage: _ArrayBridgeStorage) {
+    _storage = storage
+  }
 
   /// Create an empty buffer.
   @inlinable
@@ -74,15 +81,6 @@ internal struct _ArrayBuffer<Element> : _ArrayBufferProtocol {
     // NSArray's need an element typecheck when the element type isn't AnyObject
     return !_isNativeTypeChecked && !(AnyObject.self is Element.Type)
   }
-  
-  //===--- private --------------------------------------------------------===//
-  @inlinable
-  internal init(storage: _ArrayBridgeStorage) {
-    _storage = storage
-  }
-
-  @usableFromInline
-  internal var _storage: _ArrayBridgeStorage
 }
 
 extension _ArrayBuffer {
@@ -99,22 +97,58 @@ extension _ArrayBuffer {
     return _isNativeTypeChecked
   }
 
-  /// Returns `true` iff this buffer's storage is uniquely-referenced.
+  /// Returns `true` if this buffer's storage is uniquely referenced;
+  /// otherwise, returns `false`.
+  ///
+  /// This function should only be used for internal soundness checks.
+  /// To guard a buffer mutation, use `beginCOWMutation`.
   @inlinable
   internal mutating func isUniquelyReferenced() -> Bool {
     if !_isClassOrObjCExistential(Element.self) {
       return _storage.isUniquelyReferencedUnflaggedNative()
     }
-
-    // This is a performance optimization. This code used to be:
-    //
-    //   return _storage.isUniquelyReferencedNative() && _isNative.
-    //
-    // SR-6437
-    if !_storage.isUniquelyReferencedNative() {
+    return _storage.isUniquelyReferencedNative()
+   }
+  
+  /// Returns `true` and puts the buffer in a mutable state if the buffer's
+  /// storage is uniquely-referenced; otherwise performs no action and
+  /// returns `false`.
+  ///
+  /// - Precondition: The buffer must be immutable.
+  ///
+  /// - Warning: It's a requirement to call `beginCOWMutation` before the buffer
+  ///   is mutated.
+  @_alwaysEmitIntoClient
+  internal mutating func beginCOWMutation() -> Bool {
+    let isUnique: Bool
+    if !_isClassOrObjCExistential(Element.self) {
+      isUnique = _storage.beginCOWMutationUnflaggedNative()
+    } else if !_storage.beginCOWMutationNative() {
       return false
+    } else {
+      isUnique = _isNative
     }
-    return _isNative
+#if INTERNAL_CHECKS_ENABLED && COW_CHECKS_ENABLED
+    if isUnique {
+      _native.isImmutable = false
+    }
+#endif
+    return isUnique
+  }
+  
+  /// Puts the buffer in an immutable state.
+  ///
+  /// - Precondition: The buffer must be mutable or the empty array singleton.
+  ///
+  /// - Warning: After a call to `endCOWMutation` the buffer must not be mutated
+  ///   until the next call of `beginCOWMutation`.
+  @_alwaysEmitIntoClient
+  @inline(__always)
+  internal mutating func endCOWMutation() {
+#if INTERNAL_CHECKS_ENABLED && COW_CHECKS_ENABLED
+    _native.isImmutable = true
+#endif
+    _storage.endCOWMutation()
   }
 
   /// Convert to an NSArray.
@@ -123,6 +157,60 @@ extension _ArrayBuffer {
   @inlinable
   internal func _asCocoaArray() -> AnyObject {
     return _fastPath(_isNative) ? _native._asCocoaArray() : _nonNative.buffer
+  }
+
+  /// Creates and returns a new uniquely referenced buffer which is a copy of
+  /// this buffer.
+  ///
+  /// This buffer is consumed, i.e. it's released.
+  @_alwaysEmitIntoClient
+  @inline(never)
+  @_semantics("optimize.sil.specialize.owned2guarantee.never")
+  internal __consuming func _consumeAndCreateNew() -> _ArrayBuffer {
+    return _consumeAndCreateNew(bufferIsUnique: false,
+                                minimumCapacity: count,
+                                growForAppend: false)
+  }
+
+  /// Creates and returns a new uniquely referenced buffer which is a copy of
+  /// this buffer.
+  ///
+  /// If `bufferIsUnique` is true, the buffer is assumed to be uniquely
+  /// referenced and the elements are moved - instead of copied - to the new
+  /// buffer.
+  /// The `minimumCapacity` is the lower bound for the new capacity.
+  /// If `growForAppend` is true, the new capacity is calculated using
+  /// `_growArrayCapacity`, but at least kept at `minimumCapacity`.
+  ///
+  /// This buffer is consumed, i.e. it's released.
+  @_alwaysEmitIntoClient
+  @inline(never)
+  @_semantics("optimize.sil.specialize.owned2guarantee.never")
+  internal __consuming func _consumeAndCreateNew(
+    bufferIsUnique: Bool, minimumCapacity: Int, growForAppend: Bool
+  ) -> _ArrayBuffer {
+    let newCapacity = _growArrayCapacity(oldCapacity: capacity,
+                                         minimumCapacity: minimumCapacity,
+                                         growForAppend: growForAppend)
+    let c = count
+    _internalInvariant(newCapacity >= c)
+    
+    let newBuffer = _ContiguousArrayBuffer<Element>(
+      _uninitializedCount: c, minimumCapacity: newCapacity)
+
+    if bufferIsUnique {
+      // As an optimization, if the original buffer is unique, we can just move
+      // the elements instead of copying.
+      let dest = newBuffer.firstElementAddress
+      dest.moveInitialize(from: mutableFirstElementAddress,
+                          count: c)
+      _native.mutableCount = 0
+    } else {
+      _copyContents(
+        subRange: 0..<c,
+        initializing: newBuffer.mutableFirstElementAddress)
+    }
+    return _ArrayBuffer(_buffer: newBuffer, shiftedToStartIndex: 0)
   }
 
   /// If this buffer is backed by a uniquely-referenced mutable
@@ -134,7 +222,7 @@ extension _ArrayBuffer {
   -> NativeBuffer? {
     if _fastPath(isUniquelyReferenced()) {
       let b = _native
-      if _fastPath(b.capacity >= minimumCapacity) {
+      if _fastPath(b.mutableCapacity >= minimumCapacity) {
         return b
       }
     }
@@ -166,23 +254,29 @@ extension _ArrayBuffer {
   internal func _typeCheckSlowPath(_ index: Int) {
     if _fastPath(_isNative) {
       let element: AnyObject = cast(toBufferOf: AnyObject.self)._native[index]
-      precondition(
-        element is Element,
-        """
-        Down-casted Array element failed to match the target type
-        Expected \(Element.self) but found \(type(of: element))
-        """
-      )
+      guard element is Element else {
+        _assertionFailure(
+          "Fatal error",
+          """
+          Down-casted Array element failed to match the target type
+          Expected \(Element.self) but found \(type(of: element))
+          """,
+          flags: _fatalErrorFlags()
+        )
+      }
     }
     else {
       let element = _nonNative[index]
-      precondition(
-        element is Element,
-        """
-        NSArray element failed to match the Swift Array Element type
-        Expected \(Element.self) but found \(type(of: element))
-        """
-      )
+      guard element is Element else {
+        _assertionFailure(
+          "Fatal error",
+          """
+          NSArray element failed to match the Swift Array Element type
+          Expected \(Element.self) but found \(type(of: element))
+          """,
+          flags: _fatalErrorFlags()
+        )
+      }
     }
   }
 
@@ -223,12 +317,20 @@ extension _ArrayBuffer {
     return UnsafeMutableRawPointer(result).assumingMemoryBound(to: Element.self)
   }
 
-  public __consuming func _copyContents(
+  @inlinable
+  internal __consuming func _copyContents(
     initializing buffer: UnsafeMutableBufferPointer<Element>
-  ) -> (Iterator,UnsafeMutableBufferPointer<Element>.Index) {
-    // This customization point is not implemented for internal types.
-    // Accidentally calling it would be a catastrophic performance bug.
-    fatalError("unsupported")
+  ) -> (Iterator, UnsafeMutableBufferPointer<Element>.Index) {
+    if _fastPath(_isNative) {
+      let (_, c) = _native._copyContents(initializing: buffer)
+      return (IndexingIterator(_elements: self, _position: c), c)
+    }
+    guard buffer.count > 0 else { return (makeIterator(), 0) }
+    let ptr = UnsafeMutableRawPointer(buffer.baseAddress)?
+      .assumingMemoryBound(to: AnyObject.self)
+    let (_, c) = _nonNative._copyContents(
+      initializing: UnsafeMutableBufferPointer(start: ptr, count: buffer.count))
+    return (IndexingIterator(_elements: self, _position: c), c)
   }
 
   /// Returns a `_SliceBuffer` containing the given sub-range of elements in
@@ -256,21 +358,61 @@ extension _ArrayBuffer {
     return _native.firstElementAddress
   }
 
+  /// A mutable pointer to the first element.
+  ///
+  /// - Precondition: the buffer must be mutable.
+  @_alwaysEmitIntoClient
+  internal var mutableFirstElementAddress: UnsafeMutablePointer<Element> {
+    _internalInvariant(_isNative, "must be a native buffer")
+    return _native.mutableFirstElementAddress
+  }
+
   @inlinable
   internal var firstElementAddressIfContiguous: UnsafeMutablePointer<Element>? {
     return _fastPath(_isNative) ? firstElementAddress : nil
   }
 
   /// The number of elements the buffer stores.
+  ///
+  /// This property is obsolete. It's only used for the ArrayBufferProtocol and
+  /// to keep backward compatibility.
+  /// Use `immutableCount` or `mutableCount` instead.
   @inlinable
   internal var count: Int {
     @inline(__always)
     get {
-      return _fastPath(_isNative) ? _native.count : _nonNative.count
+      return _fastPath(_isNative) ? _native.count : _nonNative.endIndex
     }
     set {
       _internalInvariant(_isNative, "attempting to update count of Cocoa array")
       _native.count = newValue
+    }
+  }
+  
+  /// The number of elements of the buffer.
+  ///
+  /// - Precondition: The buffer must be immutable.
+  @_alwaysEmitIntoClient
+  internal var immutableCount: Int {
+    return _fastPath(_isNative) ? _native.immutableCount : _nonNative.endIndex
+  }
+
+  /// The number of elements of the buffer.
+  ///
+  /// - Precondition: The buffer must be mutable.
+  @_alwaysEmitIntoClient
+  internal var mutableCount: Int {
+    @inline(__always)
+    get {
+      _internalInvariant(
+        _isNative,
+        "attempting to get mutating-count of non-native buffer")
+      return _native.mutableCount
+    }
+    @inline(__always)
+    set {
+      _internalInvariant(_isNative, "attempting to update count of Cocoa array")
+      _native.mutableCount = newValue
     }
   }
 
@@ -280,6 +422,9 @@ extension _ArrayBuffer {
   /// wasNative == _isNative in the absence of inout violations.
   /// Because the optimizer can hoist the original check it might have
   /// been invalidated by illegal user code.
+  ///
+  /// This function is obsolete but must stay in the library for backward
+  /// compatibility.
   @inlinable
   internal func _checkInoutAndNativeBounds(_ index: Int, wasNative: Bool) {
     _precondition(
@@ -291,14 +436,15 @@ extension _ArrayBuffer {
     }
   }
 
-  // TODO: gyb this
-  
   /// Traps if an inout violation is detected or if the buffer is
   /// native and typechecked and the subscript is out of range.
   ///
   /// wasNativeTypeChecked == _isNativeTypeChecked in the absence of
   /// inout violations.  Because the optimizer can hoist the original
   /// check it might have been invalidated by illegal user code.
+  ///
+  /// This function is obsolete but must stay in the library for backward
+  /// compatibility.
   @inlinable
   internal func _checkInoutAndNativeTypeCheckedBounds(
     _ index: Int, wasNativeTypeChecked: Bool
@@ -312,10 +458,40 @@ extension _ArrayBuffer {
     }
   }
 
+  /// Traps unless the given `index` is valid for subscripting, i.e.
+  /// `0 ≤ index < count`.
+  ///
+  /// - Precondition: The buffer must be mutable.
+  @_alwaysEmitIntoClient
+  internal func _checkValidSubscriptMutating(_ index: Int) {
+    _native._checkValidSubscriptMutating(index)
+  }
+
   /// The number of elements the buffer can store without reallocation.
+  ///
+  /// This property is obsolete. It's only used for the ArrayBufferProtocol and
+  /// to keep backward compatibility.
+  /// Use `immutableCapacity` or `mutableCapacity` instead.
   @inlinable
   internal var capacity: Int {
-    return _fastPath(_isNative) ? _native.capacity : _nonNative.count
+    return _fastPath(_isNative) ? _native.capacity : _nonNative.endIndex
+  }
+
+  /// The number of elements the buffer can store without reallocation.
+  ///
+  /// - Precondition: The buffer must be immutable.
+  @_alwaysEmitIntoClient
+  internal var immutableCapacity: Int {
+    return _fastPath(_isNative) ? _native.immutableCapacity : _nonNative.count
+  }
+  
+  /// The number of elements the buffer can store without reallocation.
+  ///
+  /// - Precondition: The buffer must be mutable.
+  @_alwaysEmitIntoClient
+  internal var mutableCapacity: Int {
+    _internalInvariant(_isNative, "attempting to get mutating-capacity of non-native buffer")
+    return _native.mutableCapacity
   }
 
   @inlinable
@@ -329,6 +505,8 @@ extension _ArrayBuffer {
 
   @inline(never)
   @inlinable // @specializable
+  @_effects(notEscaping self.value**)
+  @_effects(escaping self.value**.class*.value** => return.value**)
   internal func _getElementSlowPath(_ i: Int) -> AnyObject {
     _internalInvariant(
       _isClassOrObjCExistential(Element.self),
@@ -341,23 +519,29 @@ extension _ArrayBuffer {
       _native._checkValidSubscript(i)
       
       element = cast(toBufferOf: AnyObject.self)._native[i]
-      precondition(
-        element is Element,
-        """
-        Down-casted Array element failed to match the target type
-        Expected \(Element.self) but found \(type(of: element))
-        """
-      )
+      guard element is Element else {
+        _assertionFailure(
+          "Fatal error",
+          """
+          Down-casted Array element failed to match the target type
+          Expected \(Element.self) but found \(type(of: element))
+          """,
+          flags: _fatalErrorFlags()
+        )
+      }
     } else {
       // ObjC arrays do their own subscript checking.
       element = _nonNative[i]
-      precondition(
-        element is Element,
-        """
-        NSArray element failed to match the Swift Array Element type
-        Expected \(Element.self) but found \(type(of: element))
-        """
-      )
+      guard element is Element else {
+        _assertionFailure(
+          "Fatal error",
+          """
+          NSArray element failed to match the Swift Array Element type
+          Expected \(Element.self) but found \(type(of: element))
+          """,
+          flags: _fatalErrorFlags()
+        )
+      }
     }
     return element
   }
@@ -510,11 +694,13 @@ extension _ArrayBuffer {
 
   @inlinable
   internal var _nonNative: _CocoaArrayWrapper {
-    @inline(__always)
     get {
       _internalInvariant(_isClassOrObjCExistential(Element.self))
       return _CocoaArrayWrapper(_storage.objCInstance)
     }
   }
 }
+
+extension _ArrayBuffer: @unchecked Sendable
+  where Element: Sendable { }
 #endif

@@ -24,22 +24,20 @@ class ModuleDecl;
 class SourceLoader : public ModuleLoader {
 private:
   ASTContext &Ctx;
-  bool SkipBodies;
   bool EnableLibraryEvolution;
 
   explicit SourceLoader(ASTContext &ctx,
-                        bool skipBodies,
                         bool enableResilience,
                         DependencyTracker *tracker)
     : ModuleLoader(tracker), Ctx(ctx),
-      SkipBodies(skipBodies), EnableLibraryEvolution(enableResilience) {}
+      EnableLibraryEvolution(enableResilience) {}
 
 public:
   static std::unique_ptr<SourceLoader>
-  create(ASTContext &ctx, bool skipBodies, bool enableResilience,
+  create(ASTContext &ctx, bool enableResilience,
          DependencyTracker *tracker = nullptr) {
     return std::unique_ptr<SourceLoader>{
-      new SourceLoader(ctx, skipBodies, enableResilience, tracker)
+      new SourceLoader(ctx, enableResilience, tracker)
     };
   }
 
@@ -48,12 +46,22 @@ public:
   SourceLoader &operator=(const SourceLoader &) = delete;
   SourceLoader &operator=(SourceLoader &&) = delete;
 
+  /// Append visible module names to \p names. Note that names are possibly
+  /// duplicated, and not guaranteed to be ordered in any way.
+  void collectVisibleTopLevelModuleNames(
+      SmallVectorImpl<Identifier> &names) const override;
+
   /// Check whether the module with a given name can be imported without
   /// importing it.
   ///
   /// Note that even if this check succeeds, errors may still occur if the
   /// module is loaded in full.
-  virtual bool canImportModule(std::pair<Identifier, SourceLoc> named) override;
+  ///
+  /// If a non-null \p versionInfo is provided, the module version will be
+  /// parsed and populated.
+  virtual bool canImportModule(ImportPath::Module named,
+                               ModuleVersionInfo *versionInfo,
+                               bool isTestableDependencyLookup = false) override;
 
   /// Import a module with the given module path.
   ///
@@ -66,7 +74,8 @@ public:
   /// returns NULL.
   virtual ModuleDecl *
   loadModule(SourceLoc importLoc,
-             ArrayRef<std::pair<Identifier, SourceLoc>> path) override;
+             ImportPath::Module path,
+             bool AllowMemoryCache) override;
 
   /// Load extensions to the given nominal type.
   ///
@@ -79,7 +88,7 @@ public:
                               unsigned previousGeneration) override;
 
   virtual void loadObjCMethods(
-                 ClassDecl *classDecl,
+                 NominalTypeDecl *typeDecl,
                  ObjCSelector selector,
                  bool isInstanceMethod,
                  unsigned previousGeneration,
@@ -87,8 +96,16 @@ public:
   {
     // Parsing populates the Objective-C method tables.
   }
-};
 
+  llvm::SmallVector<std::pair<ModuleDependencyID, ModuleDependencyInfo>, 1>
+  getModuleDependencies(Identifier moduleName, StringRef moduleOutputPath,
+                        llvm::IntrusiveRefCntPtr<llvm::cas::CachingOnDiskFileSystem> CacheFS,
+                        const llvm::DenseSet<clang::tooling::dependencies::ModuleID> &alreadySeenClangModules,
+                        clang::tooling::dependencies::DependencyScanningTool &clangScanningTool,
+                        InterfaceSubContextDelegate &delegate,
+                        llvm::TreePathPrefixMapper *mapper,
+                        bool isTestableImport) override;
+};
 }
 
 #endif

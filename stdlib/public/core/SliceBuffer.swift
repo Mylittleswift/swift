@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2020 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -11,12 +11,17 @@
 //===----------------------------------------------------------------------===//
 
 /// Buffer type for `ArraySlice<Element>`.
-@_fixed_layout
+@frozen
 @usableFromInline
 internal struct _SliceBuffer<Element>
   : _ArrayBufferProtocol,
     RandomAccessCollection
 {
+  #if $Embedded
+  @usableFromInline
+  typealias AnyObject = Builtin.NativeObject
+  #endif
+
   internal typealias NativeStorage = _ContiguousArrayStorage<Element>
   @usableFromInline
   internal typealias NativeBuffer = _ContiguousArrayBuffer<Element>
@@ -67,7 +72,11 @@ internal struct _SliceBuffer<Element>
   @inlinable
   internal init() {
     let empty = _ContiguousArrayBuffer<Element>()
-    self.owner = empty.owner
+    #if $Embedded
+    self.owner = Builtin.castToNativeObject(_emptyArrayStorage)
+    #else
+    self.owner = _emptyArrayStorage
+    #endif
     self.subscriptBaseAddress = empty.firstElementAddress
     self.startIndex = empty.startIndex
     self.endIndexAndFlags = 1
@@ -87,7 +96,12 @@ internal struct _SliceBuffer<Element>
   @inlinable // FIXME(sil-serialize-all)
   internal func _invariantCheck() {
     let isNative = _hasNativeBuffer
-    let isNativeStorage: Bool = owner is __ContiguousArrayStorageBase
+    let isNativeStorage: Bool
+    #if !$Embedded
+    isNativeStorage = owner is __ContiguousArrayStorageBase
+    #else
+    isNativeStorage = true
+    #endif
     _internalInvariant(isNativeStorage == isNative)
     if isNative {
       _internalInvariant(count <= nativeBuffer.count)
@@ -102,8 +116,13 @@ internal struct _SliceBuffer<Element>
   @inlinable
   internal var nativeBuffer: NativeBuffer {
     _internalInvariant(_hasNativeBuffer)
+    #if !$Embedded
     return NativeBuffer(
       owner as? __ContiguousArrayStorageBase ?? _emptyArrayStorage)
+    #else
+    return NativeBuffer(unsafeBitCast(_nativeObject(toNative: owner),
+      to: __ContiguousArrayStorageBase.self))
+    #endif
   }
 
   @inlinable
@@ -116,17 +135,16 @@ internal struct _SliceBuffer<Element>
   /// the given collection.
   ///
   /// - Precondition: This buffer is backed by a uniquely-referenced
-  ///   `_ContiguousArrayBuffer` and
-  ///   `insertCount <= numericCast(newValues.count)`.
+  ///   `_ContiguousArrayBuffer` and `insertCount <= newValues.count`.
   @inlinable
   internal mutating func replaceSubrange<C>(
     _ subrange: Range<Int>,
     with insertCount: Int,
     elementsOf newValues: __owned C
-  ) where C : Collection, C.Element == Element {
+  ) where C: Collection, C.Element == Element {
 
     _invariantCheck()
-    _internalInvariant(insertCount <= numericCast(newValues.count))
+    _internalInvariant(insertCount <= newValues.count)
 
     _internalInvariant(_hasNativeBuffer)
     _internalInvariant(isUniquelyReferenced())
@@ -177,17 +195,9 @@ internal struct _SliceBuffer<Element>
     minimumCapacity: Int
   ) -> NativeBuffer? {
     _invariantCheck()
-    // This is a performance optimization that was put in to ensure that at
-    // -Onone, copy of self we make to call _hasNativeBuffer is destroyed before
-    // we call isUniquelyReferenced. Otherwise, isUniquelyReferenced will always
-    // fail causing us to always copy.
-    //
-    // if _fastPath(_hasNativeBuffer && isUniquelyReferenced) {
-    //
-    // SR-6437
-    let native = _hasNativeBuffer
-    let unique = isUniquelyReferenced()
-    if _fastPath(native && unique) {
+    // Note: with COW support it's already guaranteed to have a uniquely
+    // referenced buffer. This check is only needed for backward compatibility.
+    if _fastPath(isUniquelyReferenced()) {
       if capacity >= minimumCapacity {
         // Since we have the last reference, drop any inaccessible
         // trailing elements in the underlying storage.  That will
@@ -220,7 +230,7 @@ internal struct _SliceBuffer<Element>
     //
     //   return _hasNativeBuffer && isUniquelyReferenced()
     //
-    // SR-6437
+    // https://github.com/apple/swift/issues/48987
     if !_hasNativeBuffer {
       return false
     }
@@ -254,12 +264,18 @@ internal struct _SliceBuffer<Element>
     return target + c
   }
 
-  public __consuming func _copyContents(
+  @inlinable
+  internal __consuming func _copyContents(
     initializing buffer: UnsafeMutableBufferPointer<Element>
-  ) -> (Iterator,UnsafeMutableBufferPointer<Element>.Index) {
-    // This customization point is not implemented for internal types.
-    // Accidentally calling it would be a catastrophic performance bug.
-    fatalError("unsupported")
+  ) -> (Iterator, UnsafeMutableBufferPointer<Element>.Index) {
+    _invariantCheck()
+    guard buffer.count > 0 else { return (makeIterator(), 0) }
+    let c = Swift.min(self.count, buffer.count)
+    buffer.baseAddress!.initialize(
+      from: firstElementAddress,
+      count: c)
+    _fixLifetime(owner)
+    return (IndexingIterator(_elements: self, _position: startIndex + c), c)
   }
 
   /// True, if the array is native and does not need a deferred type check.
@@ -276,7 +292,7 @@ internal struct _SliceBuffer<Element>
     set {
       let growth = newValue - count
       if growth != 0 {
-        nativeBuffer.count += growth
+        nativeBuffer.mutableCount += growth
         self.endIndex += growth
       }
       _invariantCheck()
@@ -286,7 +302,7 @@ internal struct _SliceBuffer<Element>
   /// Traps unless the given `index` is valid for subscripting, i.e.
   /// `startIndex ≤ index < endIndex`
   @inlinable
-  internal func _checkValidSubscript(_ index : Int) {
+  internal func _checkValidSubscript(_ index: Int) {
     _precondition(
       index >= startIndex && index < endIndex, "Index out of bounds")
   }
@@ -305,9 +321,52 @@ internal struct _SliceBuffer<Element>
     return count
   }
 
+  /// Returns `true` if this buffer's storage is uniquely-referenced;
+  /// otherwise, returns `false`.
+  ///
+  /// This function should only be used for internal soundness checks and for
+  /// backward compatibility.
+  /// To guard a buffer mutation, use `beginCOWMutation`.
   @inlinable
   internal mutating func isUniquelyReferenced() -> Bool {
     return isKnownUniquelyReferenced(&owner)
+  }
+
+  /// Returns `true` and puts the buffer in a mutable state if the buffer's
+  /// storage is uniquely-referenced; otherwise, performs no action and returns
+  /// `false`.
+  ///
+  /// - Precondition: The buffer must be immutable.
+  ///
+  /// - Warning: It's a requirement to call `beginCOWMutation` before the buffer
+  ///   is mutated.
+  @_alwaysEmitIntoClient
+  internal mutating func beginCOWMutation() -> Bool {
+    if !_hasNativeBuffer {
+      return false
+    }
+    if Bool(Builtin.beginCOWMutation(&owner)) {
+#if INTERNAL_CHECKS_ENABLED && COW_CHECKS_ENABLED
+      nativeBuffer.isImmutable = false
+#endif
+      return true
+    }
+    return false;
+  }
+
+  /// Puts the buffer in an immutable state.
+  ///
+  /// - Precondition: The buffer must be mutable or the empty array singleton.
+  ///
+  /// - Warning: After a call to `endCOWMutation` the buffer must not be mutated
+  ///   until the next call of `beginCOWMutation`.
+  @_alwaysEmitIntoClient
+  @inline(__always)
+  internal mutating func endCOWMutation() {
+#if INTERNAL_CHECKS_ENABLED && COW_CHECKS_ENABLED
+    nativeBuffer.isImmutable = true
+#endif
+    Builtin.endCOWMutation(&owner)
   }
 
   @inlinable

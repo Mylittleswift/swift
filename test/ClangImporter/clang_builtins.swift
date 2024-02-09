@@ -1,11 +1,13 @@
 // RUN: not %target-swift-frontend -typecheck %s 2>&1 | %FileCheck -check-prefix=CHECK -check-prefix=CHECK-%target-runtime %s
 
-#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+#if canImport(Darwin)
   import Darwin
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
+#elseif canImport(Glibc)
   import Glibc
+#elseif os(WASI)
+  import WASILibc
 #elseif os(Windows)
-  import MSVCRT
+  import CRT
 #else
 #error("Unsupported platform")
 #endif
@@ -24,7 +26,7 @@ func test() {
   // CHECK: [[@LINE-1]]:16: error: cannot convert value of type '({{.+}}) -> Int'{{( [(]aka .+[)])?}} to specified type 'Int'
 }
 
-#if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
+#if canImport(Darwin)
 // These functions aren't consistently available across platforms, so only
 // test for them on Apple platforms.
 func testApple() {

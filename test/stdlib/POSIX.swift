@@ -1,11 +1,13 @@
 // RUN: %target-run-simple-swift %t
 // REQUIRES: executable_test
 // UNSUPPORTED: OS=windows-msvc
+// UNSUPPORTED: OS=wasi
 
 import StdlibUnittest
-#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+import SwiftPrivateLibcExtras
+#if canImport(Darwin)
   import Darwin
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
+#elseif canImport(Glibc)
   import Glibc
 #else
 #error("Unsupported platform")
@@ -69,7 +71,7 @@ POSIXTests.test("sem_open success") {
   let sem = sem_open(semaphoreName, O_CREAT, 0o777, 1)
   expectNotEqual(SEM_FAILED, sem)
 
-  let res = sem_close(sem)
+  let res = sem_close(sem!)
   expectEqual(0, res)
 
   let res2 = sem_unlink(semaphoreName)
@@ -83,7 +85,7 @@ POSIXTests.test("sem_open O_EXCL success") {
   let sem = sem_open(semaphoreName, O_CREAT | O_EXCL, 0o777, 1)
   expectNotEqual(SEM_FAILED, sem)
 
-  let res = sem_close(sem)
+  let res = sem_close(sem!)
   expectEqual(0, res)
 
   let res2 = sem_unlink(semaphoreName)
@@ -102,7 +104,7 @@ POSIXTests.test("sem_open existing") {
   // difficult.
   expectNotEqual(SEM_FAILED, sem2)
 
-  let res = sem_close(sem)
+  let res = sem_close(sem!)
   expectEqual(0, res)
 
   let res2 = sem_unlink(semaphoreName)
@@ -120,7 +122,7 @@ POSIXTests.test("sem_open existing O_EXCL fail") {
   expectEqual(SEM_FAILED, sem2)
   expectEqual(EEXIST, errno)
 
-  let res = sem_close(sem)
+  let res = sem_close(sem!)
   expectEqual(0, res)
 
   let res2 = sem_unlink(semaphoreName)
@@ -244,13 +246,7 @@ POSIXTests.test("fcntl(CInt, CInt, UnsafeMutableRawPointer): locking and unlocki
   // Lock for reading...
   var flck = flock()
   flck.l_type = Int16(F_RDLCK)
-  #if os(Android)
-  // In Android l_len is __kernel_off_t which is not the same size as off_t in
-  // 64 bits.
-  flck.l_len = __kernel_off_t(data.utf8.count)
-  #else
   flck.l_len = off_t(data.utf8.count)
-  #endif
   rc = fcntl(fd, F_SETLK, &flck)
   expectEqual(0, rc)
 

@@ -39,9 +39,9 @@ class C2 {
   }
 }
 
-// RUN: %target-swift-ide-test -print-type-interface -pos=37:6 -source-filename %s | %FileCheck %s -check-prefix=TYPE2
+// RUN: %target-swift-ide-test -print-type-interface -pos=37:6 -module-name print_type_interface -source-filename %s | %FileCheck %s -check-prefix=TYPE2
 // RUN: %target-swift-ide-test -print-type-interface -usr=_TtGC20print_type_interface1DCS_2T1_ -module-name print_type_interface -source-filename %s | %FileCheck %s -check-prefix=TYPE2
-// RUN: %target-swift-ide-test -print-type-interface -pos=38:6 -source-filename %s | %FileCheck %s -check-prefix=TYPE3
+// RUN: %target-swift-ide-test -print-type-interface -pos=38:6 -module-name print_type_interface -source-filename %s | %FileCheck %s -check-prefix=TYPE3
 // RUN: %target-swift-ide-test -print-type-interface -usr=_TtGC20print_type_interface1DSi_ -module-name print_type_interface -source-filename %s | %FileCheck %s -check-prefix=TYPE3
 
 extension D where T : P1 {
@@ -54,12 +54,12 @@ extension D {
   public func unconditionalFunc2(t : T) -> T {return t}
 }
 
-// TYPE2: public class D<T1> {
+// TYPE2: public class D<print_type_interface.T1> {
 // TYPE2:    public func foo()
 // TYPE2:    public func conditionalFunc1()
-// TYPE2:    public func conditionalFunc2(t: T1) -> T1
+// TYPE2:    public func conditionalFunc2(t: print_type_interface.T1) -> print_type_interface.T1
 // TYPE2:    public func unconditionalFunc1()
-// TYPE2:    public func unconditionalFunc2(t: T1) -> T1
+// TYPE2:    public func unconditionalFunc2(t: print_type_interface.T1) -> print_type_interface.T1
 // TYPE2: }
 
 // TYPE3: public class D<Int> {
@@ -83,3 +83,22 @@ extension D {
 // TYPE5-DAG: public func formIndex(_ i: inout Int, offsetBy distance: Int)
 // TYPE5-DAG: public func distance(from start: Int, to end: Int) -> Int
 // TYPE5-DAG: public func joined(separator: String = "") -> String
+
+extension Array {
+  public struct Inner {}
+}
+
+public protocol P2 {}
+
+extension Array.Inner where Element: P2 {
+  public func innerFoo() {}
+}
+
+extension Int: P2 {}
+
+// Print interface for Array<Int>.Inner
+// RUN: %target-swift-ide-test -print-type-interface -usr='$sSa20print_type_interfaceE5InnerVySi_GD' -module-name print_type_interface -source-filename %s | %FileCheck %s -check-prefix=TYPE6
+
+// TYPE6-LABEL: public struct Inner {
+// TYPE6:   public func innerFoo()
+// TYPE6: }

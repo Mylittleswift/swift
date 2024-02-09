@@ -29,6 +29,14 @@ enum class ReferenceCounting : uint8_t {
   /// Blocks are always ObjC reference counting compatible.
   ObjC,
 
+  /// The object has no reference counting. This is used by foreign reference
+  /// types.
+  None,
+
+  /// The object uses swift_attr("retain:XXX") and "release:XXX" to implement
+  /// reference counting.
+  Custom,
+
   /// The object uses _Block_copy/_Block_release reference counting.
   ///
   /// This is a strict subset of ObjC; all blocks are also ObjC reference

@@ -13,6 +13,7 @@
 #ifndef SWIFT_SILGEN_SWITCHENUMBUILDER_H
 #define SWIFT_SILGEN_SWITCHENUMBUILDER_H
 
+#include "ArgumentScope.h"
 #include "Scope.h"
 
 namespace swift {
@@ -22,7 +23,7 @@ class SILGenFunction;
 
 /// TODO: std::variant.
 struct SwitchCaseBranchDest {
-  Optional<JumpDest> jumpDest;
+  llvm::Optional<JumpDest> jumpDest;
   NullablePtr<SILBasicBlock> block;
 
   SwitchCaseBranchDest() : jumpDest(), block() {}
@@ -34,14 +35,14 @@ struct SwitchCaseBranchDest {
   SwitchCaseBranchDest(SILBasicBlock *block) : jumpDest(), block(block) {}
 
   explicit operator bool() const {
-    return jumpDest.hasValue() || block.isNonNull();
+    return jumpDest.has_value() || block.isNonNull();
   }
 
-  bool hasJumpDest() const { return jumpDest.hasValue(); }
+  bool hasJumpDest() const { return jumpDest.has_value(); }
   bool hasBlock() const { return bool(block); }
 
   SILBasicBlock *getBlock() { return block.getPtrOrNull(); }
-  JumpDest &getJumpDest() { return jumpDest.getValue(); }
+  JumpDest &getJumpDest() { return jumpDest.value(); }
 };
 
 /// A cleanup scope RAII object, like FullExpr, that comes with a JumpDest for a
@@ -52,7 +53,7 @@ struct SwitchCaseBranchDest {
 /// This scope is also exposed to the debug info.
 class SwitchCaseFullExpr {
   SILGenFunction &SGF;
-  Scope scope;
+  ArgumentScope scope;
   CleanupLocation loc;
   SwitchCaseBranchDest branchDest;
 
@@ -92,6 +93,7 @@ public:
 /// force exitBranchAndCleanup to be run.
 class SwitchEnumBuilder {
 public:
+  // The ManagedValue argument will be invalid for no-payload cases.
   using NormalCaseHandler =
       std::function<void(ManagedValue, SwitchCaseFullExpr &&)>;
   using DefaultCaseHandler =
@@ -132,14 +134,14 @@ private:
 
   SILGenBuilder &builder;
   SILLocation loc;
-  ManagedValue optional;
+  ManagedValue subjectExprOperand;
   llvm::Optional<DefaultCaseData> defaultBlockData;
   llvm::SmallVector<NormalCaseData, 8> caseDataArray;
 
 public:
   SwitchEnumBuilder(SILGenBuilder &builder, SILLocation loc,
-                    ManagedValue optional)
-      : builder(builder), loc(loc), optional(optional) {}
+                    ManagedValue subjectExprOperand)
+      : builder(builder), loc(loc), subjectExprOperand(subjectExprOperand) {}
 
   void addDefaultCase(
       SILBasicBlock *defaultBlock, SwitchCaseBranchDest branchDest,
@@ -192,6 +194,8 @@ public:
 
 private:
   SILGenFunction &getSGF() const { return builder.getSILGenFunction(); }
+
+  ManagedValue emitDefaultCase(SwitchEnumInst *switchEnum);
 };
 
 } // end Lowering namespace

@@ -17,10 +17,13 @@
 #ifndef SWIFT_BASIC_SOURCELOC_H
 #define SWIFT_BASIC_SOURCELOC_H
 
+#include "swift/Basic/Debug.h"
 #include "swift/Basic/LLVM.h"
 #include "llvm/ADT/DenseMapInfo.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/SMLoc.h"
+#include <assert.h>
 #include <functional>
 
 namespace swift {
@@ -43,7 +46,13 @@ public:
   
   bool isValid() const { return Value.isValid(); }
   bool isInvalid() const { return !isValid(); }
-  
+
+  /// An explicit bool operator so one can check if a SourceLoc is valid in an
+  /// if statement:
+  ///
+  /// if (auto x = getSourceLoc()) { ... }
+  explicit operator bool() const { return isValid(); }
+
   bool operator==(const SourceLoc &RHS) const { return RHS.Value == Value; }
   bool operator!=(const SourceLoc &RHS) const { return !operator==(RHS); }
   
@@ -77,7 +86,15 @@ public:
     print(OS, SM, Tmp);
   }
 
-  void dump(const SourceManager &SM) const;
+  SWIFT_DEBUG_DUMPER(dump(const SourceManager &SM));
+
+	friend size_t hash_value(SourceLoc loc) {
+		return reinterpret_cast<uintptr_t>(loc.getOpaquePointerValue());
+	}
+
+	friend void simple_display(raw_ostream &OS, const SourceLoc &loc) {
+		// Nothing meaningful to print.
+	}
 };
 
 /// SourceRange in swift is a pair of locations.  However, note that the end
@@ -98,9 +115,34 @@ public:
   bool isValid() const { return Start.isValid(); }
   bool isInvalid() const { return !isValid(); }
 
+  /// An explicit bool operator so one can check if a SourceRange is valid in an
+  /// if statement:
+  ///
+  /// if (auto x = getSourceRange()) { ... }
+  explicit operator bool() const { return isValid(); }
+
+  /// Combine the given source ranges into the smallest contiguous SourceRange
+  /// that includes them all, ignoring any invalid ranges present.
+  static SourceRange combine(ArrayRef<SourceRange> ranges);
+
+  /// Combine the given source ranges into the smallest contiguous SourceRange
+  /// that includes them all, ignoring any invalid ranges present.
+  template <typename ...T>
+  static SourceRange combine(T... ranges) {
+    return SourceRange::combine({ranges...});
+  }
+
   /// Extend this SourceRange to the smallest continuous SourceRange that
   /// includes both this range and the other one.
   void widen(SourceRange Other);
+
+  /// Checks whether this range contains the given location. Note that the given
+  /// location should correspond to the start of a token, since locations inside
+  /// the last token may be considered outside the range by this function.
+  bool contains(SourceLoc Loc) const;
+
+  /// Checks whether this range overlaps with the given range.
+  bool overlaps(SourceRange Other) const;
 
   bool operator==(const SourceRange &other) const {
     return Start == other.Start && End == other.End;
@@ -120,7 +162,7 @@ public:
     print(OS, SM, Tmp, PrintText);
   }
 
-  void dump(const SourceManager &SM) const;
+  SWIFT_DEBUG_DUMPER(dump(const SourceManager &SM));
 };
 
 /// A half-open character-based source range.
@@ -211,13 +253,13 @@ public:
     print(OS, SM, Tmp, PrintText);
   }
   
-  void dump(const SourceManager &SM) const;
+  SWIFT_DEBUG_DUMPER(dump(const SourceManager &SM));
 };
 
 } // end namespace swift
 
 namespace llvm {
-template <typename T> struct DenseMapInfo;
+template <typename T, typename Enable> struct DenseMapInfo;
 
 template <> struct DenseMapInfo<swift::SourceLoc> {
   static swift::SourceLoc getEmptyKey() {
@@ -257,10 +299,8 @@ template <> struct DenseMapInfo<swift::SourceRange> {
   }
 
   static unsigned getHashValue(const swift::SourceRange &Val) {
-    return hash_combine(DenseMapInfo<const void *>::getHashValue(
-                            Val.Start.getOpaquePointerValue()),
-                        DenseMapInfo<const void *>::getHashValue(
-                            Val.End.getOpaquePointerValue()));
+    return hash_combine(Val.Start.getOpaquePointerValue(),
+                        Val.End.getOpaquePointerValue());
   }
 
   static bool isEqual(const swift::SourceRange &LHS,

@@ -45,8 +45,8 @@ LoopRegion::FunctionTy *LoopRegion::getFunction() const {
   return Ptr.get<FunctionTy *>();
 }
 
-void LoopRegion::dump() const {
-  print(llvm::outs());
+void LoopRegion::dump(bool isVerbose) const {
+  print(llvm::outs(), false, isVerbose);
   llvm::outs() << "\n";
 }
 
@@ -69,7 +69,8 @@ void LoopRegion::printName(llvm::raw_ostream &os) const {
   return;
 }
 
-void LoopRegion::print(llvm::raw_ostream &os, bool isShort) const {
+void LoopRegion::print(llvm::raw_ostream &os, bool isShort,
+                       bool isVerbose) const {
   os << "(region id:" << ID;
   if (isShort) {
     os << ")";
@@ -88,6 +89,20 @@ void LoopRegion::print(llvm::raw_ostream &os, bool isShort) const {
 
   os << " ucfh:" << (IsUnknownControlFlowEdgeHead? "true " : "false")
      << " ucft:" << (IsUnknownControlFlowEdgeTail? "true " : "false");
+
+  if (!isVerbose) {
+    return;
+  }
+  os << "\n";
+  if (isBlock()) {
+    getBlock()->dump();
+  } else if (isLoop()) {
+    getLoop()->dump();
+  } else if (isFunction()) {
+    getFunction()->dump();
+  } else {
+    llvm_unreachable("Unknown region type");
+  }
 }
 
 llvm::raw_ostream &llvm::operator<<(llvm::raw_ostream &os, LoopRegion &LR) {
@@ -173,7 +188,7 @@ void LoopRegionFunctionInfo::verify() {
 
     // If this node does not have a parent, it should have no non-local
     // successors.
-    if (!R->ParentID.hasValue()) {
+    if (!R->ParentID.has_value()) {
       auto NLSuccs = R->getNonLocalSuccs();
       assert(NLSuccs.begin() == NLSuccs.end() &&
              "Cannot have non local "
@@ -193,7 +208,7 @@ void LoopRegionFunctionInfo::verify() {
       assert(ID.ID < NumParentSuccs && "Non local successor pointing off the "
                                        "parent node successor list?!");
       // Since we are not dead, make sure our parent is not dead.
-      assert(ParentRegion->Succs[ID.ID].hasValue() &&
+      assert(ParentRegion->Succs[ID.ID].has_value() &&
              "non-local successor edge sources should have the same liveness "
              "properties as non-local successor edge targets");
       // Make sure that we can look up the local region corresponding to this
@@ -203,10 +218,12 @@ void LoopRegionFunctionInfo::verify() {
 
       // If R and OtherR are blocks, then OtherR should be a successor of the
       // real block.
-      if (R->isBlock() && OtherR->isBlock())
-        assert(R->getBlock()->isSuccessorBlock(OtherR->getBlock()) &&
+      if (R->isBlock() && OtherR->isBlock()) {
+        auto succs = R->getBlock()->getSuccessors();
+        assert(std::find(succs.begin(), succs.end(), OtherR->getBlock()) != succs.end() &&
                "Expected either R was not a block or OtherR was a CFG level "
                "successor of R.");
+      }
     }
   }
 #endif
@@ -229,8 +246,8 @@ LoopRegionFunctionInfo::getRegion(BlockTy *BB) const {
 
 LoopRegionFunctionInfo::RegionTy *
 LoopRegionFunctionInfo::getRegion(FunctionTy *F) const {
-  if (FunctionRegionID.hasValue()) {
-    return IDToRegionMap[FunctionRegionID.getValue()];
+  if (FunctionRegionID.has_value()) {
+    return IDToRegionMap[FunctionRegionID.value()];
   }
 
   auto &Self = const_cast<LoopRegionFunctionInfo &>(*this);
@@ -355,9 +372,9 @@ void LoopRegionFunctionInfo::initializeBlockRegions(PostOrderFunctionInfo *PI,
   // Initialize regions for each BB and associate RPO numbers with each BB.
   //
   // We use the RPO number of a BB as its Index in our data structures.
-  for (auto P : PI->getEnumeratedReversePostOrder()) {
-    BlockTy *BB = P.first;
-    unsigned RPOIndex = P.second;
+  for (auto P : llvm::enumerate(PI->getReversePostOrder())) {
+    BlockTy *BB = P.value();
+    unsigned RPOIndex = P.index();
     auto *BBRegion = createRegion(BB, RPOIndex);
     assert(BBRegion && "Create region fail to create a BB?");
     assert(*PI->getRPONumber(BB) == RPOIndex &&
@@ -722,7 +739,7 @@ propagateLivenessDownNonLocalSuccessorEdges(LoopRegion *Parent) {
 
         // If the non-local successor edge points to a parent successor that is
         // not dead continue.
-        if (R->Succs[SuccID->ID].hasValue()) {
+        if (R->Succs[SuccID->ID].has_value()) {
           HasNoLiveLocalEdges = false;
           continue;
         }
@@ -761,7 +778,7 @@ getRegionForNonLocalSuccessor(const LoopRegion *Child, unsigned SuccID) const {
 
   do {
     Iter = getRegion(*Iter->getParentID());
-    Succ = Iter->Succs[SuccID].getValue();
+    Succ = Iter->Succs[SuccID].value();
     SuccID = Succ.ID;
   } while (Succ.IsNonLocal);
 
@@ -856,7 +873,7 @@ void LoopRegionFunctionInfo::print(raw_ostream &os) const {
       auto ExitingSubRegs = R->getExitingSubregions();
       std::copy(ExitingSubRegs.begin(), ExitingSubRegs.end(),
                 std::back_inserter(ExitingSubregions));
-      std::sort(ExitingSubregions.begin(), ExitingSubregions.begin());
+      std::sort(ExitingSubregions.begin(), ExitingSubregions.end());
       for (unsigned SubregionID : ExitingSubregions) {
         os << "\n        ";
         LoopRegion *Subregion = getRegion(SubregionID);
@@ -914,8 +931,13 @@ struct LoopRegionWrapper {
 
 /// An iterator on Regions that first iterates over subregions and then over
 /// successors.
-struct alledge_iterator
-    : std::iterator<std::forward_iterator_tag, LoopRegionWrapper> {
+struct alledge_iterator {
+  using iterator_category = std::forward_iterator_tag;
+  using value_type = LoopRegionWrapper;
+  using difference_type = std::ptrdiff_t;
+  using pointer = value_type*;
+  using reference = value_type&;    
+
   LoopRegionWrapper *Wrapper;
   LoopRegion::subregion_iterator SubregionIter;
   LoopRegion::backedge_iterator BackedgeIter;
@@ -1007,7 +1029,7 @@ struct alledge_iterator
     return copy;
   }
 
-  bool operator==(alledge_iterator rhs) {
+  bool operator==(alledge_iterator rhs) const {
     if (Wrapper->Region != rhs.Wrapper->Region)
       return false;
     if (SubregionIter != rhs.SubregionIter)
@@ -1019,7 +1041,7 @@ struct alledge_iterator
     return BackedgeIter == rhs.BackedgeIter;
   }
 
-  bool operator!=(alledge_iterator rhs) { return !(*this == rhs); }
+  bool operator!=(alledge_iterator rhs) const { return !(*this == rhs); }
 };
 
 } // end anonymous namespace

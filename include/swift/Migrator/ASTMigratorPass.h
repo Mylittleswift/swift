@@ -19,6 +19,7 @@
 #define SWIFT_MIGRATOR_ASTMIGRATORPASS_H
 
 #include "swift/AST/ASTContext.h"
+#include "swift/AST/SourceFile.h"
 #include "swift/Migrator/EditorAdapter.h"
 
 namespace swift {
@@ -40,7 +41,7 @@ protected:
   ASTMigratorPass(EditorAdapter &Editor, SourceFile *SF,
                   const MigratorOptions &Opts)
     : Editor(Editor), SF(SF), Opts(Opts), Filename(SF->getFilename()),
-      BufferID(SF->getBufferID().getValue()),
+      BufferID(SF->getBufferID().value()),
       SM(SF->getASTContext().SourceMgr), Diags(SF->getASTContext().Diags) {}
 };
 

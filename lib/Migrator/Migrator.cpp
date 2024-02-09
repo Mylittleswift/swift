@@ -9,7 +9,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/Basic/Diff.h"
+#include "Diff.h"
 #include "swift/Frontend/Frontend.h"
 #include "swift/Migrator/ASTMigratorPass.h"
 #include "swift/Migrator/EditorAdapter.h"
@@ -21,13 +21,14 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/Edit/EditedSource.h"
 #include "clang/Rewrite/Core/RewriteBuffer.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 
 using namespace swift;
 using namespace swift::migrator;
 
-bool migrator::updateCodeAndEmitRemapIfNeeded(
-    CompilerInstance *Instance, const CompilerInvocation &Invocation) {
+bool migrator::updateCodeAndEmitRemapIfNeeded(CompilerInstance *Instance) {
+  const auto &Invocation = Instance->getInvocation();
   if (!Invocation.getMigratorOptions().shouldRunMigrator())
     return false;
 
@@ -142,12 +143,17 @@ Migrator::performAFixItMigration(version::Version SwiftLanguageVersion) {
          "Migration must have a primary");
   for (const auto &input : OrigFrontendOpts.InputsAndOutputs.getAllInputs()) {
     Invocation.getFrontendOptions().InputsAndOutputs.addInput(
-        InputFile(input.file(), input.isPrimary(),
-                  input.isPrimary() ? InputBuffer.get() : input.buffer()));
+        InputFile(input.getFileName(), input.isPrimary(),
+                  input.isPrimary() ? InputBuffer.get() : input.getBuffer(),
+                  input.getType()));
   }
 
-  auto Instance = llvm::make_unique<swift::CompilerInstance>();
-  if (Instance->setup(Invocation)) {
+  auto Instance = std::make_unique<swift::CompilerInstance>();
+  // rdar://78576743 - Reset LLVM global state for command-line arguments set
+  // by prior calls to setup.
+  llvm::cl::ResetAllOptionOccurrences();
+  std::string InstanceSetupError;
+  if (Instance->setup(Invocation, InstanceSetupError)) {
     return nullptr;
   }
 
@@ -185,7 +191,7 @@ bool Migrator::performSyntacticPasses(SyntacticPassOptions Opts) {
     new clang::DiagnosticIDs()
   };
   auto ClangDiags =
-    llvm::make_unique<clang::DiagnosticsEngine>(DummyClangDiagIDs,
+    std::make_unique<clang::DiagnosticsEngine>(DummyClangDiagIDs,
                                                 new clang::DiagnosticOptions,
                                                 new clang::DiagnosticConsumer(),
                                                 /*ShouldOwnClient=*/true);
@@ -211,7 +217,7 @@ bool Migrator::performSyntacticPasses(SyntacticPassOptions Opts) {
   RewriteBufferEditsReceiver Rewriter {
     ClangSourceManager,
     Editor.getClangFileIDForSwiftBufferID(
-      StartInstance->getPrimarySourceFile()->getBufferID().getValue()),
+      StartInstance->getPrimarySourceFile()->getBufferID().value()),
     InputState->getOutputText()
   };
 
@@ -279,7 +285,8 @@ void printRemap(const StringRef OriginalFilename,
   assert(!OriginalFilename.empty());
 
   diff_match_patch<std::string> DMP;
-  const auto Diffs = DMP.diff_main(InputText, OutputText, /*checkLines=*/false);
+  const auto Diffs =
+      DMP.diff_main(InputText.str(), OutputText.str(), /*checkLines=*/false);
 
   OS << "[";
 
@@ -354,7 +361,7 @@ void printRemap(const StringRef OriginalFilename,
       continue;
     Current.Offset -= 1;
     Current.Remove += 1;
-    Current.Text = InputText.substr(Current.Offset, 1);
+    Current.Text = InputText.substr(Current.Offset, 1).str();
   }
 
   for (auto Rep = Replacements.begin(); Rep != Replacements.end(); ++Rep) {
@@ -379,7 +386,7 @@ bool Migrator::emitRemap() const {
 
   std::error_code Error;
   llvm::raw_fd_ostream FileOS(RemapPath,
-                              Error, llvm::sys::fs::F_Text);
+                              Error, llvm::sys::fs::OF_Text);
   if (FileOS.has_error()) {
     return true;
   }
@@ -400,7 +407,7 @@ bool Migrator::emitMigratedFile() const {
 
   std::error_code Error;
   llvm::raw_fd_ostream FileOS(OutFilename,
-                              Error, llvm::sys::fs::F_Text);
+                              Error, llvm::sys::fs::OF_Text);
   if (FileOS.has_error()) {
     return true;
   }
@@ -433,5 +440,5 @@ const MigratorOptions &Migrator::getMigratorOptions() const {
 const StringRef Migrator::getInputFilename() const {
   auto &PrimaryInput = StartInvocation.getFrontendOptions()
                            .InputsAndOutputs.getRequiredUniquePrimaryInput();
-  return PrimaryInput.file();
+  return PrimaryInput.getFileName();
 }

@@ -33,7 +33,7 @@
 ///   process does not necessarily converge to the canonical type, however.
 ///   The default behavior is TYPE(id, parent).
 //
-// If you add a new sugared type, be sure to test it in PrintAsObjC!
+// If you add a new sugared type, be sure to test it in PrintAsClang!
 
 /// UNCHECKED_TYPE(id, parent)
 ///   This type is not present in valid, type-checked programs.
@@ -46,6 +46,23 @@
 ///   [weak] attribute), but it cannot be written directly in normal
 ///   programs and it cannot be the type of an expression.
 ///   The default behavior is TYPE(id, parent).
+
+/// SINGLETON_TYPE(SHORT_ID, id)
+///   This type is a singleton, i.e. there is exactly one instance of
+///   it, which can be found as ASTContext.The#SHORT_ID#Type.
+///   This is only expanded if SINGLETON_TYPE is defined, and in this
+///   case no other macros are expanded.
+
+#ifndef ALWAYS_CANONICAL_ARTIFICIAL_TYPE
+#ifdef ALWAYS_CANONICAL_TYPE
+#ifdef ARTIFICIAL_TYPE
+#error must define ALWAYS_CANONICAL_ARTIFICIAL_TYPE if also defining both ALWAYS_CANONICAL_TYPE and ARTIFICIAL_TYPE
+#endif
+#define ALWAYS_CANONICAL_ARTIFICIAL_TYPE(id, parent) ALWAYS_CANONICAL_TYPE(id, parent)
+#else
+#define ALWAYS_CANONICAL_ARTIFICIAL_TYPE(id, parent) ARTIFICIAL_TYPE(id, parent)
+#endif
+#endif
 
 #ifndef ALWAYS_CANONICAL_TYPE
 #define ALWAYS_CANONICAL_TYPE(id, parent) TYPE(id, parent)
@@ -87,19 +104,27 @@
 #define LAST_TYPE(Id)
 #endif
 
+#if !defined(SINGLETON_TYPE)
+
 TYPE(Error, Type)
 UNCHECKED_TYPE(Unresolved, Type)
+UNCHECKED_TYPE(Placeholder, Type)
 ABSTRACT_TYPE(Builtin, Type)
   ABSTRACT_TYPE(AnyBuiltinInteger, BuiltinType)
     BUILTIN_TYPE(BuiltinInteger, AnyBuiltinIntegerType)
     BUILTIN_TYPE(BuiltinIntegerLiteral, AnyBuiltinIntegerType)
     TYPE_RANGE(AnyBuiltinInteger, BuiltinInteger, BuiltinIntegerLiteral)
+  BUILTIN_TYPE(BuiltinExecutor, BuiltinType)
   BUILTIN_TYPE(BuiltinFloat, BuiltinType)
+  BUILTIN_TYPE(BuiltinJob, BuiltinType)
+  BUILTIN_TYPE(BuiltinPackIndex, BuiltinType)
   BUILTIN_TYPE(BuiltinRawPointer, BuiltinType)
+  BUILTIN_TYPE(BuiltinRawUnsafeContinuation, BuiltinType)
   BUILTIN_TYPE(BuiltinNativeObject, BuiltinType)
   BUILTIN_TYPE(BuiltinBridgeObject, BuiltinType)
-  BUILTIN_TYPE(BuiltinUnknownObject, BuiltinType)
   BUILTIN_TYPE(BuiltinUnsafeValueBuffer, BuiltinType)
+  BUILTIN_TYPE(BuiltinDefaultActorStorage, BuiltinType)
+  BUILTIN_TYPE(BuiltinNonDefaultDistributedActorStorage, BuiltinType)
   BUILTIN_TYPE(BuiltinVector, BuiltinType)
   TYPE_RANGE(Builtin, BuiltinInteger, BuiltinVector)
 TYPE(Tuple, Type)
@@ -116,7 +141,8 @@ ABSTRACT_TYPE(AnyGeneric, Type)
       TYPE(Struct, NominalType)
       TYPE(Class, NominalType)
       TYPE(Protocol, NominalType)
-      TYPE_RANGE(Nominal, Enum, Protocol)
+      TYPE(BuiltinTuple, NominalType)
+      TYPE_RANGE(Nominal, Enum, BuiltinTuple)
     ABSTRACT_TYPE(BoundGeneric, Type)
       TYPE(BoundGenericClass, BoundGenericType)
       TYPE(BoundGenericEnum, BoundGenericType)
@@ -133,9 +159,13 @@ TYPE(DynamicSelf, Type)
 ABSTRACT_TYPE(Substitutable, Type)
   ABSTRACT_TYPE(Archetype, SubstitutableType)
     ALWAYS_CANONICAL_TYPE(PrimaryArchetype, ArchetypeType)
-    ALWAYS_CANONICAL_TYPE(OpenedArchetype, ArchetypeType)
-    ALWAYS_CANONICAL_TYPE(NestedArchetype, ArchetypeType)
-    TYPE_RANGE(Archetype, PrimaryArchetype, NestedArchetype)
+    ALWAYS_CANONICAL_TYPE(OpaqueTypeArchetype, ArchetypeType)
+    ABSTRACT_TYPE(LocalArchetype, ArchetypeType)
+      ALWAYS_CANONICAL_TYPE(OpenedArchetype, LocalArchetypeType)
+      ALWAYS_CANONICAL_TYPE(ElementArchetype, LocalArchetypeType)
+      TYPE_RANGE(LocalArchetype, OpenedArchetype, ElementArchetype)
+    ALWAYS_CANONICAL_TYPE(PackArchetype, ArchetypeType)
+    TYPE_RANGE(Archetype, PrimaryArchetype, PackArchetype)
   TYPE(GenericTypeParam, SubstitutableType)
   TYPE_RANGE(Substitutable, PrimaryArchetype, GenericTypeParam)
 TYPE(DependentMember, Type)
@@ -146,11 +176,19 @@ ABSTRACT_TYPE(AnyFunction, Type)
 ARTIFICIAL_TYPE(SILFunction, Type)
 ARTIFICIAL_TYPE(SILBlockStorage, Type)
 ARTIFICIAL_TYPE(SILBox, Type)
+ARTIFICIAL_TYPE(SILMoveOnlyWrapped, Type)
+ALWAYS_CANONICAL_ARTIFICIAL_TYPE(SILPack, Type)
 ARTIFICIAL_TYPE(SILToken, Type)
 TYPE(ProtocolComposition, Type)
+TYPE(ParameterizedProtocol, Type)
+TYPE(Existential, Type)
 TYPE(LValue, Type)
 TYPE(InOut, Type)
+TYPE(Pack, Type)
+TYPE(PackExpansion, Type)
+TYPE(PackElement, Type)
 UNCHECKED_TYPE(TypeVariable, Type)
+UNCHECKED_TYPE(ErrorUnion, Type)
 ABSTRACT_SUGARED_TYPE(Sugar, Type)
   SUGARED_TYPE(Paren, SugarType)
   SUGARED_TYPE(TypeAlias, SugarType)
@@ -158,11 +196,30 @@ ABSTRACT_SUGARED_TYPE(Sugar, Type)
     ABSTRACT_SUGARED_TYPE(UnarySyntaxSugar, SyntaxSugarType)
       SUGARED_TYPE(ArraySlice, UnarySyntaxSugarType)
       SUGARED_TYPE(Optional, UnarySyntaxSugarType)
-      TYPE_RANGE(UnarySyntaxSugar, ArraySlice, Optional)
+      SUGARED_TYPE(VariadicSequence, UnarySyntaxSugarType)
+      TYPE_RANGE(UnarySyntaxSugar, ArraySlice, VariadicSequence)
     SUGARED_TYPE(Dictionary, SyntaxSugarType)
     TYPE_RANGE(SyntaxSugar, ArraySlice, Dictionary)
   TYPE_RANGE(Sugar, Paren, Dictionary)
 LAST_TYPE(Dictionary) // Sugared types are last to make isa<SugarType>() fast.
+
+#endif
+
+#ifdef SINGLETON_TYPE
+SINGLETON_TYPE(IntegerLiteral, BuiltinIntegerLiteral)
+SINGLETON_TYPE(Job, BuiltinJob)
+SINGLETON_TYPE(Executor, BuiltinExecutor)
+SINGLETON_TYPE(PackIndex, BuiltinPackIndex)
+SINGLETON_TYPE(RawPointer, BuiltinRawPointer)
+SINGLETON_TYPE(RawUnsafeContinuation, BuiltinRawUnsafeContinuation)
+SINGLETON_TYPE(NativeObject, BuiltinNativeObject)
+SINGLETON_TYPE(BridgeObject, BuiltinBridgeObject)
+SINGLETON_TYPE(UnsafeValueBuffer, BuiltinUnsafeValueBuffer)
+SINGLETON_TYPE(DefaultActorStorage, BuiltinDefaultActorStorage)
+SINGLETON_TYPE(NonDefaultDistributedActorStorage, BuiltinNonDefaultDistributedActorStorage)
+SINGLETON_TYPE(SILToken, SILToken)
+#undef SINGLETON_TYPE
+#endif
 
 #undef TYPE_RANGE
 #undef ABSTRACT_SUGARED_TYPE
@@ -172,5 +229,6 @@ LAST_TYPE(Dictionary) // Sugared types are last to make isa<SugarType>() fast.
 #undef SUGARED_TYPE
 #undef BUILTIN_TYPE
 #undef ALWAYS_CANONICAL_TYPE
+#undef ALWAYS_CANONICAL_ARTIFICIAL_TYPE
 #undef TYPE
 #undef LAST_TYPE

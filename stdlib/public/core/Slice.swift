@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2020 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -31,7 +31,7 @@
 ///
 /// You're tasked with finding the day with the most absences in the second
 /// half of the session. To find the index of the day in question, follow
-/// these setps:
+/// these steps:
 ///
 /// 1) Create a slice of the `absences` array that holds the second half of the
 ///    days.
@@ -79,7 +79,7 @@
 ///   collection type, don't use `Slice` as its subsequence type. Instead,
 ///   define your own subsequence type that takes your index invalidation
 ///   requirements into account.
-@_fixed_layout // generic-performance
+@frozen // generic-performance
 public struct Slice<Base: Collection> {
   public var _startIndex: Base.Index
   public var _endIndex: Base.Index
@@ -127,13 +127,18 @@ public struct Slice<Base: Collection> {
   ///
   ///     print(singleNonZeroDigits.count)
   ///     // Prints "9"
-  ///     prints(singleNonZeroDigits.base.count)
+  ///     print(singleNonZeroDigits.base.count)
   ///     // Prints "10"
   ///     print(singleDigits == singleNonZeroDigits.base)
   ///     // Prints "true"
   @inlinable // generic-performance
   public var base: Base {
     return _base
+  }
+
+  @_alwaysEmitIntoClient @inline(__always)
+  internal var _bounds: Range<Base.Index> {
+    Range(_uncheckedBounds: (_startIndex, _endIndex))
   }
 }
 
@@ -157,7 +162,7 @@ extension Slice: Collection {
   @inlinable // generic-performance
   public subscript(index: Index) -> Base.Element {
     get {
-      _failEarlyRangeCheck(index, bounds: startIndex..<endIndex)
+      _failEarlyRangeCheck(index, bounds: _bounds)
       return _base[index]
     }
   }
@@ -165,13 +170,13 @@ extension Slice: Collection {
   @inlinable // generic-performance
   public subscript(bounds: Range<Index>) -> Slice<Base> {
     get {
-      _failEarlyRangeCheck(bounds, bounds: startIndex..<endIndex)
+      _failEarlyRangeCheck(bounds, bounds: _bounds)
       return Slice(base: _base, bounds: bounds)
     }
   }
 
-  public var indices: Indices { 
-    return _base.indices[_startIndex..<_endIndex]
+  public var indices: Indices {
+    return _base.indices[_bounds]
   }
 
   @inlinable // generic-performance
@@ -215,6 +220,34 @@ extension Slice: Collection {
   public func _failEarlyRangeCheck(_ range: Range<Index>, bounds: Range<Index>) {
     _base._failEarlyRangeCheck(range, bounds: bounds)
   }
+
+  @_alwaysEmitIntoClient @inlinable
+  public func withContiguousStorageIfAvailable<R>(
+    _ body: (UnsafeBufferPointer<Element>) throws -> R
+  ) rethrows -> R? {
+    try _base.withContiguousStorageIfAvailable { buffer in
+      let start = _base.distance(from: _base.startIndex, to: _startIndex)
+      let count = _base.distance(from: _startIndex, to: _endIndex)
+      let slice = UnsafeBufferPointer(rebasing: buffer[start ..< start + count])
+      return try body(slice)
+    }
+  }
+}
+
+extension Slice {
+  @_alwaysEmitIntoClient
+  public __consuming func _copyContents(
+      initializing buffer: UnsafeMutableBufferPointer<Element>
+  ) -> (Iterator, UnsafeMutableBufferPointer<Element>.Index) {
+    if let (_, copied) = self.withContiguousStorageIfAvailable({
+      $0._copyContents(initializing: buffer)
+    }) {
+      let position = index(startIndex, offsetBy: copied)
+      return (Iterator(_elements: self, _position: position), copied)
+    }
+
+    return _copySequenceContents(initializing: buffer)
+  }
 }
 
 extension Slice: BidirectionalCollection where Base: BidirectionalCollection {
@@ -236,11 +269,11 @@ extension Slice: MutableCollection where Base: MutableCollection {
   @inlinable // generic-performance
   public subscript(index: Index) -> Base.Element {
     get {
-      _failEarlyRangeCheck(index, bounds: startIndex..<endIndex)
+      _failEarlyRangeCheck(index, bounds: _bounds)
       return _base[index]
     }
     set {
-      _failEarlyRangeCheck(index, bounds: startIndex..<endIndex)
+      _failEarlyRangeCheck(index, bounds: _bounds)
       _base[index] = newValue
       // MutableSlice requires that the underlying collection's subscript
       // setter does not invalidate indices, so our `startIndex` and `endIndex`
@@ -251,11 +284,39 @@ extension Slice: MutableCollection where Base: MutableCollection {
   @inlinable // generic-performance
   public subscript(bounds: Range<Index>) -> Slice<Base> {
     get {
-      _failEarlyRangeCheck(bounds, bounds: startIndex..<endIndex)
+      _failEarlyRangeCheck(bounds, bounds: _bounds)
       return Slice(base: _base, bounds: bounds)
     }
     set {
       _writeBackMutableSlice(&self, bounds: bounds, slice: newValue)
+    }
+  }
+
+  @_alwaysEmitIntoClient @inlinable
+  public mutating func withContiguousMutableStorageIfAvailable<R>(
+    _ body: (inout UnsafeMutableBufferPointer<Element>) throws -> R
+  ) rethrows -> R? {
+    // We're calling `withContiguousMutableStorageIfAvailable` twice here so
+    // that we don't calculate index distances unless we know we'll use them.
+    // The expectation here is that the base collection will make itself
+    // contiguous on the first try and the second call will be relatively cheap.
+    guard _base.withContiguousMutableStorageIfAvailable({ _ in }) != nil
+    else {
+      return nil
+    }
+    let start = _base.distance(from: _base.startIndex, to: _startIndex)
+    let count = _base.distance(from: _startIndex, to: _endIndex)
+    return try _base.withContiguousMutableStorageIfAvailable { buffer in
+      var slice = UnsafeMutableBufferPointer(
+        rebasing: buffer[start ..< start + count])
+      let copy = slice
+      defer {
+        _precondition(
+          slice.baseAddress == copy.baseAddress &&
+          slice.count == copy.count,
+          "Slice.withContiguousMutableStorageIfAvailable: replacing the buffer is not allowed")
+      }
+      return try body(&slice)
     }
   }
 }
@@ -289,7 +350,7 @@ extension Slice: RangeReplaceableCollection
   @inlinable // generic-performance
   public mutating func replaceSubrange<C>(
     _ subRange: Range<Index>, with newElements: C
-  ) where C : Collection, C.Element == Base.Element {
+  ) where C: Collection, C.Element == Base.Element {
 
     // FIXME: swift-3-indexing-model: range check.
     let sliceOffset =
@@ -297,7 +358,7 @@ extension Slice: RangeReplaceableCollection
     let newSliceCount =
       _base.distance(from: _startIndex, to: subRange.lowerBound)
       + _base.distance(from: subRange.upperBound, to: _endIndex)
-      + (numericCast(newElements.count) as Int)
+      + newElements.count
     _base.replaceSubrange(subRange, with: newElements)
     _startIndex = _base.index(_base.startIndex, offsetBy: sliceOffset)
     _endIndex = _base.index(_startIndex, offsetBy: newSliceCount)
@@ -354,13 +415,13 @@ extension Slice
   @inlinable // generic-performance
   public mutating func replaceSubrange<C>(
     _ subRange: Range<Index>, with newElements: C
-  ) where C : Collection, C.Element == Base.Element {
+  ) where C: Collection, C.Element == Base.Element {
     // FIXME: swift-3-indexing-model: range check.
     if subRange.lowerBound == _base.startIndex {
       let newSliceCount =
         _base.distance(from: _startIndex, to: subRange.lowerBound)
         + _base.distance(from: subRange.upperBound, to: _endIndex)
-        + (numericCast(newElements.count) as Int)
+        + newElements.count
       _base.replaceSubrange(subRange, with: newElements)
       _startIndex = _base.startIndex
       _endIndex = _base.index(_startIndex, offsetBy: newSliceCount)
@@ -369,7 +430,7 @@ extension Slice
       let lastValidIndex = _base.index(before: subRange.lowerBound)
       let newEndIndexOffset =
         _base.distance(from: subRange.upperBound, to: _endIndex)
-        + (numericCast(newElements.count) as Int) + 1
+        + newElements.count + 1
       _base.replaceSubrange(subRange, with: newElements)
       if shouldUpdateStartIndex {
         _startIndex = _base.index(after: lastValidIndex)
@@ -400,10 +461,10 @@ extension Slice
 
   @inlinable // generic-performance
   public mutating func insert<S>(contentsOf newElements: S, at i: Index)
-  where S : Collection, S.Element == Base.Element {
+  where S: Collection, S.Element == Base.Element {
     // FIXME: swift-3-indexing-model: range check.
     if i == _base.startIndex {
-      let newSliceCount = count + numericCast(newElements.count)
+      let newSliceCount = count + newElements.count
       _base.insert(contentsOf: newElements, at: i)
       _startIndex = _base.startIndex
       _endIndex = _base.index(_startIndex, offsetBy: newSliceCount)
@@ -412,7 +473,7 @@ extension Slice
       let lastValidIndex = _base.index(before: i)
       let newEndIndexOffset =
         _base.distance(from: i, to: _endIndex)
-        + numericCast(newElements.count) + 1
+        + newElements.count + 1
       _base.insert(contentsOf: newElements, at: i)
       if shouldUpdateStartIndex {
         _startIndex = _base.index(after: lastValidIndex)
@@ -467,3 +528,6 @@ extension Slice
     }
   }
 }
+
+extension Slice: Sendable
+where Base: Sendable, Base.Index: Sendable { }

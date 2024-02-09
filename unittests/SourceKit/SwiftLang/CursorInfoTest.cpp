@@ -27,6 +27,18 @@ static StringRef getRuntimeLibPath() {
   return sys::path::parent_path(SWIFTLIB_DIR);
 }
 
+static SmallString<128> getSwiftExecutablePath() {
+  SmallString<128> path = sys::path::parent_path(getRuntimeLibPath());
+  sys::path::append(path, "bin", "swift-frontend");
+  return path;
+}
+
+static void *createCancellationToken() {
+  static std::atomic<size_t> handle(1000);
+  return reinterpret_cast<void *>(
+      handle.fetch_add(1, std::memory_order_relaxed));
+}
+
 namespace {
 
 class NullEditorConsumer : public EditorConsumer {
@@ -72,28 +84,27 @@ class NullEditorConsumer : public EditorConsumer {
 
   void recordAffectedLineRange(unsigned Line, unsigned Length) override {}
 
-  void setDiagnosticStage(UIdent DiagStage) override {}
-  void handleDiagnostic(const DiagnosticEntryInfo &Info,
-                        UIdent DiagStage) override {}
+  bool diagnosticsEnabled() override { return false; }
+
+  void handleDiagnostics(ArrayRef<DiagnosticEntryInfo> DiagInfos,
+                         UIdent DiagStage) override {}
   void recordFormattedText(StringRef Text) override {}
 
   void handleSourceText(StringRef Text) override {}
-  void handleSyntaxTree(const swift::syntax::SourceFileSyntax &SyntaxTree,
-                        std::unordered_set<unsigned> &ReusedNodeIds) override {}
-
-  SyntaxTreeTransferMode syntaxTreeTransferMode() override {
-    return SyntaxTreeTransferMode::Off;
-  }
 
 public:
   bool needsSema = false;
 };
 
 struct TestCursorInfo {
+  // Empty if no error.
+  std::string Error;
+  std::string InternalDiagnostic;
   std::string Name;
   std::string Typename;
   std::string Filename;
-  Optional<std::pair<unsigned, unsigned>> DeclarationLoc;
+  unsigned Offset;
+  unsigned Length;
 };
 
 class CursorInfoTest : public ::testing::Test {
@@ -102,7 +113,8 @@ class CursorInfoTest : public ::testing::Test {
   NullEditorConsumer Consumer;
 
 public:
-  LangSupport &getLang() { return Ctx.getSwiftLangSupport(); }
+  SourceKit::Context &getContext() { return Ctx; }
+  LangSupport &getLang() { return getContext().getSwiftLangSupport(); }
 
   void SetUp() override {
     llvm::InitializeAllTargets();
@@ -113,7 +125,9 @@ public:
   }
 
   CursorInfoTest()
-      : Ctx(*new SourceKit::Context(getRuntimeLibPath(),
+      : Ctx(*new SourceKit::Context(getSwiftExecutablePath(),
+                                    getRuntimeLibPath(),
+                                    /*diagnosticDocumentationPath*/ "",
                                     SourceKit::createSwiftLangSupport,
                                     /*dispatchOnMain=*/false)) {
     // This is avoiding destroying \p SourceKit::Context because another
@@ -127,10 +141,10 @@ public:
 
   void open(const char *DocName, StringRef Text,
             Optional<ArrayRef<const char *>> CArgs = llvm::None) {
-    auto Args = CArgs.hasValue() ? makeArgs(DocName, *CArgs)
-                                 : std::vector<const char *>{};
+    auto Args = CArgs.has_value() ? makeArgs(DocName, *CArgs)
+                                  : std::vector<const char *>{};
     auto Buf = MemoryBuffer::getMemBufferCopy(Text, DocName);
-    getLang().editorOpen(DocName, Buf.get(), Consumer, Args);
+    getLang().editorOpen(DocName, Buf.get(), Consumer, Args, None);
   }
 
   void replaceText(StringRef DocName, unsigned Offset, unsigned Length,
@@ -139,20 +153,37 @@ public:
     getLang().editorReplaceText(DocName, Buf.get(), Offset, Length, Consumer);
   }
 
-  TestCursorInfo getCursor(const char *DocName, unsigned Offset,
-                           ArrayRef<const char *> CArgs) {
+  TestCursorInfo
+  getCursor(const char *DocName, unsigned Offset, ArrayRef<const char *> CArgs,
+            SourceKitCancellationToken CancellationToken = nullptr,
+            bool CancelOnSubsequentRequest = false) {
     auto Args = makeArgs(DocName, CArgs);
     Semaphore sema(0);
 
     TestCursorInfo TestInfo;
-    getLang().getCursorInfo(DocName, Offset, 0, false, false, Args,
-      [&](const CursorInfoData &Info) {
-        TestInfo.Name = Info.Name;
-        TestInfo.Typename = Info.TypeName;
-        TestInfo.Filename = Info.Filename;
-        TestInfo.DeclarationLoc = Info.DeclarationLoc;
-        sema.signal();
-      });
+    getLang().getCursorInfo(
+        DocName, DocName, Offset, /*Length=*/0, /*Actionables=*/false,
+        /*SymbolGraph=*/false, CancelOnSubsequentRequest, Args,
+        /*vfsOptions=*/None, CancellationToken,
+        [&](const RequestResult<CursorInfoData> &Result) {
+          assert(!Result.isCancelled());
+          if (Result.isError()) {
+            TestInfo.Error = Result.getError().str();
+            sema.signal();
+            return;
+          }
+          const CursorInfoData &Info = Result.value();
+          TestInfo.InternalDiagnostic = Info.InternalDiagnostic.str();
+          if (!Info.Symbols.empty()) {
+            const CursorSymbolInfo &MainSymbol = Info.Symbols[0];
+            TestInfo.Name = std::string(MainSymbol.Name.str());
+            TestInfo.Typename = MainSymbol.TypeName.str();
+            TestInfo.Filename = MainSymbol.Location.Filename.str();
+            TestInfo.Offset = MainSymbol.Location.Offset;
+            TestInfo.Length = MainSymbol.Location.Length;
+          }
+          sema.signal();
+        });
 
     bool expired = sema.wait(60 * 1000);
     if (expired)
@@ -180,10 +211,10 @@ private:
 } // anonymous namespace
 
 TEST_F(CursorInfoTest, FileNotExist) {
-  const char *DocName = "/test.swift";
+  const char *DocName = "test.swift";
   const char *Contents =
     "let foo = 0\n";
-  const char *Args[] = { "/<not-existent-file>" };
+  const char *Args[] = { "<not-existent-file>" };
 
   open(DocName, Contents);
   auto FooOffs = findOffset("foo =", Contents);
@@ -196,7 +227,7 @@ static const char *ExpensiveInit =
     "[0:0,0:0,0:0,0:0,0:0,0:0,0:0]";
 
 TEST_F(CursorInfoTest, EditAfter) {
-  const char *DocName = "/test.swift";
+  const char *DocName = "test.swift";
   const char *Contents =
     "let value = foo\n"
     "let foo = 0\n";
@@ -209,9 +240,8 @@ TEST_F(CursorInfoTest, EditAfter) {
   EXPECT_STREQ("foo", Info.Name.c_str());
   EXPECT_STREQ("Int", Info.Typename.c_str());
   EXPECT_STREQ(DocName, Info.Filename.c_str());
-  ASSERT_TRUE(Info.DeclarationLoc.hasValue());
-  EXPECT_EQ(FooOffs, Info.DeclarationLoc->first);
-  EXPECT_EQ(strlen("foo"), Info.DeclarationLoc->second);
+  EXPECT_EQ(FooOffs, Info.Offset);
+  EXPECT_EQ(strlen("foo"), Info.Length);
 
   StringRef TextToReplace = "0";
   replaceText(DocName, findOffset(TextToReplace, Contents), TextToReplace.size(),
@@ -225,13 +255,12 @@ TEST_F(CursorInfoTest, EditAfter) {
   EXPECT_STREQ("foo", Info.Name.c_str());
   EXPECT_STREQ("Int", Info.Typename.c_str());
   EXPECT_STREQ(DocName, Info.Filename.c_str());
-  ASSERT_TRUE(Info.DeclarationLoc.hasValue());
-  EXPECT_EQ(FooOffs, Info.DeclarationLoc->first);
-  EXPECT_EQ(strlen("foo"), Info.DeclarationLoc->second);
+  EXPECT_EQ(FooOffs, Info.Offset);
+  EXPECT_EQ(strlen("foo"), Info.Length);
 }
 
 TEST_F(CursorInfoTest, EditBefore) {
-  const char *DocName = "/test.swift";
+  const char *DocName = "test.swift";
   const char *Contents =
     "let foo = 0\n"
     "let value = foo;\n";
@@ -241,12 +270,13 @@ TEST_F(CursorInfoTest, EditBefore) {
   auto FooRefOffs = findOffset("foo;", Contents);
   auto FooOffs = findOffset("foo =", Contents);
   auto Info = getCursor(DocName, FooRefOffs, Args);
+  EXPECT_STREQ("", Info.Error.c_str());
+  EXPECT_STREQ("", Info.InternalDiagnostic.c_str());
   EXPECT_STREQ("foo", Info.Name.c_str());
   EXPECT_STREQ("Int", Info.Typename.c_str());
   EXPECT_STREQ(DocName, Info.Filename.c_str());
-  ASSERT_TRUE(Info.DeclarationLoc.hasValue());
-  EXPECT_EQ(FooOffs, Info.DeclarationLoc->first);
-  EXPECT_EQ(strlen("foo"), Info.DeclarationLoc->second);
+  EXPECT_EQ(FooOffs, Info.Offset);
+  EXPECT_EQ(strlen("foo"), Info.Length);
 
   StringRef TextToReplace = "0";
   replaceText(DocName, findOffset(TextToReplace, Contents), TextToReplace.size(),
@@ -259,16 +289,17 @@ TEST_F(CursorInfoTest, EditBefore) {
 
   // Should not wait for the new AST, it should give the previous answer.
   Info = getCursor(DocName, FooRefOffs, Args);
+  EXPECT_STREQ("", Info.Error.c_str());
+  EXPECT_STREQ("", Info.InternalDiagnostic.c_str());
   EXPECT_STREQ("foo", Info.Name.c_str());
   EXPECT_STREQ("Int", Info.Typename.c_str());
   EXPECT_STREQ(DocName, Info.Filename.c_str());
-  ASSERT_TRUE(Info.DeclarationLoc.hasValue());
-  EXPECT_EQ(FooOffs, Info.DeclarationLoc->first);
-  EXPECT_EQ(strlen("foo"), Info.DeclarationLoc->second);
+  EXPECT_EQ(FooOffs, Info.Offset);
+  EXPECT_EQ(strlen("foo"), Info.Length);
 }
 
 TEST_F(CursorInfoTest, CursorInfoMustWaitDueDeclLoc) {
-  const char *DocName = "/test.swift";
+  const char *DocName = "test.swift";
   const char *Contents =
     "let value = foo\n"
     "let foo = 0\n";
@@ -278,6 +309,8 @@ TEST_F(CursorInfoTest, CursorInfoMustWaitDueDeclLoc) {
   auto FooRefOffs = findOffset("foo", Contents);
   auto FooOffs = findOffset("foo =", Contents);
   auto Info = getCursor(DocName, FooRefOffs, Args);
+  EXPECT_STREQ("", Info.Error.c_str());
+  EXPECT_STREQ("", Info.InternalDiagnostic.c_str());
   EXPECT_STREQ("foo", Info.Name.c_str());
   EXPECT_STREQ("Int", Info.Typename.c_str());
 
@@ -290,15 +323,16 @@ TEST_F(CursorInfoTest, CursorInfoMustWaitDueDeclLoc) {
   // Should wait for the new AST, because the declaration location for the 'foo'
   // reference has been edited out.
   Info = getCursor(DocName, FooRefOffs, Args);
+  EXPECT_STREQ("", Info.Error.c_str());
+  EXPECT_STREQ("", Info.InternalDiagnostic.c_str());
   EXPECT_STREQ("foo", Info.Name.c_str());
   EXPECT_STREQ("[Int : Int]", Info.Typename.c_str());
-  ASSERT_TRUE(Info.DeclarationLoc.hasValue());
-  EXPECT_EQ(FooOffs, Info.DeclarationLoc->first);
-  EXPECT_EQ(strlen("foo"), Info.DeclarationLoc->second);
+  EXPECT_EQ(FooOffs, Info.Offset);
+  EXPECT_EQ(strlen("foo"), Info.Length);
 }
 
 TEST_F(CursorInfoTest, CursorInfoMustWaitDueOffset) {
-  const char *DocName = "/test.swift";
+  const char *DocName = "test.swift";
   const char *Contents =
     "let value = foo\n"
     "let foo = 0\n";
@@ -322,13 +356,12 @@ TEST_F(CursorInfoTest, CursorInfoMustWaitDueOffset) {
   Info = getCursor(DocName, FooRefOffs, Args);
   EXPECT_STREQ("foo", Info.Name.c_str());
   EXPECT_STREQ("[Int : Int]", Info.Typename.c_str());
-  ASSERT_TRUE(Info.DeclarationLoc.hasValue());
-  EXPECT_EQ(FooOffs, Info.DeclarationLoc->first);
-  EXPECT_EQ(strlen("foo"), Info.DeclarationLoc->second);
+  EXPECT_EQ(FooOffs, Info.Offset);
+  EXPECT_EQ(strlen("foo"), Info.Length);
 }
 
 TEST_F(CursorInfoTest, CursorInfoMustWaitDueToken) {
-  const char *DocName = "/test.swift";
+  const char *DocName = "test.swift";
   const char *Contents =
     "let value = foo\n"
     "let foo = 0\n";
@@ -353,13 +386,12 @@ TEST_F(CursorInfoTest, CursorInfoMustWaitDueToken) {
   Info = getCursor(DocName, FooRefOffs, Args);
   EXPECT_STREQ("fog", Info.Name.c_str());
   EXPECT_STREQ("[Int : Int]", Info.Typename.c_str());
-  ASSERT_TRUE(Info.DeclarationLoc.hasValue());
-  EXPECT_EQ(FooOffs, Info.DeclarationLoc->first);
-  EXPECT_EQ(strlen("fog"), Info.DeclarationLoc->second);
+  EXPECT_EQ(FooOffs, Info.Offset);
+  EXPECT_EQ(strlen("fog"), Info.Length);
 }
 
 TEST_F(CursorInfoTest, CursorInfoMustWaitDueTokenRace) {
-  const char *DocName = "/test.swift";
+  const char *DocName = "test.swift";
   const char *Contents = "let value = foo\n"
                          "let foo = 0\n";
   const char *Args[] = {"-parse-as-library"};
@@ -382,7 +414,93 @@ TEST_F(CursorInfoTest, CursorInfoMustWaitDueTokenRace) {
   auto Info = getCursor(DocName, FooRefOffs, Args);
   EXPECT_STREQ("fog", Info.Name.c_str());
   EXPECT_STREQ("Int", Info.Typename.c_str());
-  ASSERT_TRUE(Info.DeclarationLoc.hasValue());
-  EXPECT_EQ(FooOffs, Info.DeclarationLoc->first);
-  EXPECT_EQ(strlen("fog"), Info.DeclarationLoc->second);
+  EXPECT_EQ(FooOffs, Info.Offset);
+  EXPECT_EQ(strlen("fog"), Info.Length);
+}
+
+TEST_F(CursorInfoTest, CursorInfoCancelsPreviousRequest) {
+  // TODO: This test case relies on the following snippet being slow to type 
+  // check so that the first cursor info request takes longer to execute than it 
+  // takes time to schedule the second request. If that is fixed, we need to 
+  // find a new way to cause slow type checking. rdar://80582770
+  const char *SlowDocName = "slow.swift";
+  const char *SlowContents = "func foo(x: Invalid1, y: Invalid2) {\n"
+                             "    x / y / x / y / x / y / x / y\n"
+                             "}\n";
+  auto SlowOffset = findOffset("x", SlowContents);
+  const char *Args[] = {"-parse-as-library"};
+  std::vector<const char *> ArgsForSlow = llvm::makeArrayRef(Args).vec();
+  ArgsForSlow.push_back(SlowDocName);
+
+  const char *FastDocName = "fast.swift";
+  const char *FastContents = "func bar() {\n"
+                             "    let foo = 123\n"
+                             "}\n";
+  auto FastOffset = findOffset("foo", FastContents);
+  std::vector<const char *> ArgsForFast = llvm::makeArrayRef(Args).vec();
+  ArgsForFast.push_back(FastDocName);
+
+  open(SlowDocName, SlowContents, llvm::makeArrayRef(Args));
+  open(FastDocName, FastContents, llvm::makeArrayRef(Args));
+
+  // Schedule a cursor info request that takes long to execute. This should be
+  // cancelled as the next cursor info (which is faster) gets requested.
+  Semaphore FirstCursorInfoSema(0);
+  getLang().getCursorInfo(
+      SlowDocName, SlowDocName, SlowOffset, /*Length=*/0, /*Actionables=*/false,
+      /*SymbolGraph=*/false, /*CancelOnSubsequentRequest=*/true, ArgsForSlow,
+      /*vfsOptions=*/None, /*CancellationToken=*/nullptr,
+      [&](const RequestResult<CursorInfoData> &Result) {
+        EXPECT_TRUE(Result.isCancelled());
+        FirstCursorInfoSema.signal();
+      });
+
+  auto Info = getCursor(FastDocName, FastOffset, Args,
+                        /*CancellationToken=*/nullptr,
+                        /*CancelOnSubsequentRequest=*/true);
+  EXPECT_STREQ("foo", Info.Name.c_str());
+  EXPECT_STREQ("Int", Info.Typename.c_str());
+  EXPECT_EQ(FastOffset, Info.Offset);
+  EXPECT_EQ(strlen("foo"), Info.Length);
+
+  bool expired = FirstCursorInfoSema.wait(30 * 1000);
+  if (expired)
+    llvm::report_fatal_error("Did not receive a response for the first request");
+}
+
+TEST_F(CursorInfoTest, CursorInfoCancellation) {
+  // TODO: This test case relies on the following snippet being slow to type
+  // check so that the first cursor info request takes longer to execute than it
+  // takes time to schedule the second request. If that is fixed, we need to
+  // find a new way to cause slow type checking. rdar://80582770
+  const char *SlowDocName = "slow.swift";
+  const char *SlowContents = "func foo(x: Invalid1, y: Invalid2) {\n"
+                             "    x / y / x / y / x / y / x / y\n"
+                             "}\n";
+  auto SlowOffset = findOffset("x", SlowContents);
+  const char *Args[] = {"-parse-as-library"};
+  std::vector<const char *> ArgsForSlow = llvm::makeArrayRef(Args).vec();
+  ArgsForSlow.push_back(SlowDocName);
+
+  open(SlowDocName, SlowContents, llvm::makeArrayRef(Args));
+
+  SourceKitCancellationToken CancellationToken = createCancellationToken();
+
+  // Schedule a cursor info request that takes long to execute. This should be
+  // cancelled as the next cursor info (which is faster) gets requested.
+  Semaphore CursorInfoSema(0);
+  getLang().getCursorInfo(
+      SlowDocName, SlowDocName, SlowOffset, /*Length=*/0, /*Actionables=*/false,
+      /*SymbolGraph=*/false, /*CancelOnSubsequentRequest=*/false, ArgsForSlow,
+      /*vfsOptions=*/None, /*CancellationToken=*/CancellationToken,
+      [&](const RequestResult<CursorInfoData> &Result) {
+        EXPECT_TRUE(Result.isCancelled());
+        CursorInfoSema.signal();
+      });
+
+  getContext().getRequestTracker()->cancel(CancellationToken);
+
+  bool expired = CursorInfoSema.wait(30 * 1000);
+  if (expired)
+    llvm::report_fatal_error("Did not receive a response for the first request");
 }

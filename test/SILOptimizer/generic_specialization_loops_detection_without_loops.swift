@@ -1,12 +1,15 @@
 // RUN: %target-swift-frontend -O -emit-sil -Xllvm -sil-print-generic-specialization-loops %s 2>&1 | %FileCheck --check-prefix=CHECK %s
 
+// rdar://122287787 (NCGenerics performance issues in regression tests)
+// UNSUPPORTED: noncopyable_generics
+
 // Check that the generic specializer does not hang a compiler by
 // creating and infinite loop of generic specializations.
 
 // Tests in this file should not result in any detected specialization loops at all.
 // CHECK-NOT: generic specialization loop
 
-// Check specializations of mutually recusrive functions, where
+// Check specializations of mutually recursive functions, where
 // there is no specialization loop.
 // CHECK-LABEL: sil{{.*}}testFooBar1{{.*}}convention
 @inline(never)
@@ -35,7 +38,7 @@ public func testFooBar6() {
   foo6(1)
 }
 
-// Check specializations of mutually recusrive functions, where
+// Check specializations of mutually recursive functions, where
 // there is no specialization loop.
 @inline(never)
 public func foo2<T>(_ x: [T]) {

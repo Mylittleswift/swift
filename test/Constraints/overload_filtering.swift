@@ -26,8 +26,7 @@ struct X {
 }
 
 func testSubscript(x: X, i: Int) {
-  // CHECK: disabled disjunction term {{.*}} bound to key path application
-  // CHECK-NEXT: disabled disjunction term {{.*}}X.subscript(_:)
+  // CHECK: disabled disjunction term {{.*}}X.subscript(_:)
   // CHECK-NEXT: disabled disjunction term {{.*}}X.subscript(_:_:_:)
   // CHECK-NEXT: introducing single enabled disjunction term {{.*}} bound to decl overload_filtering.(file).X.subscript(_:_:)
   _ = x[i, i]
@@ -36,6 +35,36 @@ func testSubscript(x: X, i: Int) {
 func testUnresolvedMember(i: Int) -> X {
   // CHECK: disabled disjunction term {{.*}} bound to decl overload_filtering.(file).X.init(_:)
   // CHECK-NEXT: disabled disjunction term {{.*}} bound to decl overload_filtering.(file).X.init(_:_:_:)
+  // CHECK-NEXT: (removed constraint: disjunction
+  // CHECK-NEXT: > [[A:\$T[0-9]+]] bound to decl overload_filtering
+  // CHECK-NEXT: > [disabled] [[A]] bound to decl overload_filtering
+  // CHECK-NEXT: > [disabled] [[A]] bound to decl overload_filtering
   // CHECK-NEXT: introducing single enabled disjunction term {{.*}} bound to decl overload_filtering.(file).X.init(_:_:)
   return .init(i, i)
+}
+
+func test_member_filtering() {
+  struct S {
+    // Result types here are different intentionally,
+    // if there were the same simplification logic would
+    // trigger and disable overloads during constraint
+    // generation.
+    func foo(_: Int) -> S { S() }
+    func foo(_: String) -> Int { 42 }
+
+    func bar(v: String) {}
+    func bar(_: Int) {}
+    func bar(a: Double, b: Int) {}
+  }
+
+  func test(s: S) {
+    // CHECK: disabled disjunction term {{.*}} bound to decl overload_filtering.(file).test_member_filtering().S.bar(v:)
+    // CHECK-NEXT: disabled disjunction term {{.*}} bound to decl overload_filtering.(file).test_member_filtering().S.bar(a:b:)
+    // CHECK-NEXT: (removed constraint: disjunction
+    // CHECK-NEXT: > [[B:\$T[0-9]+]] bound to decl overload_filtering
+    // CHECK-NEXT: > [disabled] [[B]] bound to decl overload_filtering
+    // CHECK-NEXT: > [disabled] [[B]] bound to decl overload_filtering
+    // CHECK-NEXT: introducing single enabled disjunction term {{.*}} bound to decl overload_filtering.(file).test_member_filtering().S.bar
+    s.foo(42).bar(42)
+  }
 }

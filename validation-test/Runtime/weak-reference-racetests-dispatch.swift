@@ -1,7 +1,10 @@
-// RUN: %target-run-simple-swift
+// RUN: %target-build-swift %s %import-libdispatch -o %t_binary
+// RUN: %target-codesign %t_binary
+// RUN: %target-run %t_binary
 // REQUIRES: executable_test
 // REQUIRES: stress_test
 // REQUIRES: libdispatch
+// UNSUPPORTED: threading_none
 
 import StdlibUnittest
 import Dispatch
@@ -22,11 +25,11 @@ func forwardOptional<T>(_ t: T!) -> T {
   return t!
 }
 
-WeakReferenceRaceTests.test("class instance property [SR-192] (copy)") {
+WeakReferenceRaceTests.test("class instance property (copy)") {
   let q = DispatchQueue(label: "", attributes: .concurrent)
 
-  // Capture a weak reference via its container object
-  // "https://bugs.swift.org/browse/SR-192"
+  // Capture a weak reference via its container object.
+  // https://github.com/apple/swift/issues/42814
   for i in 1...iterations {
     let box = WBox(Thing())
     let closure = {
@@ -42,11 +45,11 @@ WeakReferenceRaceTests.test("class instance property [SR-192] (copy)") {
   q.async(flags: .barrier) {}
 }
 
-WeakReferenceRaceTests.test("class instance property [SR-192] (load)") {
+WeakReferenceRaceTests.test("class instance property (load)") {
   let q = DispatchQueue(label: "", attributes: .concurrent)
 
-  // Capture a weak reference via its container object
-  // "https://bugs.swift.org/browse/SR-192"
+  // Capture a weak reference via its container object.
+  // https://github.com/apple/swift/issues/42814
   for i in 1...iterations {
     let box = WBox(Thing())
     let closure = {

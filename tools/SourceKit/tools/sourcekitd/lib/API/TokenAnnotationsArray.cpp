@@ -12,9 +12,9 @@
 
 #include "sourcekitd/TokenAnnotationsArray.h"
 #include "sourcekitd/CompactArray.h"
+#include "sourcekitd/DictionaryKeys.h"
 #include "SourceKit/Core/LLVM.h"
 #include "SourceKit/Support/UIdent.h"
-#include "DictionaryKeys.h"
 
 #include "llvm/Support/MemoryBuffer.h"
 
@@ -55,7 +55,7 @@ bool TokenAnnotationsArrayBuilder::empty() const {
 
 std::unique_ptr<llvm::MemoryBuffer>
 TokenAnnotationsArrayBuilder::createBuffer() {
-  return Impl.Builder.createBuffer();
+  return Impl.Builder.createBuffer(CustomBufferKind::TokenAnnotationsArray);
 }
 
 namespace {

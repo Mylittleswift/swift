@@ -12,7 +12,7 @@
 
 /// A value that represents either a success or a failure, including an
 /// associated value in each case.
-@_frozen
+@frozen
 public enum Result<Success, Failure: Error> {
   /// A success, storing a `Success` value.
   case success(Success)
@@ -31,13 +31,14 @@ public enum Result<Success, Failure: Error> {
   ///
   ///     let integerResult = getNextInteger()
   ///     // integerResult == .success(5)
-  ///     let stringResult = integerResult.map({ String($0) })
+  ///     let stringResult = integerResult.map { String($0) }
   ///     // stringResult == .success("5")
   ///
   /// - Parameter transform: A closure that takes the success value of this
   ///   instance.
   /// - Returns: A `Result` instance with the result of evaluating `transform`
   ///   as the new success value if this instance represents a success.
+  @inlinable
   public func map<NewSuccess>(
     _ transform: (Success) -> NewSuccess
   ) -> Result<NewSuccess, Failure> {
@@ -68,13 +69,14 @@ public enum Result<Success, Failure: Error> {
   ///
   ///     let result: Result<Int, Error> = // ...
   ///     // result == .failure(<error value>)
-  ///     let resultWithDatedError = result.mapError({ e in DatedError(e) })
+  ///     let resultWithDatedError = result.mapError { DatedError($0) }
   ///     // result == .failure(DatedError(error: <error value>, date: <date>))
   ///
   /// - Parameter transform: A closure that takes the failure value of the
   ///   instance.
   /// - Returns: A `Result` instance with the result of evaluating `transform`
   ///   as the new failure value if this instance represents a failure.
+  @inlinable
   public func mapError<NewFailure>(
     _ transform: (Failure) -> NewFailure
   ) -> Result<Success, NewFailure> {
@@ -89,10 +91,30 @@ public enum Result<Success, Failure: Error> {
   /// Returns a new result, mapping any success value using the given
   /// transformation and unwrapping the produced result.
   ///
+  /// Use this method to avoid a nested result when your transformation
+  /// produces another `Result` type.
+  ///
+  /// In this example, note the difference in the result of using `map` and
+  /// `flatMap` with a transformation that returns an result type.
+  ///
+  ///     func getNextInteger() -> Result<Int, Error> {
+  ///         .success(4)
+  ///     }
+  ///     func getNextAfterInteger(_ n: Int) -> Result<Int, Error> {
+  ///         .success(n + 1)
+  ///     }
+  ///
+  ///     let result = getNextInteger().map { getNextAfterInteger($0) }
+  ///     // result == .success(.success(5))
+  ///
+  ///     let result = getNextInteger().flatMap { getNextAfterInteger($0) }
+  ///     // result == .success(5)
+  ///
   /// - Parameter transform: A closure that takes the success value of the
   ///   instance.
-  /// - Returns: A `Result` instance with the result of evaluating `transform`
-  ///   as the new failure value if this instance represents a failure.
+  /// - Returns: A `Result` instance, either from the closure or the previous
+  ///   `.failure`.
+  @inlinable
   public func flatMap<NewSuccess>(
     _ transform: (Success) -> Result<NewSuccess, Failure>
   ) -> Result<NewSuccess, Failure> {
@@ -111,6 +133,7 @@ public enum Result<Success, Failure: Error> {
   ///   instance.
   /// - Returns: A `Result` instance, either from the closure or the previous 
   ///   `.success`.
+  @inlinable
   public func flatMapError<NewFailure>(
     _ transform: (Failure) -> Result<Success, NewFailure>
   ) -> Result<Success, NewFailure> {
@@ -131,14 +154,16 @@ public enum Result<Success, Failure: Error> {
   ///     do {
   ///         let value = try integerResult.get()
   ///         print("The value is \(value).")
-  ///     } catch error {
+  ///     } catch {
   ///         print("Error retrieving the value: \(error)")
   ///     }
   ///     // Prints "The value is 5."
   ///
   /// - Returns: The success value, if the instance represents a success.
   /// - Throws: The failure value, if the instance represents a failure.
-  public func get() throws -> Success {
+  @_alwaysEmitIntoClient
+  @inlinable
+  public func get() throws(Failure) -> Success {
     switch self {
     case let .success(success):
       return success
@@ -148,13 +173,42 @@ public enum Result<Success, Failure: Error> {
   }
 }
 
-extension Result where Failure == Swift.Error {
+extension Result {
   /// Creates a new result by evaluating a throwing closure, capturing the
   /// returned value as a success, or any thrown error as a failure.
   ///
-  /// - Parameter body: A throwing closure to evaluate.
-  @_transparent
-  public init(catching body: () throws -> Success) {
+  /// - Parameter body: A potentially throwing closure to evaluate.
+  @_alwaysEmitIntoClient
+  @inlinable
+  public init(catching body: () throws(Failure) -> Success) {
+    do {
+      self = .success(try body())
+    } catch {
+      self = .failure(error)
+    }
+  }
+}
+
+extension Result {
+  /// ABI: Historical get() throws
+  @_silgen_name("$ss6ResultO3getxyKF")
+  @usableFromInline
+  func __abi_get() throws -> Success {
+    switch self {
+    case let .success(success):
+      return success
+    case let .failure(failure):
+      throw failure
+    }
+  }
+
+}
+
+extension Result where Failure == Swift.Error {
+  /// ABI: Historical init(catching:)
+  @_silgen_name("$ss6ResultOss5Error_pRs_rlE8catchingAByxsAC_pGxyKXE_tcfC")
+  @usableFromInline
+  init(__abi_catching body: () throws(Failure) -> Success) {
     do {
       self = .success(try body())
     } catch {
@@ -166,3 +220,5 @@ extension Result where Failure == Swift.Error {
 extension Result: Equatable where Success: Equatable, Failure: Equatable { }
 
 extension Result: Hashable where Success: Hashable, Failure: Hashable { }
+
+extension Result: Sendable where Success: Sendable { }

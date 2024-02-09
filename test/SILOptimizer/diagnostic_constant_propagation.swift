@@ -5,8 +5,9 @@
 // tests here that must fail don't currently. Such tests have comments
 // describing the desirable behavior. They are false negatives now but have
 // to be addressed in the future.
-// References: <rdar://problem/29937936>,
-// <https://bugs.swift.org/browse/SR-5964>
+// References:
+// rdar://problem/29937936
+// https://github.com/apple/swift/issues/48523
 
 import StdlibUnittest
 
@@ -353,4 +354,17 @@ func applyBinary<T : SignedInteger>(_ fn: (T, T) -> (T), _ left: T, _ right: T) 
 
 func testTransparentApply() -> Int8 {
   return applyBinary(add, Int8.max, Int8.max) // expected-error {{arithmetic operation '127 + 127' (on signed 8-bit integer type) results in an overflow}}
+}
+
+func testBuiltinGlobalStringTablePointerNoError() -> UnsafePointer<CChar> {
+  return _getGlobalStringTablePointer("A literal")
+}
+
+func testBuiltinGlobalStringTablePointerError(s: String) -> UnsafePointer<CChar> {
+  return _getGlobalStringTablePointer(s) // expected-error {{globalStringTablePointer builtin must be used only on string literals}}
+}
+
+@_transparent
+func testBuiltinGlobalStringTablePointerNoError(s: String) -> UnsafePointer<CChar> {
+  return _getGlobalStringTablePointer(s)
 }

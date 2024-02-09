@@ -1,5 +1,4 @@
 // RUN: %target-swift-ide-test -syntax-coloring -source-filename %s | %FileCheck %s
-// XFAIL: broken_std_regex
 
 // CHECK: <comment-block>/* foo is the best */</comment-block>
 /* foo is the best */
@@ -36,9 +35,9 @@ func f(x: Int) -> Int {
 
 
 
-/* FIXME: blah*/
+/* FIXME: blah */
 
-// CHECK: <comment-block>/* <comment-marker>FIXME: blah*/</comment-marker></comment-block>
+// CHECK: <comment-block>/* <comment-marker>FIXME: blah</comment-marker> */</comment-block>
 
 /*
  * FIXME: blah
@@ -76,6 +75,11 @@ func test5() -> Int {
 
 // CHECK: <comment-line>// <comment-url>http://whatever.com/what-ever</comment-url></comment-line>
 // http://whatever.com/what-ever
+
+// service://example.com
+// sip://example.com
+// CHECK: <comment-line>// <comment-url>service://example.com</comment-url></comment-line>
+// CHECK: <comment-line>// <comment-url>sip://example.com</comment-url></comment-line>
 
 /// Brief.
 ///

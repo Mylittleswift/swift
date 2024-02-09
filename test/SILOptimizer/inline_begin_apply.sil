@@ -44,6 +44,28 @@ unwind:
   unwind
 }
 
+sil [ossa] @getSomeClass : $@convention(thin) () -> @owned SomeClass
+
+sil [transparent] [ossa] @yield_owned_as_guaranteed : $@yield_once @convention(thin) () -> @yields @guaranteed SomeClass {
+  %getSomeClass = function_ref @getSomeClass : $@convention(thin) () -> @owned SomeClass
+  %SomeClass = apply %getSomeClass() : $@convention(thin) () -> @owned SomeClass
+  yield %SomeClass : $SomeClass, resume bb1, unwind bb2
+
+bb1:
+  destroy_value %SomeClass : $SomeClass
+  %retval = tuple ()
+  return %retval : $()
+
+bb2:
+  destroy_value %SomeClass : $SomeClass
+  unwind
+}
+
+sil [transparent] [ossa] @test_unreachable : $@yield_once <C: SomeClass> () -> (@yields @in Indirect<C>) {
+entry:
+  unreachable 
+}
+
 // CHECK-LABEL: sil @test_simple_call
 // CHECK: bb0(%0 : $Builtin.Int1):
 // CHECK:  [[MARKER:%.*]] = function_ref @marker
@@ -84,6 +106,40 @@ sil @test_simple_call : $(Builtin.Int1) -> () {
 entry(%flag : $Builtin.Int1):
   %marker = function_ref @marker : $@convention(thin) (Builtin.Int32) -> ()
   %0 = function_ref @test_one_yield : $@convention(thin) @yield_once <T: SomeClass> () -> (@yields @in Indirect<T>)
+  (%value, %token) = begin_apply %0<SomeSubclass>() : $@convention(thin) @yield_once <T: SomeClass> () -> (@yields @in Indirect<T>)
+  destroy_addr %value : $*Indirect<SomeSubclass>
+  cond_br %flag, yes, no
+
+yes:
+  %10 = integer_literal $Builtin.Int32, 10
+  apply %marker(%10) : $@convention(thin) (Builtin.Int32) -> ()
+  end_apply %token
+  %20 = integer_literal $Builtin.Int32, 20
+  apply %marker(%20) : $@convention(thin) (Builtin.Int32) -> ()
+  br cont
+
+no:
+  %11 = integer_literal $Builtin.Int32, 11
+  apply %marker(%11) : $@convention(thin) (Builtin.Int32) -> ()
+  abort_apply %token
+  %21 = integer_literal $Builtin.Int32, 21
+  apply %marker(%21) : $@convention(thin) (Builtin.Int32) -> ()
+  br cont
+
+cont:
+  %ret = tuple ()
+  return %ret : $()
+}
+
+// CHECK-LABEL: sil @test_unreachable_call :
+// CHECK: bb0(%0 : $Builtin.Int1):
+// CHECK:  [[MARKER:%.*]] = function_ref @marker
+// CHECK:  unreachable
+// CHECK: } // end sil function 'test_unreachable_call'
+sil @test_unreachable_call : $(Builtin.Int1) -> () {
+entry(%flag : $Builtin.Int1):
+  %marker = function_ref @marker : $@convention(thin) (Builtin.Int32) -> ()
+  %0 = function_ref @test_unreachable : $@convention(thin) @yield_once <T: SomeClass> () -> (@yields @in Indirect<T>)
   (%value, %token) = begin_apply %0<SomeSubclass>() : $@convention(thin) @yield_once <T: SomeClass> () -> (@yields @in Indirect<T>)
   destroy_addr %value : $*Indirect<SomeSubclass>
   cond_br %flag, yes, no
@@ -185,23 +241,22 @@ cont:
 // CHECK-NEXT:   %2 = function_ref @marker
 // CHECK-NEXT:   %3 = integer_literal $Builtin.Int32, 1000
 // CHECK-NEXT:   %4 = apply %2(%3)
+// CHECK-NEXT:   destroy_value %1
 // CHECK-NEXT:   cond_br %0, bb1, bb2
 // CHECK:      bb1:
 // CHECK-NEXT:   [[T0:%.*]] = integer_literal $Builtin.Int32, 2000
 // CHECK-NEXT:   apply %2([[T0]])
-// CHECK-NEXT:   destroy_value %1 : $SomeClass
 // CHECK-NEXT:   tuple ()
 // CHECK-NEXT:   br bb3
 // CHECK:      bb2:
 // CHECK-NEXT:   [[T1:%.*]] = integer_literal $Builtin.Int32, 3000
 // CHECK-NEXT:   apply %2([[T1]])
-// CHECK-NEXT:   destroy_value %1 : $SomeClass
 // CHECK-NEXT:   br bb3
 // CHECK:      bb3:
 // CHECK-NEXT:   [[T0:%.*]] = tuple ()
 // CHECK-NEXT:   return [[T0]] : $()
 
-sil [transparent] [ossa] [ossa] @yield_owned : $@yield_once(@owned SomeClass) -> (@yields @owned SomeClass) {
+sil [transparent] [ossa] @yield_owned : $@yield_once(@owned SomeClass) -> (@yields @owned SomeClass) {
 entry(%0 : @owned $SomeClass):
   %marker = function_ref @marker : $@convention(thin) (Builtin.Int32) -> ()
   %1000 = integer_literal $Builtin.Int32, 1000
@@ -211,14 +266,12 @@ entry(%0 : @owned $SomeClass):
 resume:
   %2000 = integer_literal $Builtin.Int32, 2000
   apply %marker(%2000) : $@convention(thin) (Builtin.Int32) -> ()
-  destroy_value %0: $SomeClass
   %ret = tuple ()
   return %ret : $()
 
 unwind:
   %3000 = integer_literal $Builtin.Int32, 3000
   apply %marker(%3000) : $@convention(thin) (Builtin.Int32) -> ()
-  destroy_value %0: $SomeClass
   unwind
 }
 
@@ -226,6 +279,7 @@ sil [ossa] @test_simple_call_yield_owned : $(Builtin.Int1, @owned SomeClass) -> 
 entry(%flag : $Builtin.Int1, %c: @owned $SomeClass):
   %0 = function_ref @yield_owned : $@convention(thin) @yield_once(@owned SomeClass) -> (@yields @owned SomeClass)
   (%value, %token) = begin_apply %0(%c) : $@convention(thin) @yield_once(@owned SomeClass) -> (@yields @owned SomeClass)
+  destroy_value %value : $SomeClass
   cond_br %flag, yes, no
 
 yes:
@@ -518,3 +572,48 @@ bb2:
   return %ret : $()
 }
 
+
+// CHECK-LABEL: sil [ossa] @test_store_borrow_owned_as_guaranteed_yield : {{.*}} {
+// CHECK:       {{bb[0-9]+}}:
+// CHECK:         [[ADDR:%[^,]+]] = alloc_stack $SomeClass
+// CHECK:         [[INSTANCE:%[^,]+]] = apply
+// CHECK:         [[LIFETIME:%[^,]+]] = begin_borrow [[INSTANCE]]
+// CHECK:         [[BORROW:%[^,]+]] = store_borrow [[LIFETIME]] to [[ADDR]]
+// CHECK:         yield [[BORROW]] {{.*}}, resume [[BB_RESUME:bb[0-9]+]], unwind [[BB_UNWIND:bb[0-9]+]]
+// CHECK:       [[BB_RESUME]]:
+// CHECK:         end_borrow [[BORROW]]
+// CHECK:         dealloc_stack [[ADDR]]
+// CHECK:         end_borrow [[LIFETIME]]
+// CHECK:         destroy_value [[INSTANCE]]
+// CHECK:         tuple ()
+// CHECK:         [[RETVAL:%[^,]+]] = tuple ()
+// CHECK:         return [[RETVAL]]
+// CHECK:       [[BB_UNWIND]]:
+// CHECK:         end_borrow [[BORROW]]
+// CHECK:         dealloc_stack [[ADDR]]
+// CHECK:         end_borrow [[LIFETIME]]
+// CHECK:         destroy_value [[INSTANCE]]
+// CHECK:         unwind
+// CHECK-LABEL: } // end sil function 'test_store_borrow_owned_as_guaranteed_yield'
+sil [ossa] @test_store_borrow_owned_as_guaranteed_yield : $@yield_once @convention(thin) @substituted <T> () -> @yields @in_guaranteed T for <SomeClass> {
+entry:
+  %addr = alloc_stack $SomeClass
+  %callee = function_ref @yield_owned_as_guaranteed : $@yield_once @convention(thin) () -> @yields @guaranteed SomeClass
+  (%instance, %token) = begin_apply %callee() : $@yield_once @convention(thin) () -> @yields @guaranteed SomeClass
+  %borrow = store_borrow %instance to %addr : $*SomeClass
+  yield %borrow : $*SomeClass, resume bb_resume, unwind bb_unwind
+
+bb_resume:
+  end_borrow %borrow : $*SomeClass
+  dealloc_stack %addr : $*SomeClass
+  end_apply %token
+  %retval = tuple ()
+  return %retval : $()
+
+bb_unwind:
+  end_borrow %borrow : $*SomeClass
+  dealloc_stack %addr : $*SomeClass
+  abort_apply %token
+  unwind
+
+}

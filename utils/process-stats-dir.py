@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 #
 # ==-- process-stats-dir - summarize one or more Swift -stats-output-dirs --==#
 #
@@ -17,6 +17,7 @@
 
 import argparse
 import csv
+import io
 import itertools
 import json
 import os
@@ -25,13 +26,22 @@ import re
 import sys
 import time
 import urllib
-import urllib2
 from collections import namedtuple
 from operator import attrgetter
 
 from jobstats import (list_stats_dir_profiles,
                       load_stats_dir, merge_all_jobstats)
 
+if sys.version_info[0] < 3:
+    import urllib2
+    Request = urllib2.Request
+    URLOpen = urllib2.urlopen
+else:
+    import urllib.request
+    import urllib.parse
+    import urllib.error
+    Request = urllib.request.Request
+    URLOpen = urllib.request.urlopen
 
 MODULE_PAT = re.compile(r'^(\w+)\.')
 
@@ -49,7 +59,8 @@ def stat_name_minus_module(name):
 def vars_of_args(args):
     vargs = vars(args)
     if args.select_stats_from_csv_baseline is not None:
-        b = read_stats_dict_from_csv(args.select_stats_from_csv_baseline)
+        with io.open(args.select_stats_from_csv_baseline, 'r', encoding='utf-8') as f:
+            b = read_stats_dict_from_csv(f)
         # Sniff baseline stat-names to figure out if they're module-qualified
         # even when the user isn't asking us to _output_ module-grouped data.
         all_triples = all(len(k.split('.')) == 3 for k in b.keys())
@@ -66,7 +77,7 @@ def vars_of_args(args):
 # of each of "old" and "new", and the stats are those found in the respective
 # dirs.
 def load_paired_stats_dirs(args):
-    assert(len(args.remainder) == 2)
+    assert len(args.remainder) == 2
     paired_stats = []
     (old, new) = args.remainder
     vargs = vars_of_args(args)
@@ -105,18 +116,18 @@ def write_lnt_values(args):
             json.dump(j, args.output, indent=4)
         else:
             url = args.lnt_submit
-            print "\nsubmitting to LNT server: " + url
+            print("\nsubmitting to LNT server: " + url)
             json_report = {'input_data': json.dumps(j), 'commit': '1'}
             data = urllib.urlencode(json_report)
-            response_str = urllib2.urlopen(urllib2.Request(url, data))
+            response_str = URLOpen(Request(url, data))
             response = json.loads(response_str.read())
-            print "### response:"
-            print response
+            print("### response:")
+            print(response)
             if 'success' in response:
-                print "server response:\tSuccess"
+                print("server response:\tSuccess")
             else:
-                print "server response:\tError"
-                print "error:\t", response['error']
+                print("server response:\tError")
+                print("error:\t", response['error'])
                 sys.exit(1)
 
 
@@ -187,8 +198,8 @@ def update_epoch_value(d, name, epoch, value):
             epoch = existing_epoch
         else:
             (_, delta_pct) = diff_and_pct(existing_value, value)
-            print ("note: changing value %d -> %d (%.2f%%) for %s" %
-                   (existing_value, value, delta_pct, name))
+            print("note: changing value %d -> %d (%.2f%%) for %s" %
+                  (existing_value, value, delta_pct, name))
             changed = 1
     d[name] = (epoch, value)
     return (epoch, value, changed)
@@ -233,22 +244,28 @@ def set_csv_baseline(args):
     existing = None
     vargs = vars_of_args(args)
     if os.path.exists(args.set_csv_baseline):
-        with open(args.set_csv_baseline, "r") as f:
+        with io.open(args.set_csv_baseline, "r", encoding='utf-8', newline='\n') as f:
             ss = vargs['select_stat']
             existing = read_stats_dict_from_csv(f, select_stat=ss)
-            print ("updating %d baseline entries in %s" %
-                   (len(existing), args.set_csv_baseline))
+            print("updating %d baseline entries in %s" %
+                  (len(existing), args.set_csv_baseline))
     else:
-        print "making new baseline " + args.set_csv_baseline
+        print("making new baseline " + args.set_csv_baseline)
     fieldnames = ["epoch", "name", "value"]
-    with open(args.set_csv_baseline, "wb") as f:
+
+    def _open(path):
+        if sys.version_info[0] < 3:
+            return open(path, 'wb')
+        return io.open(path, "w", encoding='utf-8', newline='\n')
+
+    with _open(args.set_csv_baseline) as f:
         out = csv.DictWriter(f, fieldnames, dialect='excel-tab',
                              quoting=csv.QUOTE_NONNUMERIC)
         m = merge_all_jobstats((s for d in args.remainder
                                 for s in load_stats_dir(d, **vargs)),
                                **vargs)
         if m is None:
-            print "no stats found"
+            print("no stats found")
             return 1
         changed = 0
         newepoch = int(time.time())
@@ -265,7 +282,7 @@ def set_csv_baseline(args):
                               name=name,
                               value=int(value)))
         if existing is not None:
-            print "changed %d entries in baseline" % changed
+            print("changed %d entries in baseline" % changed)
     return 0
 
 
@@ -339,7 +356,7 @@ def write_comparison(args, old_stats, new_stats):
                         s += " :white_check_mark:"
                 return s
             else:
-                v = int(vars(row)[field])
+                v = int(getattr(row, field))
                 if row.name.startswith('time.'):
                     return format_time(v)
                 else:
@@ -402,8 +419,8 @@ def write_comparison(args, old_stats, new_stats):
 
 def compare_to_csv_baseline(args):
     vargs = vars_of_args(args)
-    old_stats = read_stats_dict_from_csv(args.compare_to_csv_baseline,
-                                         select_stat=vargs['select_stat'])
+    with io.open(args.compare_to_csv_baseline, 'r', encoding='utf-8') as f:
+        old_stats = read_stats_dict_from_csv(f, select_stat=vargs['select_stat'])
     m = merge_all_jobstats((s for d in args.remainder
                             for s in load_stats_dir(d, **vargs)),
                            **vargs)
@@ -544,12 +561,37 @@ def render_profiles(args):
             webbrowser.open_new_tab("file://" + os.path.abspath(index_path))
 
 
+def process(args):
+    if args.catapult:
+        write_catapult_trace(args)
+    elif args.compare_stats_dirs:
+        return compare_stats_dirs(args)
+    elif args.set_csv_baseline is not None:
+        return set_csv_baseline(args)
+    elif args.compare_to_csv_baseline is not None:
+        return compare_to_csv_baseline(args)
+    elif args.incrementality:
+        if args.paired:
+            show_paired_incrementality(args)
+        else:
+            show_incrementality(args)
+    elif args.lnt:
+        write_lnt_values(args)
+    elif args.evaluate:
+        return evaluate(args)
+    elif args.evaluate_delta:
+        return evaluate_delta(args)
+    elif args.render_profiles:
+        return render_profiles(args)
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--verbose", action="store_true",
                         help="Report activity verbosely")
     parser.add_argument("--output", default="-",
-                        type=argparse.FileType('wb', 0),
+                        type=argparse.FileType('w'),
                         help="Write output to file")
     parser.add_argument("--paired", action="store_true",
                         help="Process two dirs-of-stats-dirs, pairwise")
@@ -585,7 +627,7 @@ def main():
                         action="append",
                         help="Select specific statistics")
     parser.add_argument("--select-stats-from-csv-baseline",
-                        type=argparse.FileType('rb', 0), default=None,
+                        type=str, default=None,
                         help="Select statistics present in a CSV baseline")
     parser.add_argument("--exclude-timers",
                         default=False,
@@ -635,8 +677,7 @@ def main():
                        help="summarize the 'incrementality' of a build")
     modes.add_argument("--set-csv-baseline", type=str, default=None,
                        help="Merge stats from a stats-dir into a CSV baseline")
-    modes.add_argument("--compare-to-csv-baseline",
-                       type=argparse.FileType('rb', 0), default=None,
+    modes.add_argument("--compare-to-csv-baseline", type=str, default=None,
                        metavar="BASELINE.csv",
                        help="Compare stats dir to named CSV baseline")
     modes.add_argument("--compare-stats-dirs",
@@ -661,28 +702,10 @@ def main():
     if len(args.remainder) == 0:
         parser.print_help()
         return 1
-    if args.catapult:
-        write_catapult_trace(args)
-    elif args.compare_stats_dirs:
-        return compare_stats_dirs(args)
-    elif args.set_csv_baseline is not None:
-        return set_csv_baseline(args)
-    elif args.compare_to_csv_baseline is not None:
-        return compare_to_csv_baseline(args)
-    elif args.incrementality:
-        if args.paired:
-            show_paired_incrementality(args)
-        else:
-            show_incrementality(args)
-    elif args.lnt:
-        write_lnt_values(args)
-    elif args.evaluate:
-        return evaluate(args)
-    elif args.evaluate_delta:
-        return evaluate_delta(args)
-    elif args.render_profiles:
-        return render_profiles(args)
-    return None
+    try:
+        return process(args)
+    finally:
+        args.output.close()
 
 
 sys.exit(main())

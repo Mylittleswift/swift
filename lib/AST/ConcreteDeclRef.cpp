@@ -29,23 +29,44 @@ ConcreteDeclRef ConcreteDeclRef::getOverriddenDecl() const {
   auto *derivedDecl = getDecl();
   auto *baseDecl = derivedDecl->getOverriddenDecl();
 
-  auto *baseSig = baseDecl->getInnermostDeclContext()
+  auto baseSig = baseDecl->getInnermostDeclContext()
       ->getGenericSignatureOfContext();
-  auto *derivedSig = derivedDecl->getInnermostDeclContext()
+  auto derivedSig = derivedDecl->getInnermostDeclContext()
       ->getGenericSignatureOfContext();
 
   SubstitutionMap subs;
   if (baseSig) {
-    Optional<SubstitutionMap> derivedSubMap;
+    subs = SubstitutionMap::getOverrideSubstitutions(baseDecl, derivedDecl);
     if (derivedSig)
-      derivedSubMap = getSubstitutions();
-    subs = SubstitutionMap::getOverrideSubstitutions(baseDecl, derivedDecl,
-                                                     derivedSubMap);
+      subs = subs.subst(getSubstitutions());
   }
   return ConcreteDeclRef(baseDecl, subs);
 }
 
-void ConcreteDeclRef::dump(raw_ostream &os) {
+ConcreteDeclRef ConcreteDeclRef::getOverriddenDecl(ValueDecl *baseDecl) const {
+  auto *derivedDecl = getDecl();
+  if (baseDecl == derivedDecl) return *this;
+
+#ifndef NDEBUG
+  {
+    auto cur = derivedDecl;
+    for (; cur && cur != baseDecl; cur = cur->getOverriddenDecl()) {}
+    assert(cur && "decl is not an indirect override of baseDecl");
+  }
+#endif
+
+  if (!baseDecl->getInnermostDeclContext()->isGenericContext()) {
+    return ConcreteDeclRef(baseDecl);
+  }
+
+  auto subs = SubstitutionMap::getOverrideSubstitutions(baseDecl, derivedDecl);
+  if (auto derivedSubs = getSubstitutions()) {
+    subs = subs.subst(derivedSubs);
+  }
+  return ConcreteDeclRef(baseDecl, subs);
+}
+
+void ConcreteDeclRef::dump(raw_ostream &os) const {
   if (!getDecl()) {
     os << "**NULL**";
     return;
@@ -61,6 +82,6 @@ void ConcreteDeclRef::dump(raw_ostream &os) {
   }
 }
 
-void ConcreteDeclRef::dump() {
+void ConcreteDeclRef::dump() const {
   dump(llvm::errs());
 }

@@ -11,7 +11,7 @@
 //===----------------------------------------------------------------------===//
 //
 // This is an interface over the standard OSF uuid library that gives UUIDs
-// sane value semantics and operators.
+// sound value semantics and operators.
 //
 //===----------------------------------------------------------------------===//
 
@@ -21,8 +21,6 @@
 #include "swift/Basic/LLVM.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Optional.h"
-#include "llvm/ADT/SmallString.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include <array>
 
@@ -67,8 +65,8 @@ public:
   static UUID fromTime() { return UUID(FromTime); }
   
   /// Parse a UUID from a C string.
-  static Optional<UUID> fromString(const char *s);
-  
+  static llvm::Optional<UUID> fromString(const char *s);
+
   /// Convert a UUID to its string representation.
   void toString(llvm::SmallVectorImpl<char> &out) const;
   

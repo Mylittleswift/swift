@@ -9,9 +9,15 @@
 // See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 
-/// This type is used as a result of the _checkSubscript call to associate the
+/// This type is used as a result of the `_checkSubscript` call to associate the
 /// call with the array access call it guards.
-@_fixed_layout
+///
+/// In order for the optimizer see that a call to `_checkSubscript` is semantically
+/// associated with an array access, a value of this type is returned and later passed
+/// to the accessing function.  For example, a typical call to `_getElement` looks like
+///   let token = _checkSubscript(index, ...)
+///   return _getElement(index, ... , matchingSubscriptCheck: token)
+@frozen
 public struct _DependenceToken {
   @inlinable
   public init() {
@@ -35,8 +41,14 @@ func _allocateUninitializedArray<Element>(_  builtinCount: Builtin.Word)
   if count > 0 {
     // Doing the actual buffer allocation outside of the array.uninitialized
     // semantics function enables stack propagation of the buffer.
+    let storageType: _ContiguousArrayStorage<Element>.Type
+    #if !$Embedded
+    storageType = getContiguousArrayStorageType(for: Element.self)
+    #else
+    storageType = _ContiguousArrayStorage<Element>.self
+    #endif
     let bufferObject = Builtin.allocWithTailElems_1(
-      _ContiguousArrayStorage<Element>.self, builtinCount, Element.self)
+       storageType, builtinCount, Element.self)
 
     let (array, ptr) = Array<Element>._adoptStorage(bufferObject, count: count)
     return (array, ptr._rawValue)
@@ -58,7 +70,36 @@ func _deallocateUninitializedArray<Element>(
   array._deallocateUninitialized()
 }
 
+#if !INTERNAL_CHECKS_ENABLED
+@_alwaysEmitIntoClient
+@_semantics("array.finalize_intrinsic")
+@_effects(readnone)
+@_effects(escaping array.value** => return.value**)
+@_effects(escaping array.value**.class*.value** => return.value**.class*.value**)
+public // COMPILER_INTRINSIC
+func _finalizeUninitializedArray<Element>(
+  _ array: __owned Array<Element>
+) -> Array<Element> {
+  var mutableArray = array
+  mutableArray._endMutation()
+  return mutableArray
+}
+#else
+// When asserts are enabled, _endCOWMutation writes to _native.isImmutable
+// So we cannot have @_effects(readnone)
+@_alwaysEmitIntoClient
+@_semantics("array.finalize_intrinsic")
+public // COMPILER_INTRINSIC
+func _finalizeUninitializedArray<Element>(
+  _ array: __owned Array<Element>
+) -> Array<Element> {
+  var mutableArray = array
+  mutableArray._endMutation()
+  return mutableArray
+}
+#endif
 
+@_unavailableInEmbedded
 extension Collection {  
   // Utility method for collections that wish to implement
   // CustomStringConvertible and CustomDebugStringConvertible using a bracketed
@@ -66,6 +107,7 @@ extension Collection {
   internal func _makeCollectionDescription(
     withTypeName type: String? = nil
   ) -> String {
+#if !SWIFT_STDLIB_STATIC_PRINT
     var result = ""
     if let type = type {
       result += "\(type)(["
@@ -84,11 +126,14 @@ extension Collection {
     }
     result += type != nil ? "])" : "]"
     return result
+#else
+    return "(collection printing not available)"
+#endif
   }
 }
 
 extension _ArrayBufferProtocol {
-  @inlinable // FIXME @useableFromInline https://bugs.swift.org/browse/SR-7588
+  @inlinable // FIXME: @useableFromInline (https://github.com/apple/swift/issues/50130).
   @inline(never)
   internal mutating func _arrayOutOfPlaceReplace<C: Collection>(
     _ bounds: Range<Int>,
@@ -130,6 +175,23 @@ internal func _expectEnd<C: Collection>(of s: C, is i: C.Index) {
 @inlinable
 internal func _growArrayCapacity(_ capacity: Int) -> Int {
   return capacity * 2
+}
+
+@_alwaysEmitIntoClient
+internal func _growArrayCapacity(
+  oldCapacity: Int, minimumCapacity: Int, growForAppend: Bool
+) -> Int {
+  if growForAppend {
+    if oldCapacity < minimumCapacity {
+      // When appending to an array, grow exponentially.
+      return Swift.max(minimumCapacity, _growArrayCapacity(oldCapacity))
+    }
+    return oldCapacity
+  }
+  // If not for append, just use the specified capacity, ignoring oldCapacity.
+  // This means that we "shrink" the buffer in case minimumCapacity is less
+  // than oldCapacity.
+  return minimumCapacity
 }
 
 //===--- generic helpers --------------------------------------------------===//

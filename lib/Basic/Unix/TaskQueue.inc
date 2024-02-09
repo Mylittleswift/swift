@@ -59,7 +59,7 @@ TaskProcessInformation::TaskProcessInformation(ProcessId Pid, struct rusage Usag
         Usage.ru_maxrss) {
 #ifndef __APPLE__
             // Apple systems report bytes; everything else appears to report KB.
-            this->ProcessUsage.getValue().Maxrss <<= 10;
+            this->ProcessUsage.value().Maxrss <<= 10;
 #endif // __APPLE__
         }
 #endif // defined(HAVE_GETRUSAGE) && !defined(__HAIKU__)
@@ -87,7 +87,7 @@ class Task {
   /// A pipe for reading output from the child process.
   int Pipe;
 
-  /// A pipe for reading errors from the child prcess, if SeparateErrors is true.
+  /// A pipe for reading errors from the child process, if SeparateErrors is true.
   int ErrorPipe;
 
   /// The current state of the Task.
@@ -373,8 +373,8 @@ public:
 
 /// Concurrently execute the tasks in the TaskQueue, collecting the outputs from
 /// each task.
-/// Maintain invarients connecting tasks to execute, tasks currently executing,
-/// and fds being polled. These invarients include:
+/// Maintain invariants connecting tasks to execute, tasks currently executing,
+/// and fds being polled. These invariants include:
 /// A task is not in both TasksToBeExecuted and TasksBeingExecuted,
 /// A task is executing iff it is in TasksBeingExecuted,
 /// A task is executing iff any of its fds being polled are in FdsBeingPolled
@@ -436,7 +436,7 @@ private:
   PollResult pollTheFds();
 
   /// \return None on error.
-  Optional<std::vector<int>> readFromReadyFdsReturningFinishedOnes();
+  llvm::Optional<std::vector<int>> readFromReadyFdsReturningFinishedOnes();
 
   /// Ensure that events bits returned from polling are what's expected.
   void verifyEvents(short events) const;
@@ -459,7 +459,7 @@ bool TaskMonitor::executeTasks() {
     case PollResult::NoError:
       break;
     }
-    Optional<std::vector<int>> FinishedFds =
+    llvm::Optional<std::vector<int>> FinishedFds =
         readFromReadyFdsReturningFinishedOnes();
     if (!FinishedFds)
       return true;
@@ -519,7 +519,7 @@ cleanUpAHungUpTask(Task &T,
  @param pidToWaitFor the pid of the process to wait for
  @return Status information of the wait call and information about process
  */
-static std::pair<Optional<int>, TaskProcessInformation> waitForPid(const pid_t pidToWaitFor);
+static std::pair<llvm::Optional<int>, TaskProcessInformation> waitForPid(const pid_t pidToWaitFor);
 static bool
 cleanUpAfterSignal(int Status, const Task &T, TaskProcessInformation ProcInfo,
                    const TaskQueue::TaskSignalledCallback SignalledCallback);
@@ -527,7 +527,7 @@ static bool
 cleanUpAfterExit(int Status, const Task &T, TaskProcessInformation ProcInfo,
                  const TaskQueue::TaskFinishedCallback FinishedCallback);
 
-Optional<std::vector<int>>
+llvm::Optional<std::vector<int>>
 TaskMonitor::readFromReadyFdsReturningFinishedOnes() {
   std::vector<int> finishedFds;
   for (struct pollfd &fd : FdsBeingPolled) {
@@ -544,7 +544,7 @@ TaskMonitor::readFromReadyFdsReturningFinishedOnes() {
         cleanUpAHungUpTask(T, callbacks.TaskFinished, callbacks.TaskSignalled);
     TasksBeingExecuted.destroyTask(T);
     if (hadError)
-      return None;
+      return llvm::None;
   }
   return finishedFds;
 }
@@ -596,7 +596,7 @@ cleanUpAHungUpTask(Task &T,
                    : false /* Can this case ever happen? */;
 }
 
-static std::pair<Optional<int>, TaskProcessInformation> waitForPid(const pid_t pidToWaitFor) {
+static std::pair<llvm::Optional<int>, TaskProcessInformation> waitForPid(const pid_t pidToWaitFor) {
   for (;;) {
     int Status = 0;
 
@@ -614,7 +614,7 @@ static std::pair<Optional<int>, TaskProcessInformation> waitForPid(const pid_t p
     assert(pidFromWait == -1 &&
            "Did not pass WNOHANG, should only get pidToWaitFor or -1");
     if (errno == ECHILD || errno == EINVAL)
-      return std::make_pair(None, TaskProcessInformation(pidToWaitFor));
+      return std::make_pair(llvm::None, TaskProcessInformation(pidToWaitFor));
   }
 }
 

@@ -27,10 +27,12 @@
 
 namespace swift {
   class SILBasicBlock;
+  class ForeignAsyncConvention;
 
 namespace Lowering {
   class TypeConverter;
   class SILGenFunction;
+  class CalleeTypeInfo;
 
 /// An enum to indicate whether a protocol method requirement is satisfied by
 /// a free function, as for an operator requirement.
@@ -50,86 +52,71 @@ public:
   
   /// The Swift module we are visiting.
   ModuleDecl *SwiftModule;
-  
-  /// TopLevelSGF - The SILGenFunction used to visit top-level code, or null if
-  /// the current source file is not a script source file.
-  SILGenFunction /*nullable*/ *TopLevelSGF;
 
   /// Mapping from SILDeclRefs to emitted SILFunctions.
   llvm::DenseMap<SILDeclRef, SILFunction*> emittedFunctions;
   /// Mapping from ProtocolConformances to emitted SILWitnessTables.
-  llvm::DenseMap<ProtocolConformance*, SILWitnessTable*> emittedWitnessTables;
+  llvm::DenseMap<NormalProtocolConformance*, SILWitnessTable*> emittedWitnessTables;
 
-  struct DelayedFunction {
-    /// Insert the entity after the given function when it's emitted.
-    SILDeclRef insertAfter;
-    /// Code that generates the function.
-    std::function<void (SILFunction *)> emitter;
-  };
-
-  /// Mapping from SILDeclRefs to delayed SILFunction generators for
-  /// non-externally-visible symbols.
-  llvm::DenseMap<SILDeclRef, DelayedFunction> delayedFunctions;
+  /// Mapping from SILDeclRefs to where the given function will be inserted
+  /// when it's emitted. Used for non-externally visible symbols.
+  llvm::DenseMap<SILDeclRef, SILDeclRef> delayedFunctions;
 
   /// Queue of delayed SILFunctions that need to be forced.
-  std::deque<std::pair<SILDeclRef, DelayedFunction>> forcedFunctions;
+  std::deque<SILDeclRef> pendingForcedFunctions;
 
-  /// The most recent declaration we considered for emission.
-  SILDeclRef lastEmittedFunction;
+  /// Delayed SILFunctions that need to be forced.
+  llvm::DenseSet<SILDeclRef> forcedFunctions;
 
-  /// Set of used conformances for which witness tables need to be emitted.
-  llvm::DenseSet<NormalProtocolConformance *> usedConformances;
+  /// Mapping global VarDecls to their onceToken and onceFunc, respectively.
+  llvm::DenseMap<VarDecl *, std::pair<SILGlobalVariable *,
+                                      SILFunction *>> delayedGlobals;
 
-  struct DelayedWitnessTable {
-    NormalProtocolConformance *insertAfter;
-  };
+  /// Bookkeeping to ensure that useConformancesFrom{ObjectiveC,}Type() is
+  /// only called once for each unique type, as an optimization.
+  llvm::DenseSet<TypeBase *> usedConformancesFromTypes;
+  llvm::DenseSet<TypeBase *> usedConformancesFromObjectiveCTypes;
 
-  /// Set of conformances we delayed emitting witness tables for.
-  llvm::DenseMap<NormalProtocolConformance *, DelayedWitnessTable>
-    delayedConformances;
+  /// Queue of delayed conformances that need to be emitted.
+  std::deque<NormalProtocolConformance *> pendingConformances;
 
-  /// Queue of delayed conformances that need to be forced.
-  std::deque<std::pair<NormalProtocolConformance *, DelayedWitnessTable>>
-    forcedConformances;
+  /// Set of delayed conformances that have already been forced.
+  llvm::DenseSet<NormalProtocolConformance *> forcedConformances;
 
-  /// The most recent conformance...
-  NormalProtocolConformance *lastEmittedConformance = nullptr;
-
-  /// Profiler instances for constructors, grouped by associated decl.
-  /// Each profiler is shared by all member initializers for a nominal type.
-  /// Constructors within extensions are profiled separately.
-  llvm::DenseMap<Decl *, SILProfiler *> constructorProfilers;
-
-  SILFunction *emitTopLevelFunction(SILLocation Loc);
+  /// The conformance for any DistributedActor to the Actor protocol,
+  /// used only by the `distributedActorAsAnyActor` builtin.
+  RootProtocolConformance *distributedActorAsActorConformance = nullptr;
 
   size_t anonymousSymbolCounter = 0;
 
-  Optional<SILDeclRef> StringToNSStringFn;
-  Optional<SILDeclRef> NSStringToStringFn;
-  Optional<SILDeclRef> ArrayToNSArrayFn;
-  Optional<SILDeclRef> NSArrayToArrayFn;
-  Optional<SILDeclRef> DictionaryToNSDictionaryFn;
-  Optional<SILDeclRef> NSDictionaryToDictionaryFn;
-  Optional<SILDeclRef> SetToNSSetFn;
-  Optional<SILDeclRef> NSSetToSetFn;
-  Optional<SILDeclRef> BoolToObjCBoolFn;
-  Optional<SILDeclRef> ObjCBoolToBoolFn;
-  Optional<SILDeclRef> BoolToDarwinBooleanFn;
-  Optional<SILDeclRef> DarwinBooleanToBoolFn;
-  Optional<SILDeclRef> NSErrorToErrorFn;
-  Optional<SILDeclRef> ErrorToNSErrorFn;
+  llvm::Optional<SILDeclRef> StringToNSStringFn;
+  llvm::Optional<SILDeclRef> NSStringToStringFn;
+  llvm::Optional<SILDeclRef> ArrayToNSArrayFn;
+  llvm::Optional<SILDeclRef> NSArrayToArrayFn;
+  llvm::Optional<SILDeclRef> DictionaryToNSDictionaryFn;
+  llvm::Optional<SILDeclRef> NSDictionaryToDictionaryFn;
+  llvm::Optional<SILDeclRef> SetToNSSetFn;
+  llvm::Optional<SILDeclRef> NSSetToSetFn;
+  llvm::Optional<SILDeclRef> BoolToObjCBoolFn;
+  llvm::Optional<SILDeclRef> ObjCBoolToBoolFn;
+  llvm::Optional<SILDeclRef> BoolToDarwinBooleanFn;
+  llvm::Optional<SILDeclRef> DarwinBooleanToBoolFn;
+  llvm::Optional<SILDeclRef> NSErrorToErrorFn;
+  llvm::Optional<SILDeclRef> ErrorToNSErrorFn;
+  llvm::Optional<SILDeclRef> BoolToWindowsBoolFn;
+  llvm::Optional<SILDeclRef> WindowsBoolToBoolFn;
 
-  Optional<ProtocolDecl*> PointerProtocol;
+  llvm::Optional<ProtocolDecl *> PointerProtocol;
 
-  Optional<ProtocolDecl*> ObjectiveCBridgeable;
-  Optional<FuncDecl*> BridgeToObjectiveCRequirement;
-  Optional<FuncDecl*> UnconditionallyBridgeFromObjectiveCRequirement;
-  Optional<AssociatedTypeDecl*> BridgedObjectiveCType;
+  llvm::Optional<ProtocolDecl *> ObjectiveCBridgeable;
+  llvm::Optional<FuncDecl *> BridgeToObjectiveCRequirement;
+  llvm::Optional<FuncDecl *> UnconditionallyBridgeFromObjectiveCRequirement;
+  llvm::Optional<AssociatedTypeDecl *> BridgedObjectiveCType;
 
-  Optional<ProtocolDecl*> BridgedStoredNSError;
-  Optional<VarDecl*> NSErrorRequirement;
+  llvm::Optional<ProtocolDecl *> BridgedStoredNSError;
+  llvm::Optional<VarDecl *> NSErrorRequirement;
 
-  Optional<ProtocolConformance *> NSErrorConformanceToError;
+  llvm::Optional<ProtocolConformance *> NSErrorConformanceToError;
 
 public:
   SILGenModule(SILModule &M, ModuleDecl *SM);
@@ -140,6 +127,8 @@ public:
   void operator=(SILGenModule const &) = delete;
 
   ASTContext &getASTContext() { return M.getASTContext(); }
+
+  llvm::StringMap<std::pair<std::string, /*isWinner=*/bool>> FileIDsByFilePath;
 
   static DeclName getMagicFunctionName(SILDeclRef ref);
   static DeclName getMagicFunctionName(DeclContext *dc);
@@ -160,9 +149,8 @@ public:
   /// Emit a vtable thunk for a derived method if its natural abstraction level
   /// diverges from the overridden base method. If no thunking is needed,
   /// returns a static reference to the derived method.
-  Optional<SILVTable::Entry> emitVTableMethod(ClassDecl *theClass,
-                                              SILDeclRef derived,
-                                              SILDeclRef base);
+  llvm::Optional<SILVTable::Entry>
+  emitVTableMethod(ClassDecl *theClass, SILDeclRef derived, SILDeclRef base);
 
   /// True if a function has been emitted for a given SILDeclRef.
   bool hasFunction(SILDeclRef constant);
@@ -173,12 +161,79 @@ public:
                                            CanSILFunctionType thunkType,
                                            CanSILFunctionType fromType,
                                            CanSILFunctionType toType,
-                                           IsSerialized_t Serialized);
+                                           CanType dynamicSelfType,
+                                           CanType fromGlobalActor);
+  
+  /// Get or create the declaration of a completion handler block
+  /// implementation function for an ObjC API that was imported
+  /// as `async` in Swift.
+  SILFunction *getOrCreateForeignAsyncCompletionHandlerImplFunction(
+      CanSILFunctionType blockType, CanType blockStorageType,
+      CanType continuationType, AbstractionPattern origFormalType,
+      CanGenericSignature sig, CalleeTypeInfo &calleeInfo);
 
   /// Determine whether the given class has any instance variables that
   /// need to be destroyed.
   bool hasNonTrivialIVars(ClassDecl *cd);
-  
+
+  /// Given an original function and a user-specified custom derivative
+  /// function, get or create a derivative thunk with the expected derivative
+  /// function type computed from the original function.
+  ///
+  /// To achieve the expected derivative type, the thunk may perform
+  /// self-reordering, reabstraction, or both.
+  ///
+  /// Self-reordering is done for canonicalizing the types of derivative
+  /// functions for instance methods wrt `self`. We want users to define
+  /// derivatives with the following AST function types:
+  ///
+  /// JVP:
+  /// - Takes `Self` as first parameter.
+  /// - Returns differential taking `Self.Tan` as first parameter.
+  ///
+  ///     (Self) -> (T, ...) -> (R, (Self.Tan, T.Tan, ...) -> R.Tan)
+  ///
+  /// VJP:
+  /// - Takes `Self` as first parameter.
+  /// - Returns pullback returning `Self.Tan` as first result.
+  ///
+  ///     (Self) -> (T, ...) -> (R, (R.Tan) -> (Self.Tan, T.Tan, ...))
+  ///
+  /// However, the curried `Self` parameter in the AST JVP/VJP function types
+  /// becomes the *last* parameter in the flattened parameter list of their
+  /// lowered SIL function types.
+  ///
+  /// JVP:
+  /// - Takes `Self` as *last* parameter.
+  /// - Returns differential taking `Self.Tan` as *first* parameter.
+  ///
+  ///     $(T, ..., Self) -> (R, (Self.Tan, T.Tan, ...) -> R.Tan)
+  ///
+  /// VJP:
+  /// - Takes `Self` as *last* parameter.
+  /// - Returns pullback returning `Self.Tan` as *first* result.
+  ///
+  ///     $(T, ..., Self) -> (R, (R.Tan) -> (Self.Tan, T.Tan, ...))
+  ///
+  /// This leads to a parameter ordering inconsistency, and would require the
+  /// differentiation transform to handle "wrt `self` instance method
+  /// derivatives" specially. However, canonicalization during SILGen makes the
+  /// parameter ordering uniform for "instance method derivatives wrt self" and
+  /// simplifies the transform rules.
+  ///
+  /// If `self` must be reordered, reorder it so that it appears as:
+  /// - The last parameter in the returned differential.
+  /// - The last result in the returned pullback.
+  SILFunction *getOrCreateCustomDerivativeThunk(
+      AbstractFunctionDecl *originalAFD, SILFunction *originalFn,
+      SILFunction *customDerivativeFn, const AutoDiffConfig &config,
+      AutoDiffDerivativeFunctionKind kind);
+
+  /// Get or create a derivative function vtable entry thunk for the given
+  /// SILDeclRef and derivative function type.
+  SILFunction *getOrCreateDerivativeVTableThunk(
+      SILDeclRef derivativeFnRef, CanSILFunctionType derivativeFnTy);
+
   /// Determine whether we need to emit an ivar destroyer for the given class.
   /// An ivar destroyer is needed if a superclass of this class may define a
   /// failing designated initializer.
@@ -188,6 +243,11 @@ public:
   // Visitors for top-level forms
   //===--------------------------------------------------------------------===//
 
+  /// Returns true if SILGen should be skipped for the given decl.
+  bool shouldSkipDecl(Decl *d);
+
+  void visit(Decl *D);
+
   // These are either not allowed at global scope or don't require
   // code emission.
   void visitImportDecl(ImportDecl *d) {}
@@ -196,33 +256,53 @@ public:
   void visitOperatorDecl(OperatorDecl *d) {}
   void visitPrecedenceGroupDecl(PrecedenceGroupDecl *d) {}
   void visitTypeAliasDecl(TypeAliasDecl *d) {}
-  void visitAbstractTypeParamDecl(AbstractTypeParamDecl *d) {}
-  void visitSubscriptDecl(SubscriptDecl *d) {}
+  void visitOpaqueTypeDecl(OpaqueTypeDecl *d) {}
+  void visitGenericTypeParamDecl(GenericTypeParamDecl *d) {}
+  void visitAssociatedTypeDecl(AssociatedTypeDecl *d) {}
   void visitConstructorDecl(ConstructorDecl *d) {}
   void visitDestructorDecl(DestructorDecl *d) {}
   void visitModuleDecl(ModuleDecl *d) { }
   void visitMissingMemberDecl(MissingMemberDecl *d) {}
 
+  // Emitted as part of its storage.
+  void visitAccessorDecl(AccessorDecl *ad) {}
+
   void visitFuncDecl(FuncDecl *fd);
   void visitPatternBindingDecl(PatternBindingDecl *vd);
-  void visitTopLevelCodeDecl(TopLevelCodeDecl *td);
+  void visitTopLevelCodeDecl(TopLevelCodeDecl *td) {}
   void visitIfConfigDecl(IfConfigDecl *icd);
   void visitPoundDiagnosticDecl(PoundDiagnosticDecl *PDD);
   void visitNominalTypeDecl(NominalTypeDecl *ntd);
   void visitExtensionDecl(ExtensionDecl *ed);
   void visitVarDecl(VarDecl *vd);
+  void visitSubscriptDecl(SubscriptDecl *sd);
+  void visitMissingDecl(MissingDecl *d);
+  void visitMacroDecl(MacroDecl *d);
+  void visitMacroExpansionDecl(MacroExpansionDecl *d);
+
+  // Same as AbstractStorageDecl::visitEmittedAccessors, but skips over skipped
+  // (unavailable) decls.
+  void visitEmittedAccessors(AbstractStorageDecl *D,
+                             llvm::function_ref<void(AccessorDecl *)>);
+
+  void emitEntryPoint(SourceFile *SF);
+  void emitEntryPoint(SourceFile *SF, SILFunction *TopLevel);
 
   void emitAbstractFuncDecl(AbstractFunctionDecl *AFD);
-  
-  /// Generate code for a source file of the module.
-  void emitSourceFile(SourceFile *sf);
-  
+
   /// Generates code for the given FuncDecl and adds the
   /// SILFunction to the current SILModule under the name SILDeclRef(decl). For
   /// curried functions, curried entry point Functions are also generated and
   /// added to the current SILModule.
   void emitFunction(FuncDecl *fd);
-  
+
+  /// Emits the function definition for a given SILDeclRef.
+  void emitFunctionDefinition(SILDeclRef constant, SILFunction *f);
+
+  /// Emit a function now, if it's externally usable or has been referenced in
+  /// the current TU, or remember how to emit it later if not.
+  void emitOrDelayFunction(SILDeclRef constant);
+
   /// Generates code for the given closure expression and adds the
   /// SILFunction to the current SILModule under the name SILDeclRef(ce).
   SILFunction *emitClosure(AbstractClosureExpr *ce);
@@ -233,25 +313,27 @@ public:
   /// Generates code for the given class's destructor and adds
   /// the SILFunction to the current SILModule under the name
   /// SILDeclRef(cd, Destructor).
+  ///
+  /// TODO: Rename to emitClassDestructor.
   void emitDestructor(ClassDecl *cd, DestructorDecl *dd);
 
-  /// Generates the enum constructor for the given
-  /// EnumElementDecl under the name SILDeclRef(decl).
-  void emitEnumConstructor(EnumElementDecl *decl);
+  /// Generates code for the given move only nominal type's destructor and adds
+  /// the SILFunction to the current SILModule under the name SILDeclRef(nd,
+  /// dd).
+  void emitMoveOnlyDestructor(NominalTypeDecl *nd, DestructorDecl *dd);
 
   /// Emits the default argument generator with the given expression.
-  void emitDefaultArgGenerator(SILDeclRef constant, Expr *arg,
-                               DefaultArgumentKind kind, DeclContext *DC);
+  void emitDefaultArgGenerator(SILDeclRef constant, ParamDecl *param);
 
   /// Emits the stored property initializer for the given pattern.
   void emitStoredPropertyInitialization(PatternBindingDecl *pd, unsigned i);
 
-  /// Emits default argument generators for the given parameter list.
-  void emitDefaultArgGenerators(SILDeclRef::Loc decl,
-                                ParameterList *paramList);
+  /// Emits the backing initializer for a property with an attached wrapper.
+  void emitPropertyWrapperBackingInitializer(VarDecl *var);
 
-  /// Emits the curry thunk between two uncurry levels of a function.
-  void emitCurryThunk(SILDeclRef thunk);
+  /// Emits argument generators, including default argument generators and
+  /// property wrapper argument generators, for the given parameter list.
+  void emitArgumentGenerators(SILDeclRef::Loc decl, ParameterList *paramList);
   
   /// Emits a thunk from a foreign function to the native Swift convention.
   void emitForeignToNativeThunk(SILDeclRef thunk);
@@ -259,21 +341,29 @@ public:
   /// Emits a thunk from a Swift function to the native Swift convention.
   void emitNativeToForeignThunk(SILDeclRef thunk);
 
-  void preEmitFunction(SILDeclRef constant,
-                       llvm::PointerUnion<ValueDecl *,
-                                          Expr *> astNode,
-                       SILFunction *F,
-                       SILLocation L);
+  /// Emits a thunk from an actor function to a potentially distributed call.
+  void emitDistributedThunk(SILDeclRef thunk);
+
+  /// Emits the distributed actor thunk for the decl if there is one associated
+  /// with it.
+  void emitDistributedThunkForDecl(
+      llvm::PointerUnion<AbstractFunctionDecl *, VarDecl *> varOrAFD);
+
+  /// Returns true if the given declaration must be referenced through a
+  /// back deployment thunk in a context with the given resilience expansion.
+  bool requiresBackDeploymentThunk(ValueDecl *decl,
+                                   ResilienceExpansion expansion);
+
+  /// Emits a thunk that calls either the original function if it is available
+  /// or otherwise calls a fallback variant of the function that was emitted
+  /// into the client module.
+  void emitBackDeploymentThunk(SILDeclRef thunk);
+
+  void preEmitFunction(SILDeclRef constant, SILFunction *F, SILLocation L);
   void postEmitFunction(SILDeclRef constant, SILFunction *F);
   
   /// Add a global variable to the SILModule.
   void addGlobalVariable(VarDecl *global);
-  
-  /// Emit SIL related to a Clang-imported declaration.
-  void emitExternalDefinition(Decl *d);
-
-  /// Emit SIL related to a Clang-imported declaration.
-  void emitExternalWitnessTable(ProtocolConformance *d);
 
   /// Emit the ObjC-compatible entry point for a method.
   void emitObjCMethodThunk(FuncDecl *method);
@@ -288,7 +378,7 @@ public:
   void emitObjCDestructorThunk(DestructorDecl *destructor);
 
   /// Get or emit the witness table for a protocol conformance.
-  SILWitnessTable *getWitnessTable(ProtocolConformance *conformance);
+  SILWitnessTable *getWitnessTable(NormalProtocolConformance *conformance);
 
   /// Emit a protocol witness entry point.
   SILFunction *
@@ -337,7 +427,8 @@ public:
   /// Is the self method of the given nonmutating method passed indirectly?
   bool isNonMutatingSelfIndirect(SILDeclRef method);
 
-  SILDeclRef getAccessorDeclRef(AccessorDecl *accessor);
+  SILDeclRef getAccessorDeclRef(AccessorDecl *accessor,
+                                ResilienceExpansion expansion);
 
   bool canStorageUseStoredKeyPathComponent(AbstractStorageDecl *decl,
                                            ResilienceExpansion expansion);
@@ -352,7 +443,26 @@ public:
                               AbstractStorageDecl *storage,
                               ArrayRef<ProtocolConformanceRef> indexHashables,
                               CanType baseTy,
+                              DeclContext *useDC,
                               bool forPropertyDescriptor);
+
+  /// Emit all differentiability witnesses for the given function, visiting its
+  /// `@differentiable` and `@derivative` attributes.
+  void emitDifferentiabilityWitnessesForFunction(SILDeclRef constant,
+                                                 SILFunction *F);
+
+  /// Emit the differentiability witness for the given original function
+  /// declaration and SIL function, autodiff configuration, and JVP and VJP
+  /// functions (null if undefined).
+  void emitDifferentiabilityWitness(AbstractFunctionDecl *originalAFD,
+                                    SILFunction *originalFunction,
+                                    DifferentiabilityKind diffKind,
+                                    const AutoDiffConfig &config,
+                                    SILFunction *jvp, SILFunction *vjp,
+                                    const DeclAttribute *diffAttr);
+
+  /// Emit a deinit table for a noncopyable type.
+  void emitNonCopyableTypeDeinitTable(NominalTypeDecl *decl);
 
   /// Known functions for bridging.
   SILDeclRef getStringToNSStringFn();
@@ -367,12 +477,18 @@ public:
   SILDeclRef getObjCBoolToBoolFn();
   SILDeclRef getBoolToDarwinBooleanFn();
   SILDeclRef getDarwinBooleanToBoolFn();
+  SILDeclRef getBoolToWindowsBoolFn();
+  SILDeclRef getWindowsBoolToBoolFn();
   SILDeclRef getNSErrorToErrorFn();
   SILDeclRef getErrorToNSErrorFn();
 
 #define FUNC_DECL(NAME, ID) \
   FuncDecl *get##NAME(SILLocation loc);
 #include "swift/AST/KnownDecls.def"
+
+#define KNOWN_SDK_FUNC_DECL(MODULE, NAME, ID) \
+  FuncDecl *get##NAME(SILLocation loc);
+#include "swift/AST/KnownSDKDecls.def"
   
   /// Retrieve the _ObjectiveCBridgeable protocol definition.
   ProtocolDecl *getObjectiveCBridgeable(SILLocation loc);
@@ -401,11 +517,55 @@ public:
 
   /// Find the conformance of the given Swift type to the
   /// _BridgedStoredNSError protocol.
-  Optional<ProtocolConformanceRef>
-  getConformanceToBridgedStoredNSError(SILLocation loc, Type type);
+  ProtocolConformanceRef getConformanceToBridgedStoredNSError(SILLocation loc,
+                                                              Type type);
 
   /// Retrieve the conformance of NSError to the Error protocol.
   ProtocolConformance *getNSErrorConformanceToError();
+
+  /// Retrieve the _Concurrency._asyncLetStart intrinsic.
+  FuncDecl *getAsyncLetStart();
+  /// Retrieve the _Concurrency._asyncLetGet intrinsic.
+  FuncDecl *getAsyncLetGet();
+  /// Retrieve the _Concurrency._asyncLetGetThrowing intrinsic.
+  FuncDecl *getAsyncLetGetThrowing();
+  /// Retrieve the _Concurrency._asyncLetFinish intrinsic.
+  FuncDecl *getFinishAsyncLet();
+
+  /// Retrieve the _Concurrency._taskFutureGet intrinsic.
+  FuncDecl *getTaskFutureGet();
+
+  /// Retrieve the _Concurrency._taskFutureGetThrowing intrinsic.
+  FuncDecl *getTaskFutureGetThrowing();
+
+  /// Retrieve the _Concurrency._resumeUnsafeContinuation intrinsic.
+  FuncDecl *getResumeUnsafeContinuation();
+  /// Retrieve the _Concurrency._resumeUnsafeThrowingContinuation intrinsic.
+  FuncDecl *getResumeUnsafeThrowingContinuation();
+  /// Retrieve the _Concurrency._resumeUnsafeThrowingContinuationWithError intrinsic.
+  FuncDecl *getResumeUnsafeThrowingContinuationWithError();
+  /// Retrieve the _Concurrency._runTaskForBridgedAsyncMethod intrinsic.
+  FuncDecl *getRunTaskForBridgedAsyncMethod();
+  /// Retrieve the _Concurrency._checkExpectedExecutor intrinsic.
+  FuncDecl *getCheckExpectedExecutor();
+
+  /// Retrieve the _Concurrency._createCheckedContinuation intrinsic.
+  FuncDecl *getCreateCheckedContinuation();
+  /// Retrieve the _Concurrency._createCheckedThrowingContinuation intrinsic.
+  FuncDecl *getCreateCheckedThrowingContinuation();
+  /// Retrieve the _Concurrency._resumeCheckedContinuation intrinsic.
+  FuncDecl *getResumeCheckedContinuation();
+  /// Retrieve the _Concurrency._resumeCheckedThrowingContinuation intrinsic.
+  FuncDecl *getResumeCheckedThrowingContinuation();
+  /// Retrieve the _Concurrency._resumeCheckedThrowingContinuationWithError intrinsic.
+  FuncDecl *getResumeCheckedThrowingContinuationWithError();
+
+  /// Retrieve the _Concurrency._asyncMainDrainQueue intrinsic.
+  FuncDecl *getAsyncMainDrainQueue();
+  /// Retrieve the _Concurrency._swiftJobRun intrinsic.
+  FuncDecl *getSwiftJobRun();
+  // Retrieve the _SwiftConcurrencyShims.exit intrinsic.
+  FuncDecl *getExit();
 
   SILFunction *getKeyPathProjectionCoroutine(bool isReadAccess,
                                              KeyPathTypeKind typeKind);
@@ -428,22 +588,40 @@ public:
   SILGlobalVariable *getSILGlobalVariable(VarDecl *gDecl,
                                           ForDefinition_t forDef);
 
+  /// Emit all lazy conformances referenced from this function body.
+  void emitLazyConformancesForFunction(SILFunction *F);
+
+  /// Emit all lazy conformances referenced from this type's signature and
+  /// stored properties (or in the case of enums, associated values).
+  void emitLazyConformancesForType(NominalTypeDecl *NTD);
+
   /// Mark a protocol conformance as used, so we know we need to emit it if
   /// it's in our TU.
   void useConformance(ProtocolConformanceRef conformance);
 
+  /// Mark protocol conformances from the given type as used.
+  void useConformancesFromType(CanType type);
+
   /// Mark protocol conformances from the given set of substitutions as used.
   void useConformancesFromSubstitutions(SubstitutionMap subs);
 
-  /// Emit a `mark_function_escape` instruction for top-level code when a
-  /// function or closure at top level refers to script globals.
-  void emitMarkFunctionEscapeForTopLevelCodeGlobals(SILLocation loc,
-                                                const CaptureInfo &captureInfo);
+  /// Mark _ObjectiveCBridgeable conformances as used for any imported types
+  /// mentioned by the given type.
+  void useConformancesFromObjectiveCType(CanType type);
 
-  /// Get the substitutions necessary to invoke a non-member (global or local)
-  /// property.
-  SubstitutionMap
-  getNonMemberVarDeclSubstitutions(VarDecl *var);
+  /// Retrieve a protocol conformance to the `Actor` protocol for a
+  /// distributed actor type that is described via a substitution map for
+  /// the generic signature `<T: DistributedActor>`.
+  ///
+  /// The protocol conformance is a special one that is currently
+  /// only used by the `distributedActorAsAnyActor` builtin.
+  ProtocolConformanceRef
+  getDistributedActorAsActorConformance(SubstitutionMap subs);
+
+  /// Make a note of a member reference expression, which allows us
+  /// to ensure that the conformance above is emitted wherever it
+  /// needs to be.
+  void noteMemberRefExpr(MemberRefExpr *e);
 
   /// Map the substitutions for the original declaration to substitutions for
   /// the overridden declaration.
@@ -455,13 +633,10 @@ public:
   /// Emit a property descriptor for the given storage decl if it needs one.
   void tryEmitPropertyDescriptor(AbstractStorageDecl *decl);
 
-  /// Get or create the shared profiler instance for a type's constructors.
-  /// This takes care to create separate profilers for extensions, which may
-  /// reside in a different file than the one where the base type is defined.
-  SILProfiler *getOrCreateProfilerForConstructors(DeclContext *ctx,
-                                                  ConstructorDecl *cd);
-
 private:
+  /// The most recent declaration we considered for emission.
+  SILDeclRef lastEmittedFunction;
+
   /// Emit the deallocator for a class that uses the objc allocator.
   void emitObjCAllocatorDestructor(ClassDecl *cd, DestructorDecl *dd);
 };

@@ -65,25 +65,25 @@
 ///     }
 ///     // Prints "15.0"
 ///     // Prints "20.0"
-@_fixed_layout
-public struct IndexingIterator<Elements : Collection> {
+@frozen
+public struct IndexingIterator<Elements: Collection> {
   @usableFromInline
   internal let _elements: Elements
   @usableFromInline
   internal var _position: Elements.Index
 
+  /// Creates an iterator over the given collection.
   @inlinable
   @inline(__always)
-  /// Creates an iterator over the given collection.
   public /// @testable
   init(_elements: Elements) {
     self._elements = _elements
     self._position = _elements.startIndex
   }
 
+  /// Creates an iterator over the given collection.
   @inlinable
   @inline(__always)
-  /// Creates an iterator over the given collection.
   public /// @testable
   init(_elements: Elements, _position: Elements.Index) {
     self._elements = _elements
@@ -129,6 +129,9 @@ extension IndexingIterator: IteratorProtocol, Sequence {
     return element
   }
 }
+
+extension IndexingIterator: Sendable
+  where Elements: Sendable, Elements.Index: Sendable { }
 
 /// A sequence whose elements can be traversed multiple times,
 /// nondestructively, and accessed by an indexed subscript.
@@ -332,7 +335,7 @@ extension IndexingIterator: IteratorProtocol, Sequence {
 /// or bidirectional collection must traverse the entire collection to count
 /// the number of contained elements, accessing its `count` property is an
 /// O(*n*) operation.
-public protocol Collection: Sequence {
+public protocol Collection<Element>: Sequence {
   // FIXME: ideally this would be in MigrationSupport.swift, but it needs
   // to be on the protocol instead of as an extension
   @available(*, deprecated/*, obsoleted: 5.0*/, message: "all index distances are now of type Int")
@@ -341,12 +344,18 @@ public protocol Collection: Sequence {
   // FIXME: Associated type inference requires this.
   override associatedtype Element
 
+  // FIXME: <rdar://problem/34142121>
+  // This typealias should be removed as it predates the source compatibility
+  // guarantees of Swift 3, but it cannot due to a bug.
+  @available(swift, deprecated: 3.2, obsoleted: 5.0, renamed: "Element")
+  typealias _Element = Element
+
   /// A type that represents a position in the collection.
   ///
   /// Valid indices consist of the position of every element and a
   /// "past the end" position that's not valid for use as a subscript
   /// argument.
-  associatedtype Index : Comparable
+  associatedtype Index: Comparable
 
   /// The position of the first element in a nonempty collection.
   ///
@@ -384,12 +393,11 @@ public protocol Collection: Sequence {
   /// Returns an iterator over the elements of the collection.
   override __consuming func makeIterator() -> Iterator
 
-  /// A sequence that represents a contiguous subrange of the collection's
-  /// elements.
+  /// A collection representing a contiguous subrange of this collection's
+  /// elements. The subsequence shares indices with the original collection.
   ///
-  /// This associated type appears as a requirement in the `Sequence`
-  /// protocol, but it is restated here with stricter constraints. In a
-  /// collection, the subsequence should also conform to `Collection`.
+  /// The default subsequence type for collections that don't define their own
+  /// is `Slice`.
   associatedtype SubSequence: Collection = Slice<Self>
   where SubSequence.Index == Index,
         Element == SubSequence.Element,
@@ -457,7 +465,7 @@ public protocol Collection: Sequence {
 
   /// A type that represents the indices that are valid for subscripting the
   /// collection, in ascending order.
-  associatedtype Indices : Collection = DefaultIndices<Self>
+  associatedtype Indices: Collection = DefaultIndices<Self>
     where Indices.Element == Index, 
           Indices.Index == Index,
           Indices.SubSequence == Indices
@@ -491,7 +499,7 @@ public protocol Collection: Sequence {
   ///
   ///     let horseName = "Silver"
   ///     if horseName.isEmpty {
-  ///         print("I've been through the desert on a horse with no name.")
+  ///         print("My horse has no name.")
   ///     } else {
   ///         print("Hi ho, \(horseName)!")
   ///     }
@@ -704,39 +712,25 @@ extension Collection {
   public func _failEarlyRangeCheck(_ index: Index, bounds: Range<Index>) {
     // FIXME: swift-3-indexing-model: tests.
     _precondition(
-      bounds.lowerBound <= index,
-      "Out of bounds: index < startIndex")
-    _precondition(
-      index < bounds.upperBound,
-      "Out of bounds: index >= endIndex")
+      bounds.lowerBound <= index && index < bounds.upperBound,
+      "Index out of bounds")
   }
 
   @inlinable
   public func _failEarlyRangeCheck(_ index: Index, bounds: ClosedRange<Index>) {
     // FIXME: swift-3-indexing-model: tests.
     _precondition(
-      bounds.lowerBound <= index,
-      "Out of bounds: index < startIndex")
-    _precondition(
-      index <= bounds.upperBound,
-      "Out of bounds: index > endIndex")
+      bounds.lowerBound <= index && index <= bounds.upperBound,
+      "Index out of bounds")
   }
 
   @inlinable
   public func _failEarlyRangeCheck(_ range: Range<Index>, bounds: Range<Index>) {
     // FIXME: swift-3-indexing-model: tests.
     _precondition(
-      bounds.lowerBound <= range.lowerBound,
-      "Out of bounds: range begins before startIndex")
-    _precondition(
-      range.lowerBound <= bounds.upperBound,
-      "Out of bounds: range ends after endIndex")
-    _precondition(
-      bounds.lowerBound <= range.upperBound,
-      "Out of bounds: range ends before bounds.lowerBound")
-    _precondition(
+      bounds.lowerBound <= range.lowerBound &&
       range.upperBound <= bounds.upperBound,
-      "Out of bounds: range begins after bounds.upperBound")
+      "Range out of bounds")
   }
 
   /// Returns an index that is the specified distance from the given index.
@@ -1041,6 +1035,18 @@ extension Collection where SubSequence == Slice<Self> {
   }
 }
 
+extension Collection {
+  // This unavailable default implementation of `subscript(bounds: Range<_>)`
+  // prevents incomplete Collection implementations from satisfying the
+  // protocol through the use of the generic convenience implementation
+  // `subscript<R: RangeExpression>(r: R)`. If that were the case, at
+  // runtime the generic implementation would call itself
+  // in an infinite recursion because of the absence of a better option.
+  @available(*, unavailable)
+  @_alwaysEmitIntoClient
+  public subscript(bounds: Range<Index>) -> SubSequence { fatalError() }
+}
+
 extension Collection where SubSequence == Self {
   /// Removes and returns the first element of the collection.
   ///
@@ -1070,7 +1076,7 @@ extension Collection {
   ///
   ///     let horseName = "Silver"
   ///     if horseName.isEmpty {
-  ///         print("I've been through the desert on a horse with no name.")
+  ///         print("My horse has no name.")
   ///     } else {
   ///         print("Hi ho, \(horseName)!")
   ///     }
@@ -1183,9 +1189,10 @@ extension Collection {
   /// - Returns: An array containing the transformed elements of this
   ///   sequence.
   @inlinable
-  public func map<T>(
-    _ transform: (Element) throws -> T
-  ) rethrows -> [T] {
+  @_alwaysEmitIntoClient
+  public func map<T, E>(
+    _ transform: (Element) throws(E) -> T
+  ) throws(E) -> [T] {
     // TODO: swift-3-indexing-model - review the following
     let n = self.count
     if n == 0 {
@@ -1204,6 +1211,17 @@ extension Collection {
 
     _expectEnd(of: self, is: i)
     return Array(result)
+  }
+
+  // ABI-only entrypoint for the rethrows version of map, which has been
+  // superseded by the typed-throws version. Expressed as "throws", which is
+  // ABI-compatible with "rethrows".
+  @usableFromInline
+  @_silgen_name("$sSlsE3mapySayqd__Gqd__7ElementQzKXEKlF")
+  func __rethrows_map<T>(
+    _ transform: (Element) throws -> T
+  ) throws -> [T] {
+    try map(transform)
   }
 
   /// Returns a subsequence containing all but the given number of initial
@@ -1444,7 +1462,8 @@ extension Collection {
   /// Returns a subsequence from the start of the collection through the
   /// specified position.
   ///
-  /// The resulting subsequence *includes* the element at the position `end`. 
+  /// The resulting subsequence *includes* the element at the position
+  /// specified by the `through` parameter.
   /// The following example searches for the index of the number `40` in an
   /// array of integers, and then prints the prefix of the array up to, and
   /// including, that index:
@@ -1464,10 +1483,10 @@ extension Collection {
   ///     }
   ///     // Prints "[10, 20, 30, 40]"
   ///
-  /// - Parameter end: The index of the last element to include in the
-  ///   resulting subsequence. `end` must be a valid index of the collection
+  /// - Parameter position: The index of the last element to include in the
+  ///   resulting subsequence. `position` must be a valid index of the collection
   ///   that is not equal to the `endIndex` property.
-  /// - Returns: A subsequence up to, and including, the `end` position.
+  /// - Returns: A subsequence up to, and including, the given position.
   ///
   /// - Complexity: O(1)
   @inlinable
@@ -1571,7 +1590,7 @@ extension Collection {
   }
 }
 
-extension Collection where Element : Equatable {
+extension Collection where Element: Equatable {
   /// Returns the longest possible subsequences of the collection, in order,
   /// around elements equal to the given element.
   ///
@@ -1664,8 +1683,10 @@ extension Collection where SubSequence == Self {
   public mutating func removeFirst(_ k: Int) {
     if k == 0 { return }
     _precondition(k >= 0, "Number of elements to remove should be non-negative")
-    _precondition(count >= k,
-      "Can't remove more items from a collection than it contains")
-    self = self[index(startIndex, offsetBy: k)..<endIndex]
+    guard let idx = index(startIndex, offsetBy: k, limitedBy: endIndex) else {
+      _preconditionFailure(
+        "Can't remove more items from a collection than it contains")
+    }
+    self = self[idx..<endIndex]
   }
 }

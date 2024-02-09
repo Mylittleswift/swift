@@ -81,12 +81,12 @@ extension Container.Inner {
     obj.privateExtensionMethod()
 
     // FIXME: Unqualified lookup won't look into Container from here.
-    _ = PrivateInner() // expected-error {{use of unresolved identifier 'PrivateInner'}}
+    _ = PrivateInner() // expected-error {{cannot find 'PrivateInner' in scope}}
     _ = Container.PrivateInner()
   }
 
   // FIXME: Unqualified lookup won't look into Container from here.
-  var inner: PrivateInner? { return nil } // expected-error {{use of undeclared type 'PrivateInner'}}
+  var inner: PrivateInner? { return nil } // expected-error {{cannot find type 'PrivateInner' in scope}}
   var innerQualified: Container.PrivateInner? { return nil } // expected-error {{invalid redeclaration of 'innerQualified'}} expected-error {{property must be declared private because its type uses a private type}}
 }
 
@@ -114,7 +114,7 @@ class Sub : Container {
 
 protocol VeryImportantProto {
   associatedtype Assoc
-  var value: Int { get set } // expected-note {{protocol requires property 'value' with type 'Int'; do you want to add a stub?}}
+  var value: Int { get set } // expected-note {{protocol requires property 'value' with type 'Int'; add a stub for conformance}}
 }
 
 private struct VIPPrivateType : VeryImportantProto {
@@ -197,6 +197,7 @@ extension Container {
   // expected-error@-1 {{raw type 'Container.VeryPrivateStruct' is not expressible by a string, integer, or floating-point literal}}
   // expected-error@-2 {{'Container.PrivateRawValue' declares raw type 'Container.VeryPrivateStruct', but does not conform to RawRepresentable and conformance could not be synthesized}}
   // expected-error@-3 {{RawRepresentable conformance cannot be synthesized because raw type 'Container.VeryPrivateStruct' is not Equatable}}
+  // expected-error@-4 {{an enum with no cases cannot declare a raw type}}
   fileprivate enum PrivatePayload {
     case A(VeryPrivateStruct) // expected-error {{enum case in an internal enum uses a private type}} {{none}}
   }
@@ -206,13 +207,14 @@ extension Container {
   fileprivate class PrivateGenericUser<T> where T: PrivateInnerClass {} // expected-error {{generic class cannot be declared fileprivate because its generic requirement uses a private type}} {{none}}
 }
 
-fileprivate struct SR2579 {
+// https://github.com/apple/swift/issues/45184
+fileprivate struct C_45184 {
   private struct Inner {
     private struct InnerPrivateType {}
-    var innerProperty = InnerPrivateType() // expected-error {{property must be declared private because its type 'SR2579.Inner.InnerPrivateType' uses a private type}}
+    var innerProperty = InnerPrivateType() // expected-error {{property must be declared private because its type 'C_45184.Inner.InnerPrivateType' uses a private type}}
   }
   // FIXME: We need better errors when one access violation results in more
   // downstream.
-  private var outerProperty = Inner().innerProperty // expected-error {{property cannot be declared in this context because its type 'SR2579.Inner.InnerPrivateType' uses a private type}}
-  var outerProperty2 = Inner().innerProperty // expected-error {{property must be declared private because its type 'SR2579.Inner.InnerPrivateType' uses a private type}}
+  private var outerProperty = Inner().innerProperty // expected-error {{property cannot be declared in this context because its type 'C_45184.Inner.InnerPrivateType' uses a private type}}
+  var outerProperty2 = Inner().innerProperty // expected-error {{property must be declared private because its type 'C_45184.Inner.InnerPrivateType' uses a private type}}
 }

@@ -11,16 +11,16 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "use-prespecialized"
+#include "swift/SIL/SILBuilder.h"
+#include "swift/SIL/SILFunction.h"
+#include "swift/SIL/SILInstruction.h"
+#include "swift/SIL/SILModule.h"
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
-#include "swift/SILOptimizer/Utils/Local.h"
-#include "swift/SILOptimizer/Utils/SpecializationMangler.h"
-#include "swift/SIL/SILBuilder.h"
-#include "swift/SIL/SILInstruction.h"
-#include "swift/SIL/SILFunction.h"
-#include "swift/SIL/SILModule.h"
-#include "llvm/Support/Debug.h"
 #include "swift/SILOptimizer/Utils/Generics.h"
+#include "swift/SILOptimizer/Utils/InstOptUtils.h"
+#include "swift/SILOptimizer/Utils/SpecializationMangler.h"
+#include "llvm/Support/Debug.h"
 
 using namespace swift;
 
@@ -47,7 +47,7 @@ class UsePrespecialized: public SILModuleTransform {
     auto &M = *getModule();
     for (auto &F : M) {
       if (replaceByPrespecialized(F)) {
-        invalidateAnalysis(&F, SILAnalysis::InvalidationKind::Everything);
+        invalidateAnalysis(&F, SILAnalysis::InvalidationKind::FunctionBody);
       }
     }
   }
@@ -68,7 +68,7 @@ bool UsePrespecialized::replaceByPrespecialized(SILFunction &F) {
   collectApplyInst(F, NewApplies);
 
   for (auto &AI : NewApplies) {
-    auto *ReferencedF = AI.getReferencedFunction();
+    auto *ReferencedF = AI.getReferencedFunctionOrNull();
     if (!ReferencedF)
       continue;
 
@@ -90,7 +90,10 @@ bool UsePrespecialized::replaceByPrespecialized(SILFunction &F) {
     if (Subs.hasArchetypes())
       continue;
 
-    ReabstractionInfo ReInfo(AI, ReferencedF, Subs, IsNotSerialized);
+    ReabstractionInfo ReInfo(M.getSwiftModule(), M.isWholeModule(), AI,
+                             ReferencedF, Subs, IsNotSerialized,
+                             /*ConvertIndirectToDirect=*/ true,
+                             /*dropMetatypeArgs=*/ false);
 
     if (!ReInfo.canBeSpecialized())
       continue;
@@ -104,9 +107,9 @@ bool UsePrespecialized::replaceByPrespecialized(SILFunction &F) {
     // Create a name of the specialization. All external pre-specializations
     // are serialized without bodies. Thus use IsNotSerialized here.
     Mangle::GenericSpecializationMangler NewGenericMangler(ReferencedF,
-                                              Subs, IsNotSerialized,
-                                              /*isReAbstracted*/ true);
-    std::string ClonedName = NewGenericMangler.mangle();
+                                                           IsNotSerialized);
+    std::string ClonedName = NewGenericMangler.mangleReabstracted(Subs,
+       ReInfo.needAlternativeMangling());
       
     SILFunction *NewF = nullptr;
     // If we already have this specialization, reuse it.
@@ -114,12 +117,7 @@ bool UsePrespecialized::replaceByPrespecialized(SILFunction &F) {
     if (PrevF) {
       LLVM_DEBUG(llvm::dbgs() << "Found a specialization: " << ClonedName
                               << "\n");
-      if (PrevF->getLinkage() != SILLinkage::SharedExternal)
-        NewF = PrevF;
-      else {
-        LLVM_DEBUG(llvm::dbgs() << "Wrong linkage: " << (int)PrevF->getLinkage()
-                                << "\n");
-      }
+      NewF = PrevF;
     }
 
     if (!PrevF || !NewF) {

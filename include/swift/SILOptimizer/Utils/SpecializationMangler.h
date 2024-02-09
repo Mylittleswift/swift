@@ -13,7 +13,10 @@
 #ifndef SWIFT_SILOPTIMIZER_UTILS_SPECIALIZATIONMANGLER_H
 #define SWIFT_SILOPTIMIZER_UTILS_SPECIALIZATIONMANGLER_H
 
+#include "swift/SIL/GenericSpecializationMangler.h"
+
 #include "swift/Demangling/Demangler.h"
+#include "swift/Demangling/NamespaceMacros.h"
 #include "swift/Basic/NullablePtr.h"
 #include "swift/AST/ASTMangler.h"
 #include "swift/SIL/SILLinkage.h"
@@ -21,65 +24,7 @@
 
 namespace swift {
 namespace Mangle {
-
-enum class SpecializationKind : uint8_t {
-  Generic,
-  NotReAbstractedGeneric,
-  FunctionSignature,
-};
-  
-/// Inject SpecializationPass into the Mangle namespace.
-using SpecializationPass = Demangle::SpecializationPass;
-
-/// The base class for specialization mangles.
-class SpecializationMangler : public Mangle::ASTMangler {
-protected:
-  /// The specialization pass.
-  SpecializationPass Pass;
-
-  IsSerialized_t Serialized;
-
-  /// The original function which is specialized.
-  SILFunction *Function;
-
-  llvm::SmallVector<char, 32> ArgOpStorage;
-  llvm::raw_svector_ostream ArgOpBuffer;
-
-protected:
-  SpecializationMangler(SpecializationPass P, IsSerialized_t Serialized,
-                        SILFunction *F)
-      : Pass(P), Serialized(Serialized), Function(F),
-        ArgOpBuffer(ArgOpStorage) {}
-
-  SILFunction *getFunction() const { return Function; }
-
-  void beginMangling();
-
-  /// Finish the mangling of the symbol and return the mangled name.
-  std::string finalize();
-
-  void appendSpecializationOperator(StringRef Op) {
-    appendOperator(Op, StringRef(ArgOpStorage.data(), ArgOpStorage.size()));
-  }
-};
-
-// The mangler for specialized generic functions.
-class GenericSpecializationMangler : public SpecializationMangler {
-
-  SubstitutionMap SubMap;
-  bool isReAbstracted;
-  bool isInlined;
-
-public:
-  GenericSpecializationMangler(SILFunction *F, SubstitutionMap SubMap,
-                               IsSerialized_t Serialized, bool isReAbstracted,
-                               bool isInlined = false)
-      : SpecializationMangler(SpecializationPass::GenericSpecializer,
-                              Serialized, F),
-        SubMap(SubMap), isReAbstracted(isReAbstracted), isInlined(isInlined) {}
-
-  std::string mangle(GenericSignature *Sig = nullptr);
-};
+SWIFT_BEGIN_INLINE_NAMESPACE
 
 class PartialSpecializationMangler : public SpecializationMangler {
 
@@ -97,7 +42,7 @@ public:
   std::string mangle();
 };
 
-// The mangler for functions where arguments are specialized.
+// The mangler for functions where arguments or effects are specialized.
 class FunctionSignatureSpecializationMangler : public SpecializationMangler {
 
   using ReturnValueModifierIntBase = uint16_t;
@@ -117,20 +62,24 @@ class FunctionSignatureSpecializationMangler : public SpecializationMangler {
   using ArgumentModifierIntBase = uint16_t;
   enum class ArgumentModifier : ArgumentModifierIntBase {
     // Option Space 4 bits (i.e. 16 options).
-    Unmodified=0,
-    ConstantProp=1,
-    ClosureProp=2,
-    BoxToValue=3,
-    BoxToStack=4,
-    First_Option=0, Last_Option=31,
+    Unmodified = 0,
+    ConstantProp = 1,
+    ClosureProp = 2,
+    BoxToValue = 3,
+    BoxToStack = 4,
+    InOutToOut = 5,
+
+    First_Option = 0,
+    Last_Option = 31,
 
     // Option Set Space. 12 bits (i.e. 12 option).
-    Dead=32,
-    OwnedToGuaranteed=64,
-    SROA=128,
-    GuaranteedToOwned=256,
-    ExistentialToGeneric=512,
-    First_OptionSetEntry=32, LastOptionSetEntry=32768,
+    Dead = 32,
+    OwnedToGuaranteed = 64,
+    SROA = 128,
+    GuaranteedToOwned = 256,
+    ExistentialToGeneric = 512,
+    First_OptionSetEntry = 32,
+    LastOptionSetEntry = 32768,
   };
 
   using ArgInfo = std::pair<ArgumentModifierIntBase,
@@ -146,7 +95,10 @@ public:
   FunctionSignatureSpecializationMangler(SpecializationPass Pass,
                                          IsSerialized_t Serialized,
                                          SILFunction *F);
-  void setArgumentConstantProp(unsigned OrigArgIdx, LiteralInst *LI);
+  // For arguments / return values
+  void setArgumentConstantProp(unsigned OrigArgIdx, SILInstruction *constInst);
+  void appendStringAsIdentifier(StringRef str);
+
   void setArgumentClosureProp(unsigned OrigArgIdx, PartialApplyInst *PAI);
   void setArgumentClosureProp(unsigned OrigArgIdx,
                               ThinToThickFunctionInst *TTTFI);
@@ -157,18 +109,23 @@ public:
   void setArgumentSROA(unsigned OrigArgIdx);
   void setArgumentBoxToValue(unsigned OrigArgIdx);
   void setArgumentBoxToStack(unsigned OrigArgIdx);
+  void setArgumentInOutToOut(unsigned OrigArgIdx);
   void setReturnValueOwnedToUnowned();
+
+  // For effects
+  void setRemovedEffect(EffectKind effect);
 
   std::string mangle();
   
 private:
-  void mangleConstantProp(LiteralInst *LI);
+  void mangleConstantProp(SILInstruction *constInst);
   void mangleClosureProp(SILInstruction *Inst);
   void mangleArgument(ArgumentModifierIntBase ArgMod,
                       NullablePtr<SILInstruction> Inst);
   void mangleReturnValue(ReturnValueModifierIntBase RetMod);
 };
 
+SWIFT_END_INLINE_NAMESPACE
 } // end namespace Mangle
 } // end namespace swift
 

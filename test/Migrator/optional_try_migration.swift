@@ -1,6 +1,6 @@
 // RUN: %empty-directory(%t)
-// RUN: %target-swift-frontend -c -swift-version 4 -primary-file %s -emit-migrated-file-path %t/optional_try_migration.result.swift
-// RUN: diff -u %S/optional_try_migration.swift.expected %t/optional_try_migration.result.swift
+// RUN: %target-swift-frontend -c -swift-version 4 -primary-file %s -emit-migrated-file-path %t/optional_try_migration.result.swift %api_diff_data_dir
+// RUN: %diff -u %S/optional_try_migration.swift.expected %t/optional_try_migration.result.swift
 
 func fetchOptInt() throws -> Int? {
     return 3
@@ -69,7 +69,7 @@ func testOptionalChaining() {
     let _ = try? optThing!.fetchOptInt()
 
     // No migration needed, because of the explicit cast
-    let _ = (try? optThing?.fetchOptInt()) as? Int
+    let _ = (try? optThing?.fetchOptInt()) as? Int // expected-warning{{conditional downcast from 'Int?' to 'Int' does nothing}}
 
     // Migration needed
     let _ = try? thing.fetchInt()

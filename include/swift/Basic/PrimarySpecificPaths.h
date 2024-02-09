@@ -32,16 +32,23 @@ public:
   /// is to be written to stdout, contains "-".
   std::string OutputFilename;
 
+  /// The name to report the main output file as being in the index store.
+  /// This is equivalent to OutputFilename, unless -index-store-output-path
+  /// was specified.
+  std::string IndexUnitOutputFilename;
+
   SupplementaryOutputPaths SupplementaryOutputs;
 
   /// The name of the "main" input file, used by the debug info.
   std::string MainInputFilenameForDebugInfo;
 
   PrimarySpecificPaths(StringRef OutputFilename = StringRef(),
+                       StringRef IndexUnitOutputFilename = StringRef(),
                        StringRef MainInputFilenameForDebugInfo = StringRef(),
                        SupplementaryOutputPaths SupplementaryOutputs =
                            SupplementaryOutputPaths())
       : OutputFilename(OutputFilename),
+        IndexUnitOutputFilename(IndexUnitOutputFilename),
         SupplementaryOutputs(SupplementaryOutputs),
         MainInputFilenameForDebugInfo(MainInputFilenameForDebugInfo) {}
 
@@ -49,7 +56,10 @@ public:
     return !SupplementaryOutputs.ModuleOutputPath.empty() ||
            !SupplementaryOutputs.ModuleDocOutputPath.empty();
   }
+  bool haveModuleSummaryOutputPath() const {
+    return !SupplementaryOutputs.ModuleSummaryOutputPath.empty();
+  }
 };
 } // namespace swift
 
-#endif /* SWIFT_BASIC_PRIMARYSPECIFICPATHS_H */
+#endif // SWIFT_BASIC_PRIMARYSPECIFICPATHS_H

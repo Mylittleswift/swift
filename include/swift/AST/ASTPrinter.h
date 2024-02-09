@@ -14,12 +14,20 @@
 #define SWIFT_AST_ASTPRINTER_H
 
 #include "swift/Basic/LLVM.h"
+#include "swift/Basic/QuotedString.h"
 #include "swift/Basic/UUID.h"
 #include "swift/AST/Identifier.h"
+#include "swift/AST/Decl.h"
+#include "clang/AST/Decl.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/raw_ostream.h"
 #include "swift/AST/PrintOptions.h"
+
+// Prefix to use when printing module names in module interfaces to avoid
+// ambiguities with type names, in AliasModuleNames mode.
+#define MODULE_DISAMBIGUATING_PREFIX "Module___"
 
 namespace swift {
   class Decl;
@@ -29,13 +37,14 @@ namespace swift {
   class TypeDecl;
   class EnumElementDecl;
   class Type;
-  struct TypeLoc;
+  class TypeLoc;
   class Pattern;
   class ExtensionDecl;
   class NominalTypeDecl;
   class ValueDecl;
   class SourceLoc;
-  enum class tok;
+  enum class tok : uint8_t;
+  enum class AccessorKind;
 
 /// Describes the context in which a name is being printed, which
 /// affects the keywords that need to be escaped.
@@ -44,6 +53,10 @@ enum class PrintNameContext {
   Normal,
   /// Keyword context, where no keywords are escaped.
   Keyword,
+  /// Keyword for introducing a declarations e.g. 'func', 'struct'.
+  IntroducerKeyword,
+  /// Type member context, e.g. properties or enum cases.
+  TypeMember,
   /// Generic parameter context, where 'Self' is not escaped.
   GenericParameter,
   /// Class method return type, where 'Self' is not escaped.
@@ -78,6 +91,20 @@ enum class PrintStructureKind {
   TupleElement,
   NumberLiteral,
   StringLiteral,
+  /// ' = defaultValue'.
+  DefaultArgumentClause,
+  /// '<T, U: Requirement>'.
+  DeclGenericParameterClause,
+  /// 'where T: Collection, T.Element: Equitable'.
+  DeclGenericRequirementClause,
+  /// ' async throws'.
+  EffectsSpecifiers,
+  /// ' -> ResultTy' or ': ResultTy'.
+  DeclResultTypeClause,
+  /// '(a: Int, b param: String)' in function declarations.
+  FunctionParameterList,
+  /// '@attribute ParamTy...' in parameter declarations.
+  FunctionParameterType,
 };
 
 /// An abstract class used to print an AST.
@@ -85,6 +112,7 @@ class ASTPrinter {
   unsigned CurrentIndentation = 0;
   unsigned PendingNewlines = 0;
   TypeOrExtensionDecl SynthesizeTarget;
+  llvm::SmallPtrSet<const clang::Decl *, 8> printedClangDecl;
 
   void printTextImpl(StringRef Text);
 
@@ -102,7 +130,8 @@ public:
   /// Called before printing of a declaration.
   ///
   /// Callers should use callPrintDeclPre().
-  virtual void printDeclPre(const Decl *D, Optional<BracketOptions> Bracket) {}
+  virtual void printDeclPre(const Decl *D,
+                            llvm::Optional<BracketOptions> Bracket) {}
   /// Called before printing at the point which would be considered the location
   /// of the declaration (normally the name of the declaration).
   ///
@@ -116,7 +145,12 @@ public:
   /// Called after finishing printing of a declaration.
   ///
   /// Callers should use callPrintDeclPost().
-  virtual void printDeclPost(const Decl *D, Optional<BracketOptions> Bracket) {}
+  virtual void printDeclPost(const Decl *D,
+                             llvm::Optional<BracketOptions> Bracket) {}
+
+  /// Called before printing the result type of the declaration. Printer can
+  /// replace \p TL to customize the input.
+  virtual void printDeclResultTypePre(ValueDecl *VD, TypeLoc &TL) {}
 
   /// Called before printing a type.
   virtual void printTypePre(const TypeLoc &TL) {}
@@ -129,21 +163,25 @@ public:
   /// \param T the original \c Type being referenced. May be null.
   /// \param RefTo the \c TypeDecl this is considered a reference to.
   /// \param Name the name to be printed.
-  virtual void printTypeRef(Type T, const TypeDecl *RefTo, Identifier Name);
+  /// \param NameContext the \c PrintNameContext which this type is being
+  ///                    printed in, used to determine how to escape type names.
+  virtual void printTypeRef(
+      Type T, const TypeDecl *RefTo, Identifier Name,
+      PrintNameContext NameContext = PrintNameContext::Normal);
 
   /// Called when printing the referenced name of a module.
   virtual void printModuleRef(ModuleEntity Mod, Identifier Name);
 
   /// Called before printing a synthesized extension.
-  virtual void printSynthesizedExtensionPre(const ExtensionDecl *ED,
-                                            TypeOrExtensionDecl NTD,
-                                            Optional<BracketOptions> Bracket) {}
+  virtual void
+  printSynthesizedExtensionPre(const ExtensionDecl *ED, TypeOrExtensionDecl NTD,
+                               llvm::Optional<BracketOptions> Bracket) {}
 
   /// Called after printing a synthesized extension.
-  virtual void printSynthesizedExtensionPost(const ExtensionDecl *ED,
-                                             TypeOrExtensionDecl TargetDecl,
-                                             Optional<BracketOptions> Bracket) {
-  }
+  virtual void
+  printSynthesizedExtensionPost(const ExtensionDecl *ED,
+                                TypeOrExtensionDecl TargetDecl,
+                                llvm::Optional<BracketOptions> Bracket) {}
 
   /// Called before printing a structured entity.
   ///
@@ -174,10 +212,15 @@ public:
     return *this;
   }
 
+  ASTPrinter &operator<<(QuotedString s);
+
   ASTPrinter &operator<<(unsigned long long N);
   ASTPrinter &operator<<(UUID UU);
 
+  ASTPrinter &operator<<(Identifier name);
+  ASTPrinter &operator<<(DeclBaseName name);
   ASTPrinter &operator<<(DeclName name);
+  ASTPrinter &operator<<(DeclNameRef name);
 
   // Special case for 'char', but not arbitrary things that convert to 'char'.
   template <typename T>
@@ -186,12 +229,26 @@ public:
     return *this << StringRef(&c, 1);
   }
 
-  void printKeyword(StringRef name, PrintOptions Opts, StringRef Suffix = "") {
+  void printKeyword(StringRef name,
+                    const PrintOptions &Opts,
+                    StringRef Suffix = "") {
     if (Opts.SkipUnderscoredKeywords && name.startswith("_"))
       return;
+    assert(!name.empty() && "Tried to print empty keyword");
     callPrintNamePre(PrintNameContext::Keyword);
     *this << name;
     printNamePost(PrintNameContext::Keyword);
+    *this << Suffix;
+  }
+
+  void printIntroducerKeyword(StringRef name,
+                              const PrintOptions &Opts,
+                              StringRef Suffix = "") {
+    if (Opts.SkipIntroducerKeywords)
+      return;
+    callPrintNamePre(PrintNameContext::IntroducerKeyword);
+    *this << name;
+    printNamePost(PrintNameContext::IntroducerKeyword);
     *this << Suffix;
   }
 
@@ -245,11 +302,12 @@ public:
 
   // MARK: Callback interface wrappers that perform ASTPrinter bookkeeping.
 
-   /// Make a callback to printDeclPre(), performing any necessary bookeeping.
-  void callPrintDeclPre(const Decl *D, Optional<BracketOptions> Bracket);
+   /// Make a callback to printDeclPre(), performing any necessary bookkeeping.
+  void callPrintDeclPre(const Decl *D, llvm::Optional<BracketOptions> Bracket);
 
-  /// Make a callback to printDeclPost(), performing any necessary bookeeping.
-  void callPrintDeclPost(const Decl *D, Optional<BracketOptions> Bracket) {
+  /// Make a callback to printDeclPost(), performing any necessary bookkeeping.
+  void callPrintDeclPost(const Decl *D,
+                         llvm::Optional<BracketOptions> Bracket) {
     printDeclPost(D, Bracket);
   }
 
@@ -259,13 +317,13 @@ public:
     avoidPrintDeclPost(D);
   }
 
-   /// Make a callback to printDeclLoc(), performing any necessary bookeeping.
+   /// Make a callback to printDeclLoc(), performing any necessary bookkeeping.
   void callPrintDeclLoc(const Decl *D) {
     forceNewlines();
     printDeclLoc(D);
   }
 
-   /// Make a callback to printNamePre(), performing any necessary bookeeping.
+   /// Make a callback to printNamePre(), performing any necessary bookkeeping.
   void callPrintNamePre(PrintNameContext Context) {
     forceNewlines();
     printNamePre(Context);
@@ -278,9 +336,11 @@ public:
     printStructurePre(Kind, D);
   }
 
-  /// To sanitize a malformed utf8 string to a well-formed one.
-  static std::string sanitizeUtf8(StringRef Text);
-  static ValueDecl* findConformancesWithDocComment(ValueDecl *VD);
+  /// Return true when the given redeclared clang decl is being printed for the
+  /// first time.
+  bool shouldPrintRedeclaredClangDecl(const clang::Decl *d) {
+    return printedClangDecl.insert(d).second;
+  }
 
 private:
   virtual void anchor();
@@ -305,7 +365,7 @@ public:
   ExtraIndentStreamPrinter(raw_ostream &out, StringRef extraIndent)
   : StreamPrinter(out), ExtraIndent(extraIndent) { }
 
-  virtual void printIndent() {
+  virtual void printIndent() override {
     printText(ExtraIndent);
     StreamPrinter::printIndent();
   }
@@ -331,9 +391,24 @@ void printEnumElementsAsCases(
     llvm::DenseSet<EnumElementDecl *> &UnhandledElements,
     llvm::raw_ostream &OS);
 
-void getInheritedForPrinting(const Decl *decl,
-                             llvm::function_ref<bool(const Decl*)> shouldPrint,
-                             llvm::SmallVectorImpl<TypeLoc> &Results);
+void getInheritedForPrinting(
+  const Decl *decl, const PrintOptions &options,
+  llvm::SmallVectorImpl<InheritedEntry> &Results);
+
+StringRef getAccessorKindString(AccessorKind value);
+
+/// Call the given function nested appropriately within #if checks
+/// for the compiler features that it uses.  Note that printBody
+/// may be called multiple times if the declaration uses suppressible
+/// features.
+void printWithCompatibilityFeatureChecks(ASTPrinter &printer,
+                                         PrintOptions &options,
+                                         Decl *decl,
+                                         llvm::function_ref<void()> printBody);
+
+/// Determine whether we need to escape the given keyword within the
+/// given context, by wrapping it in backticks.
+bool escapeKeywordInContext(StringRef keyword, PrintNameContext context);
 
 } // namespace swift
 

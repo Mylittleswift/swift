@@ -15,8 +15,10 @@
 
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/STLExtras.h"
+#include "swift/SIL/SILMoveOnlyDeinit.h"
 #include "llvm/ADT/PointerUnion.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include <memory>
 
 namespace swift {
@@ -67,6 +69,9 @@ public:
   virtual void didDeserialize(ModuleDecl *mod,
                               SILDefaultWitnessTable *wtable) = 0;
 
+  /// Observe that we deserialized a move only deinit declaration.
+  virtual void didDeserialize(ModuleDecl *mod, SILMoveOnlyDeinit *deinit) = 0;
+
   virtual ~DeserializationNotificationHandlerBase() = default;
 };
 
@@ -107,6 +112,10 @@ public:
   /// Observe that we deserialized a default witness-table declaration.
   virtual void didDeserialize(ModuleDecl *mod,
                               SILDefaultWitnessTable *wtable) override {}
+
+  /// Observe that we deserialized a move only deinit declaration.
+  virtual void didDeserialize(ModuleDecl *mod,
+                              SILMoveOnlyDeinit *deinit) override {}
 
   virtual StringRef getName() const = 0;
 
@@ -194,7 +203,7 @@ public:
   using iterator = llvm::mapped_iterator<
       decltype(handlerSet)::const_iterator,
       decltype(&DeserializationNotificationHandlerSet::getUnderlyingHandler)>;
-  using range = llvm::iterator_range<iterator>;
+  using range = iterator_range<iterator>;
 
   /// Returns an iterator to the first element of the handler set.
   ///
@@ -238,28 +247,8 @@ public:
   void didDeserialize(ModuleDecl *mod, SILWitnessTable *wtable) override;
   void didDeserialize(ModuleDecl *mod,
                       SILDefaultWitnessTable *wtable) override;
+  void didDeserialize(ModuleDecl *mod, SILMoveOnlyDeinit *deinit) override;
 };
-
-/// A protocol (or interface) for handling value deletion notifications.
-///
-/// This class is used as a base class for any class that need to accept
-/// instruction deletion notification messages. This is used by passes and
-/// analysis that need to invalidate data structures that contain pointers.
-/// This is similar to LLVM's ValueHandle.
-struct DeleteNotificationHandler {
-  DeleteNotificationHandler() { }
-  virtual ~DeleteNotificationHandler() {}
-
-  /// Handle the invalidation message for the value \p Value.
-  virtual void handleDeleteNotification(SILNode *value) { }
-
-  /// Returns True if the pass, analysis or other entity wants to receive
-  /// notifications. This callback is called once when the class is being
-  /// registered, and not once per notification. Entities that implement
-  /// this callback should always return a constant answer (true/false).
-  virtual bool needsNotifications() { return false; }
-};
-
 } // namespace swift
 
 #endif

@@ -16,9 +16,9 @@ import SwiftShims
 // StringGuts is a parameterization over String's representations. It provides
 // functionality and guidance for efficiently working with Strings.
 //
-@_fixed_layout
+@frozen
 public // SPI(corelibs-foundation)
-struct _StringGuts {
+struct _StringGuts: @unchecked Sendable {
   @usableFromInline
   internal var _object: _StringObject
 
@@ -37,9 +37,9 @@ struct _StringGuts {
 
 // Raw
 extension _StringGuts {
-  @inlinable
+  @inlinable @inline(__always)
   internal var rawBits: _StringObject.RawBitPattern {
-    @inline(__always) get { return _object.rawBits }
+    return _object.rawBits
   }
 }
 
@@ -78,34 +78,33 @@ extension _StringGuts {
 // Queries
 extension _StringGuts {
   // The number of code units
-  @inlinable
-  internal var count: Int { @inline(__always) get { return _object.count } }
+  @inlinable @inline(__always)
+  internal var count: Int { return _object.count }
 
-  @inlinable
-  internal var isEmpty: Bool { @inline(__always) get { return count == 0 } }
+  @inlinable @inline(__always)
+  internal var isEmpty: Bool { return count == 0 }
 
-  @inlinable
-  internal var isSmall: Bool {
-    @inline(__always) get { return _object.isSmall }
-  }
+  @inlinable @inline(__always)
+  internal var isSmall: Bool { return _object.isSmall }
 
+  @inline(__always)
   internal var isSmallASCII: Bool {
-    @inline(__always) get { return _object.isSmall && _object.smallIsASCII }
+    return _object.isSmall && _object.smallIsASCII
   }
 
-  @inlinable
+  @inlinable @inline(__always)
   internal var asSmall: _SmallString {
-    @inline(__always) get { return _SmallString(_object) }
+    return _SmallString(_object)
   }
 
-  @inlinable
+  @inlinable @inline(__always)
   internal var isASCII: Bool  {
-    @inline(__always) get { return _object.isASCII }
+    return _object.isASCII
   }
 
-  @inlinable
+  @inlinable @inline(__always)
   internal var isFastASCII: Bool  {
-    @inline(__always) get { return isFastUTF8 && _object.isASCII }
+    return isFastUTF8 && _object.isASCII
   }
 
   @inline(__always)
@@ -121,8 +120,10 @@ extension _StringGuts {
 
   internal var hasSharedStorage: Bool { return _object.hasSharedStorage }
 
+  // Whether this string has breadcrumbs
   internal var hasBreadcrumbs: Bool {
-    return hasNativeStorage || hasSharedStorage
+    return hasSharedStorage
+      || (hasNativeStorage && _object.withNativeStorage { $0.hasBreadcrumbs })
   }
 }
 
@@ -134,9 +135,9 @@ extension _StringGuts {
   internal var isFastUTF8: Bool { return _fastPath(_object.providesFastUTF8) }
 
   // A String which does not provide fast access to contiguous UTF-8 code units
-  @inlinable
+  @inlinable @inline(__always)
   internal var isForeign: Bool {
-    @inline(__always) get { return _slowPath(_object.isForeign) }
+     return _slowPath(_object.isForeign)
   }
 
   @inlinable @inline(__always)
@@ -166,8 +167,7 @@ extension _StringGuts {
     _ f: (UnsafeBufferPointer<CChar>) throws -> R
   ) rethrows -> R {
     return try self.withFastUTF8 { utf8 in
-      let ptr = utf8.baseAddress._unsafelyUnwrappedUnchecked._asCChar
-      return try f(UnsafeBufferPointer(start: ptr, count: utf8.count))
+      return try utf8.withMemoryRebound(to: CChar.self, f)
     }
   }
 }
@@ -179,16 +179,18 @@ extension _StringGuts {
   #else
   @usableFromInline @inline(never) @_effects(releasenone)
   internal func _invariantCheck() {
-    #if arch(i386) || arch(arm)
+    #if _pointerBitWidth(_64)
+    _internalInvariant(MemoryLayout<String>.size == 16, """
+    the runtime is depending on this, update Reflection.mm and \
+    this if you change it
+    """)
+    #elseif _pointerBitWidth(_32)
     _internalInvariant(MemoryLayout<String>.size == 12, """
     the runtime is depending on this, update Reflection.mm and \
     this if you change it
     """)
     #else
-    _internalInvariant(MemoryLayout<String>.size == 16, """
-    the runtime is depending on this, update Reflection.mm and \
-    this if you change it
-    """)
+    #error("Unknown platform")
     #endif
   }
   #endif // INTERNAL_CHECKS_ENABLED
@@ -247,6 +249,16 @@ extension _StringGuts {
   internal func _foreignCopyUTF8(
     into mbp: UnsafeMutableBufferPointer<UInt8>
   ) -> Int? {
+    #if _runtime(_ObjC)
+    // Currently, foreign  means NSString
+    let res = _object.withCocoaObject {
+      _cocoaStringCopyUTF8($0, into: UnsafeMutableRawBufferPointer(mbp))
+    }
+    if let res { return res }
+
+    // If the NSString contains invalid UTF8 (e.g. unpaired surrogates), we
+    // can get nil from cocoaStringCopyUTF8 in situations where a character by
+    // character loop would get something more useful like repaired contents
     var ptr = mbp.baseAddress._unsafelyUnwrappedUnchecked
     var numWritten = 0
     for cu in String(self).utf8 {
@@ -255,15 +267,17 @@ extension _StringGuts {
       ptr += 1
       numWritten += 1
     }
-
+    
     return numWritten
+    #else
+    fatalError("No foreign strings on Linux in this version of Swift")
+    #endif
   }
 
+  @inline(__always)
   internal var utf8Count: Int {
-    @inline(__always) get {
-      if _fastPath(self.isFastUTF8) { return count }
-      return String(self).utf8.count
-    }
+    if _fastPath(self.isFastUTF8) { return count }
+    return String(self).utf8.count
   }
 }
 
@@ -272,51 +286,154 @@ extension _StringGuts {
   @usableFromInline
   internal typealias Index = String.Index
 
-  @inlinable
+  @inlinable @inline(__always)
   internal var startIndex: String.Index {
-    @inline(__always) get { return Index(_encodedOffset: 0) }
+    // The start index is always `Character` aligned.
+    Index(_encodedOffset: 0)._characterAligned._encodingIndependent
   }
-  @inlinable
+
+  @inlinable @inline(__always)
   internal var endIndex: String.Index {
-    @inline(__always) get { return Index(_encodedOffset: self.count) }
+    // The end index is always `Character` aligned.
+    markEncoding(Index(_encodedOffset: self.count)._characterAligned)
+  }
+}
+
+// Encoding
+extension _StringGuts {
+  /// Returns whether this string has a UTF-8 storage representation.
+  /// If this returns false, then the string is encoded in UTF-16.
+  ///
+  /// This always returns a value corresponding to the string's actual encoding.
+  @_alwaysEmitIntoClient
+  @inline(__always)
+  internal var isUTF8: Bool { _object.isUTF8 }
+
+  @_alwaysEmitIntoClient // Swift 5.7
+  @inline(__always)
+  internal func markEncoding(_ i: String.Index) -> String.Index {
+    isUTF8 ? i._knownUTF8 : i._knownUTF16
+  }
+
+  /// Returns true if the encoding of the given index isn't known to be in
+  /// conflict with this string's encoding.
+  ///
+  /// If the index was created by code that was built on a stdlib below 5.7,
+  /// then this check may incorrectly return true on a mismatching index, but it
+  /// is guaranteed to never incorrectly return false. If all loaded binaries
+  /// were built in 5.7+, then this method is guaranteed to always return the
+  /// correct value.
+  @_alwaysEmitIntoClient @inline(__always)
+  internal func hasMatchingEncoding(_ i: String.Index) -> Bool {
+    i._hasMatchingEncoding(isUTF8: isUTF8)
+  }
+
+  /// Return an index whose encoding can be assumed to match that of `self`,
+  /// trapping if `i` has an incompatible encoding.
+  ///
+  /// If `i` is UTF-8 encoded, but `self` is an UTF-16 string, then trap.
+  ///
+  /// If `i` is UTF-16 encoded, but `self` is an UTF-8 string, then transcode
+  /// `i`'s offset to UTF-8 and return the resulting index. This allows the use
+  /// of indices from a bridged Cocoa string after the string has been converted
+  /// to a native Swift string. (Such indices are technically still considered
+  /// invalid, but we allow this specific case to keep compatibility with
+  /// existing code that assumes otherwise.)
+  ///
+  /// Detecting an encoding mismatch isn't always possible -- older binaries did
+  /// not set the flags that this method relies on. However, false positives
+  /// cannot happen: if this method detects a mismatch, then it is guaranteed to
+  /// be a real one.
+  @_alwaysEmitIntoClient
+  @inline(__always)
+  internal func ensureMatchingEncoding(_ i: Index) -> Index {
+    if _fastPath(hasMatchingEncoding(i)) { return i }
+    return _slowEnsureMatchingEncoding(i)
+  }
+
+  @_alwaysEmitIntoClient
+  @inline(never)
+  @_effects(releasenone)
+  internal func _slowEnsureMatchingEncoding(_ i: Index) -> Index {
+    // Attempt to recover from mismatched encodings between a string and its
+    // index.
+
+    if isUTF8 {
+      // Attempt to use an UTF-16 index on a UTF-8 string.
+      //
+      // This can happen if `self` was originally verbatim-bridged, and someone
+      // mistakenly attempts to keep using an old index after a mutation. This
+      // is technically an error, but trapping here would trigger a lot of
+      // broken code that previously happened to work "fine" on e.g. ASCII
+      // strings. Instead, attempt to convert the offset to UTF-8 code units by
+      // transcoding the string. This can be slow, but it often results in a
+      // usable index, even if non-ASCII characters are present. (UTF-16
+      // breadcrumbs help reduce the severity of the slowdown.)
+
+      // FIXME: Consider emitting a runtime warning here.
+      // FIXME: Consider performing a linked-on-or-after check & trapping if the
+      // client executable was built on some particular future Swift release.
+      let utf16 = String.UTF16View(self)
+      var r = utf16.index(utf16.startIndex, offsetBy: i._encodedOffset)
+      if i.transcodedOffset != 0 {
+        r = r.encoded(offsetBy: i.transcodedOffset)
+      } else {
+        // Preserve alignment bits if possible.
+        r = r._copyingAlignment(from: i)
+      }
+      return r._knownUTF8
+    }
+
+    // Attempt to use an UTF-8 index on a UTF-16 string. This is rarer, but it
+    // can still happen when e.g. people apply an index they got from
+    // `AttributedString` on the original (bridged) string that they constructed
+    // it from.
+    let utf8 = String.UTF8View(self)
+    var r = utf8.index(utf8.startIndex, offsetBy: i._encodedOffset)
+    if i.transcodedOffset != 0 {
+      r = r.encoded(offsetBy: i.transcodedOffset)
+    } else {
+      // Preserve alignment bits if possible.
+      r = r._copyingAlignment(from: i)
+    }
+    return r._knownUTF16
   }
 }
 
 // Old SPI(corelibs-foundation)
 extension _StringGuts {
-  @available(*, deprecated)
   public // SPI(corelibs-foundation)
   var _isContiguousASCII: Bool {
     return !isSmall && isFastUTF8 && isASCII
   }
 
-  @available(*, deprecated)
-  public // SPI(corelibs-foundation)
-  var _isContiguousUTF16: Bool {
+  // FIXME: Previously used by swift-corelibs-foundation. Aging for removal.
+  @available(*, unavailable)
+  public var _isContiguousUTF16: Bool {
     return false
   }
 
-  // FIXME: Remove. Still used by swift-corelibs-foundation
+  // FIXME: Mark as obsoleted. Still used by swift-corelibs-foundation.
   @available(*, deprecated)
   public var startASCII: UnsafeMutablePointer<UInt8> {
     return UnsafeMutablePointer(mutating: _object.fastUTF8.baseAddress!)
   }
 
-  // FIXME: Remove. Still used by swift-corelibs-foundation
-  @available(*, deprecated)
+  // FIXME: Previously used by swift-corelibs-foundation. Aging for removal.
+  @available(*, unavailable)
   public var startUTF16: UnsafeMutablePointer<UTF16.CodeUnit> {
     fatalError("Not contiguous UTF-16")
   }
 }
 
-@available(*, deprecated)
-public // SPI(corelibs-foundation)
-func _persistCString(_ p: UnsafePointer<CChar>?) -> [CChar]? {
+// FIXME: Previously used by swift-corelibs-foundation. Aging for removal.
+@available(*, unavailable)
+public func _persistCString(_ p: UnsafePointer<CChar>?) -> [CChar]? {
   guard let s = p else { return nil }
-  let count = Int(_swift_stdlib_strlen(s))
-  var result = [CChar](repeating: 0, count: count + 1)
-  for i in 0..<count {
-    result[i] = s[i]
+  let bytesToCopy = UTF8._nullCodeUnitOffset(in: s) + 1 // +1 for the terminating NUL
+  let result = [CChar](unsafeUninitializedCapacity: bytesToCopy) { buf, initedCount in
+    buf.baseAddress!.update(from: s, count: bytesToCopy)
+    initedCount = bytesToCopy
   }
   return result
 }

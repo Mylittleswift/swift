@@ -81,8 +81,8 @@ class SubCls : MyCls, Prot {
   var protocolProperty2 = 0
 }
 
-// CHECK: func <Func>genFn</Func><<GenericTypeParam>T</GenericTypeParam> : <Protocol@64:10>Prot</Protocol> where <GenericTypeParam@85:12>T</GenericTypeParam>.<AssociatedType@65:18>Blarg</AssociatedType> : <Protocol@71:10>Prot2</Protocol>>(_ <Param>p</Param> : <GenericTypeParam@85:12>T</GenericTypeParam>) -> <iStruct@>Int</iStruct> {}{{$}}
-func genFn<T : Prot where T.Blarg : Prot2>(_ p : T) -> Int {}
+// CHECK: func <Func>genFn</Func><<GenericTypeParam>T</GenericTypeParam> : <Protocol@64:10>Prot</Protocol>>(_ <Param>p</Param> : <GenericTypeParam@85:12>T</GenericTypeParam>) -> <iStruct@>Int</iStruct> where <GenericTypeParam@85:12>T</GenericTypeParam>.<AssociatedType@65:18>Blarg</AssociatedType> : <Protocol@71:10>Prot2</Protocol> {}{{$}}
+func genFn<T : Prot>(_ p : T) -> Int where T.Blarg : Prot2 {}
 
 func test(_ x: Int) {
   // CHECK: <Func@[[@LINE-3]]:6>genFn</Func>(<Class@[[@LINE-11]]:7>SubCls</Class>())
@@ -94,7 +94,7 @@ func test(_ x: Int) {
 // CHECK: func <Func>bar</Func>(<Param>x</Param>: <iStruct@>Int</iStruct>) -> (<iStruct@>Int</iStruct>, <iStruct@>Float</iStruct>) {
 func bar(x: Int) -> (Int, Float) {
   // CHECK: <Ctor@[[@LINE-84]]:8-TypeAlias@[[@LINE-78]]:11>TypealiasForS</Ctor>()
-  TypealiasForS()
+  _ = TypealiasForS()
 }
 
 class C2 {
@@ -129,7 +129,7 @@ class GenCls<T> {
 }
 
 func test2() {
-  // CHECK: <Class@[[@LINE-19]]:7>GenCls</Class><<iStruct@>Int</iStruct>>()
+  // CHECK: <Ctor@[[@LINE-17]]:3-Class@[[@LINE-19]]:7>GenCls</Ctor><<iStruct@>Int</iStruct>>()
   GenCls<Int>()
 }
 
@@ -339,3 +339,35 @@ test_arg_tuple2(p1:0,0)
 test_arg_tuple3(0,p2:0)
 // CHECK: <Func@[[@LINE-7]]:6>test_arg_tuple4</Func>(<Func@[[@LINE-7]]:6#p1>p1</Func>:0,<Func@[[@LINE-7]]:6#p2>p2</Func>:0)
 test_arg_tuple4(p1:0,p2:0)
+
+
+@dynamicMemberLookup
+struct Lens<T> {
+  var obj: T
+  init(_ obj: T) {
+    self.obj = obj
+  }
+  subscript<U>(dynamicMember member: WritableKeyPath<T, U>) -> Lens<U> {
+    get { return Lens<U>(obj[keyPath: member]) }
+    set { obj[keyPath: member] = newValue.obj }
+  }
+}
+struct Point {
+  var x: Int
+  var y: Int
+}
+struct Rectangle {
+  var topLeft: Point
+  var bottomRight: Point
+}
+func testDynamicMemberLookup(r: Lens<Rectangle>) {
+  _ = r.topLeft
+  // CHECK: _ = <Param@[[@LINE-2]]:30>r</Param>.<Var@[[@LINE-5]]:7>topLeft</Var>
+  _ = r.bottomRight.y
+  // CHECK: _ = <Param@[[@LINE-4]]:30>r</Param>.<Var@[[@LINE-6]]:7>bottomRight</Var>.<Var@[[@LINE-10]]:7>y</Var>
+}
+func keyPathTester<V>(keyPath: KeyPath<Lens<Rectangle>, V>) {}
+func testKeyPath() {
+  keyPathTester(keyPath: \.topLeft)
+  // CHECK: <Func@[[@LINE-3]]:6>keyPathTester</Func>(<Func@[[@LINE-3]]:6#keyPath>keyPath</Func>: \.<Var@[[@LINE-12]]:7>topLeft</Var>)
+}

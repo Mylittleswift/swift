@@ -25,7 +25,7 @@ struct YieldVariables {
     }
     _modify {
       var x = 0
-      yield &x // expected-error {{cannot yield immutable value of type 'Int' as an inout yield of type 'String'}}
+      yield &x // expected-error {{cannot yield reference to storage of type 'Int' as an inout yield of type 'String'}}
     }
   }
 
@@ -82,13 +82,26 @@ func call_yield() {
 struct YieldInDefer {
   var property: String {
     _read {
-      defer { // expected-warning {{'defer' statement before end of scope always executes immediately}}{{7-12=do}}
+      defer { // expected-warning {{'defer' statement at end of scope always executes immediately}}{{7-12=do}}
         // FIXME: this recovery is terrible
         yield ""
-        // expected-error@-1 {{expression resolves to an unused function}}
+        // expected-error@-1 {{function is unused}}
         // expected-error@-2 {{consecutive statements on a line must be separated by ';'}}
         // expected-warning@-3 {{string literal is unused}}
       }
+    }
+  }
+}
+
+// https://github.com/apple/swift/issues/57393
+struct InvalidYieldParsing {
+  var property: String {
+    _read {
+      yield(x: "test") // expected-error {{unexpected label in 'yield' statement}} {{13-16=}}
+      yield(x: "test", y:   {0}) // expected-error {{expected 1 yield value(s)}}
+      // expected-error@-1 {{unexpected label in 'yield' statement}} {{13-16=}}
+      // expected-error@-2 {{unexpected label in 'yield' statement}} {{24-29=}}
+      yield(_: "test") // expected-error {{unexpected label in 'yield' statement}} {{13-16=}}
     }
   }
 }

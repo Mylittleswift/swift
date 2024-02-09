@@ -19,10 +19,11 @@
 namespace swift {
   class SILModule;
   class SILFunction;
+  class SILInstruction;
   class PrettyStackTraceSILFunctionTransform;
 
   /// The base class for all SIL-level transformations.
-  class SILTransform : public DeleteNotificationHandler {
+  class SILTransform {
   public:
     /// The kind of transformation passes we use.
     enum class TransformKind {
@@ -80,11 +81,13 @@ namespace swift {
     /// Get the transform's name as a C++ identifier.
     llvm::StringRef getID() { return PassKindID(getPassKind()); }
 
-  protected:
     /// Searches for an analysis of type T in the list of registered
     /// analysis. If the analysis is not found, the program terminates.
     template<typename T>
     T* getAnalysis() { return PM->getAnalysis<T>(); }
+
+    template<typename T>
+    T* getAnalysis(SILFunction *f) { return PM->getAnalysis<T>(f); }
 
     const SILOptions &getOptions() { return PM->getOptions(); }
   };
@@ -125,6 +128,10 @@ namespace swift {
     void restartPassPipeline() { PM->restartWithCurrentFunction(this); }
 
     SILFunction *getFunction() { return F; }
+
+    bool continueWithNextSubpassRun(SILInstruction *forInst = nullptr) {
+      return PM->continueWithNextSubpassRun(forInst, F, this);
+    }
 
     void invalidateAnalysis(SILAnalysis::InvalidationKind K) {
       PM->invalidateAnalysis(F, K);

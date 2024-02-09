@@ -24,7 +24,6 @@
 #include "swift/Basic/LLVM.h"
 #include "swift/ABI/MetadataValues.h"
 #include "swift/AST/Type.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/StringRef.h"
 
 #include <memory>
@@ -185,11 +184,11 @@ public:
   /// resolve it to a specific type in the local AST.
   ///
   /// \param skipArtificial If true, the address may be an artificial type
-  ///   wrapper that should be ignored.  For example, it could be a
+  ///   wrapper that should be ignored. For example, it could be a
   ///   dynamic subclass created by (e.g.) CoreData or KVO; if so, and this
   ///   flag is set, this method will implicitly ignore the subclass
   ///   and instead attempt to resolve a type for the first non-artificial
-  ///   superclass.
+  ///   superclass. See [NOTE: Dynamic-subclass-KVO].
   Result<Type>
   getTypeForRemoteTypeMetadata(remote::RemoteAddress address,
                                bool skipArtificial = false);
@@ -240,6 +239,17 @@ public:
   Result<OpenedExistential>
   getDynamicTypeAndAddressForExistential(remote::RemoteAddress address,
                                          Type staticType);
+  
+  /// Given a reference to an opaque type descriptor, an ordinal, and a set
+  /// of substitutions, get the underlying type for the opaque type.
+  ///
+  /// This does not recursively apply the transformation if the underlying
+  /// type in turn refers to another opaque type.
+  Result<Type>
+  getUnderlyingTypeForOpaqueType(remote::RemoteAddress opaqueDescriptor,
+                                 SubstitutionMap substitutions,
+                                 unsigned ordinal);
+  
 };
 
 } // end namespace remoteAST

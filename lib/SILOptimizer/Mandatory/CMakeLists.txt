@@ -1,21 +1,52 @@
-silopt_register_sources(
+target_sources(swiftSILOptimizer PRIVATE
   AccessEnforcementSelection.cpp
   AccessMarkerElimination.cpp
   AddressLowering.cpp
+  CapturePromotion.cpp
+  ClosureLifetimeFixup.cpp
+  ConsumeOperatorCopyableAddressesChecker.cpp
+  ConsumeOperatorCopyableValuesChecker.cpp
+  PhiStorageOptimizer.cpp
   ConstantPropagation.cpp
+  DebugInfoCanonicalizer.cpp
   DefiniteInitialization.cpp
   DIMemoryUseCollector.cpp
   DataflowDiagnostics.cpp
   DiagnoseInfiniteRecursion.cpp
+  DiagnoseInvalidEscapingCaptures.cpp
+  DiagnoseLifetimeIssues.cpp
   DiagnoseStaticExclusivity.cpp
   DiagnoseUnreachable.cpp
-  GuaranteedARCOpts.cpp
+  Differentiation.cpp
+  FlowIsolation.cpp
   IRGenPrepare.cpp
+  LexicalLifetimeEliminator.cpp
+  LowerHopToActor.cpp
   MandatoryInlining.cpp
+  MoveOnlyAddressCheckerTester.cpp
+  MoveOnlyAddressCheckerUtils.cpp
+  MoveOnlyBorrowToDestructureTester.cpp
+  MoveOnlyBorrowToDestructureUtils.cpp
+  MoveOnlyChecker.cpp
+  MoveOnlyDiagnostics.cpp
+  MoveOnlyObjectCheckerTester.cpp
+  MoveOnlyObjectCheckerUtils.cpp
+  MoveOnlyTempAllocationFromLetTester.cpp
+  MoveOnlyTypeUtils.cpp
+  MoveOnlyUtils.cpp
+  MovedAsyncVarDebugInfoPropagator.cpp
+  NestedSemanticFunctionCheck.cpp
+  OptimizeHopToExecutor.cpp
+  PerformanceDiagnostics.cpp
   PredictableMemOpt.cpp
   PMOMemoryUseCollector.cpp
-  SemanticARCOpts.cpp
-  ClosureLifetimeFixup.cpp
   RawSILInstLowering.cpp
+  ReferenceBindingTransform.cpp
+  TransferNonSendable.cpp
+  LowerTupleAddrConstructor.cpp
+  SILGenCleanup.cpp
   YieldOnceCheck.cpp
-)
+  OSLogOptimization.cpp
+  MoveOnlyWrappedTypeEliminator.cpp
+  RegionAnalysisInvalidationTransform.cpp
+  OwnershipModelEliminator.cpp)

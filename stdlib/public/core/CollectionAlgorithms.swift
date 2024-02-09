@@ -1,8 +1,8 @@
-//===--- CollectionAlgorithms.swift.gyb -----------------------*- swift -*-===//
+//===--- CollectionAlgorithms.swift ---------------------------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2018 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2023 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -36,7 +36,7 @@ extension BidirectionalCollection {
 // firstIndex(of:)/firstIndex(where:)
 //===----------------------------------------------------------------------===//
 
-extension Collection where Element : Equatable {
+extension Collection where Element: Equatable {
   /// Returns the first index where the specified value appears in the
   /// collection.
   ///
@@ -179,7 +179,7 @@ extension BidirectionalCollection {
   }
 }
 
-extension BidirectionalCollection where Element : Equatable {
+extension BidirectionalCollection where Element: Equatable {
   /// Returns the last index where the specified value appears in the
   /// collection.
   ///
@@ -210,6 +210,74 @@ extension BidirectionalCollection where Element : Equatable {
 }
 
 //===----------------------------------------------------------------------===//
+// indices(where:) / indices(of:)
+//===----------------------------------------------------------------------===//
+
+#if !$Embedded
+extension Collection {
+  /// Returns the indices of all the elements that match the given predicate.
+  ///
+  /// For example, you can use this method to find all the places that a
+  /// vowel occurs in a string.
+  ///
+  ///     let str = "Fresh cheese in a breeze"
+  ///     let vowels: Set<Character> = ["a", "e", "i", "o", "u"]
+  ///     let allTheVowels = str.indices(where: { vowels.contains($0) })
+  ///     // str[allTheVowels].count == 9
+  ///
+  /// - Parameter predicate: A closure that takes an element as its argument
+  ///   and returns a Boolean value that indicates whether the passed element
+  ///   represents a match.
+  /// - Returns: A set of the indices of the elements for which `predicate`
+  ///   returns `true`.
+  ///
+  /// - Complexity: O(*n*), where *n* is the length of the collection.
+  @available(SwiftStdlib 5.11, *)
+  @inlinable
+  public func indices(
+    where predicate: (Element) throws -> Bool
+  ) rethrows -> RangeSet<Index> {
+    var result: [Range<Index>] = []
+    var end = startIndex
+    while let begin = try self[end...].firstIndex(where: predicate) {
+      end = try self[begin...].prefix(while: predicate).endIndex
+      result.append(begin ..< end)
+
+      guard end < self.endIndex else {
+        break
+      }
+      self.formIndex(after: &end)
+    }
+
+    return RangeSet(_orderedRanges: result)
+  }
+}
+
+extension Collection where Element: Equatable {
+  /// Returns the indices of all the elements that are equal to the given
+  /// element.
+  ///
+  /// For example, you can use this method to find all the places that a
+  /// particular letter occurs in a string.
+  ///
+  ///     let str = "Fresh cheese in a breeze"
+  ///     let allTheEs = str.indices(of: "e")
+  ///     // str[allTheEs].count == 7
+  ///
+  /// - Parameter element: An element to look for in the collection.
+  /// - Returns: A set of the indices of the elements that are equal to
+  ///   `element`.
+  ///
+  /// - Complexity: O(*n*), where *n* is the length of the collection.
+  @available(SwiftStdlib 5.11, *)
+  @inlinable
+  public func indices(of element: Element) -> RangeSet<Index> {
+    indices(where: { $0 == element })
+  }
+}
+#endif
+
+//===----------------------------------------------------------------------===//
 // partition(by:)
 //===----------------------------------------------------------------------===//
 
@@ -221,7 +289,9 @@ extension MutableCollection {
   /// After partitioning a collection, there is a pivot index `p` where
   /// no element before `p` satisfies the `belongsInSecondPartition`
   /// predicate and every element at or after `p` satisfies
-  /// `belongsInSecondPartition`.
+  /// `belongsInSecondPartition`. This operation isn't guaranteed to be
+  /// stable, so the relative ordering of elements within the partitions might
+  /// change.
   ///
   /// In the following example, an array of numbers is partitioned by a
   /// predicate that matches elements greater than 30.
@@ -240,6 +310,10 @@ extension MutableCollection {
   ///     // first == [30, 10, 20, 30, 30]
   ///     let second = numbers[p...]
   ///     // second == [60, 40]
+  ///
+  /// Note that the order of elements in both partitions changed.
+  /// That is, `40` appears before `60` in the original collection,
+  /// but, after calling `partition(by:)`, `60` appears before `40`.
   ///
   /// - Parameter belongsInSecondPartition: A predicate used to partition
   ///   the collection. All elements satisfying this predicate are ordered
@@ -277,7 +351,7 @@ extension MutableCollection {
   }  
 }
 
-extension MutableCollection where Self : BidirectionalCollection {
+extension MutableCollection where Self: BidirectionalCollection {
   /// Reorders the elements of the collection such that all the elements
   /// that match the given predicate are after all the elements that don't
   /// match.
@@ -285,7 +359,9 @@ extension MutableCollection where Self : BidirectionalCollection {
   /// After partitioning a collection, there is a pivot index `p` where
   /// no element before `p` satisfies the `belongsInSecondPartition`
   /// predicate and every element at or after `p` satisfies
-  /// `belongsInSecondPartition`.
+  /// `belongsInSecondPartition`. This operation isn't guaranteed to be
+  /// stable, so the relative ordering of elements within the partitions might
+  /// change.
   ///
   /// In the following example, an array of numbers is partitioned by a
   /// predicate that matches elements greater than 30.
@@ -305,6 +381,10 @@ extension MutableCollection where Self : BidirectionalCollection {
   ///     let second = numbers[p...]
   ///     // second == [60, 40]
   ///
+  /// Note that the order of elements in both partitions changed.
+  /// That is, `40` appears before `60` in the original collection,
+  /// but, after calling `partition(by:)`, `60` appears before `40`.
+  ///
   /// - Parameter belongsInSecondPartition: A predicate used to partition
   ///   the collection. All elements satisfying this predicate are ordered
   ///   after all elements not satisfying it.
@@ -318,7 +398,7 @@ extension MutableCollection where Self : BidirectionalCollection {
   public mutating func partition(
     by belongsInSecondPartition: (Element) throws -> Bool
   ) rethrows -> Index {
-    let maybeOffset = try _withUnsafeMutableBufferPointerIfSupported {
+    let maybeOffset = try withContiguousMutableStorageIfAvailable {
       (bufferPointer) -> Int in
       let unsafeBufferPivot = try bufferPointer._partitionImpl(
         by: belongsInSecondPartition)
@@ -330,42 +410,112 @@ extension MutableCollection where Self : BidirectionalCollection {
       return try _partitionImpl(by: belongsInSecondPartition)
     }
   }
-  
-  @usableFromInline
+
+  @inlinable
   internal mutating func _partitionImpl(
     by belongsInSecondPartition: (Element) throws -> Bool
   ) rethrows -> Index {
     var lo = startIndex
     var hi = endIndex
+    while true {
+      // Invariants at this point:
+      //
+      // * `lo <= hi`
+      // * all elements in `startIndex ..< lo` belong in the first partition
+      // * all elements in `hi ..< endIndex` belong in the second partition
 
-    // 'Loop' invariants (at start of Loop, all are true):
-    // * lo < hi
-    // * predicate(self[i]) == false, for i in startIndex ..< lo
-    // * predicate(self[i]) == true, for i in hi ..< endIndex
+      // Find next element from `lo` that may not be in the right place.
+      while true {
+        guard lo < hi else { return lo }
+        if try belongsInSecondPartition(self[lo]) { break }
+        formIndex(after: &lo)
+      }
 
-    Loop: while true {
-      FindLo: repeat {
-        while lo < hi {
-          if try belongsInSecondPartition(self[lo]) { break FindLo }
-          formIndex(after: &lo)
-        }
-        break Loop
-      } while false
-
-      FindHi: repeat {
+      // Find next element down from `hi` that we can swap `lo` with.
+      while true {
         formIndex(before: &hi)
-        while lo < hi {
-          if try !belongsInSecondPartition(self[hi]) { break FindHi }
-          formIndex(before: &hi)
-        }
-        break Loop
-      } while false
+        guard lo < hi else { return lo }
+        if try !belongsInSecondPartition(self[hi]) { break }
+      }
 
       swapAt(lo, hi)
       formIndex(after: &lo)
     }
+  }
+}
 
-    return lo
+//===----------------------------------------------------------------------===//
+// _indexedStablePartition / _partitioningIndex
+//===----------------------------------------------------------------------===//
+
+extension MutableCollection {
+  /// Moves all elements at the indices satisfying `belongsInSecondPartition`
+  /// into a suffix of the collection, preserving their relative order, and
+  /// returns the start of the resulting suffix.
+  ///
+  /// - Complexity: O(*n* log *n*) where *n* is the number of elements.
+  /// - Precondition:
+  ///   `n == distance(from: range.lowerBound, to: range.upperBound)`
+  internal mutating func _indexedStablePartition(
+    count n: Int,
+    range: Range<Index>,
+    by belongsInSecondPartition: (Index) throws-> Bool
+  ) rethrows -> Index {
+    if n == 0 { return range.lowerBound }
+    if n == 1 {
+      return try belongsInSecondPartition(range.lowerBound)
+        ? range.lowerBound
+        : range.upperBound
+    }
+    let h = n / 2, i = index(range.lowerBound, offsetBy: h)
+    let j = try _indexedStablePartition(
+      count: h,
+      range: range.lowerBound..<i,
+      by: belongsInSecondPartition)
+    let k = try _indexedStablePartition(
+      count: n - h,
+      range: i..<range.upperBound,
+      by: belongsInSecondPartition)
+    return _rotate(in: j..<k, shiftingToStart: i)
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// _partitioningIndex(where:)
+//===----------------------------------------------------------------------===//
+
+extension Collection {
+  /// Returns the index of the first element in the collection that matches
+  /// the predicate.
+  ///
+  /// The collection must already be partitioned according to the predicate.
+  /// That is, there should be an index `i` where for every element in
+  /// `collection[..<i]` the predicate is `false`, and for every element
+  /// in `collection[i...]` the predicate is `true`.
+  ///
+  /// - Parameter predicate: A predicate that partitions the collection.
+  /// - Returns: The index of the first element in the collection for which
+  ///   `predicate` returns `true`.
+  ///
+  /// - Complexity: O(log *n*), where *n* is the length of this collection if
+  ///   the collection conforms to `RandomAccessCollection`, otherwise O(*n*).
+  internal func _partitioningIndex(
+    where predicate: (Element) throws -> Bool
+  ) rethrows -> Index {
+    var n = count
+    var l = startIndex
+    
+    while n > 0 {
+      let half = n / 2
+      let mid = index(l, offsetBy: half)
+      if try predicate(self[mid]) {
+        n = half
+      } else {
+        l = index(after: mid)
+        n -= half + 1
+      }
+    }
+    return l
   }
 }
 
@@ -427,7 +577,7 @@ extension Sequence {
   }
 }
 
-extension MutableCollection where Self : RandomAccessCollection {
+extension MutableCollection where Self: RandomAccessCollection {
   /// Shuffles the collection in place, using the given generator as a source
   /// for randomness.
   ///
@@ -471,7 +621,7 @@ extension MutableCollection where Self : RandomAccessCollection {
   /// Use the `shuffle()` method to randomly reorder the elements of an array.
   ///
   ///     var names = ["Alejandro", "Camila", "Diego", "Luciana", "Luis", "Sofía"]
-  ///     names.shuffle(using: myGenerator)
+  ///     names.shuffle()
   ///     // names == ["Luis", "Camila", "Luciana", "Sofía", "Alejandro", "Diego"]
   ///
   /// This method is equivalent to calling `shuffle(using:)`, passing in the

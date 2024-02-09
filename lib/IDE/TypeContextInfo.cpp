@@ -15,15 +15,19 @@
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/USRGeneration.h"
-#include "swift/Parse/CodeCompletionCallbacks.h"
+#include "swift/IDE/TypeCheckCompletionCallback.h"
+#include "swift/Parse/IDEInspectionCallbacks.h"
+#include "swift/Sema/ConstraintSystem.h"
 #include "swift/Sema/IDETypeChecking.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
+#include "llvm/ADT/SmallSet.h"
 
 using namespace swift;
 using namespace ide;
 
-class ContextInfoCallbacks : public CodeCompletionCallbacks {
+class ContextInfoCallbacks : public CodeCompletionCallbacks,
+                             public DoneParsingCallback {
   TypeContextInfoConsumer &Consumer;
   SourceLoc Loc;
   Expr *ParsedExpr = nullptr;
@@ -33,22 +37,22 @@ class ContextInfoCallbacks : public CodeCompletionCallbacks {
 
 public:
   ContextInfoCallbacks(Parser &P, TypeContextInfoConsumer &Consumer)
-      : CodeCompletionCallbacks(P), Consumer(Consumer) {}
+      : CodeCompletionCallbacks(P), DoneParsingCallback(), Consumer(Consumer) {}
 
   void completePostfixExprBeginning(CodeCompletionExpr *E) override;
   void completeForEachSequenceBeginning(CodeCompletionExpr *E) override;
-  void completeCaseStmtBeginning() override;
+  void completeCaseStmtBeginning(CodeCompletionExpr *E) override;
 
   void completeCallArg(CodeCompletionExpr *E) override;
   void completeReturnStmt(CodeCompletionExpr *E) override;
+  void completeThenStmt(CodeCompletionExpr *E) override;
   void completeYieldStmt(CodeCompletionExpr *E,
-                         Optional<unsigned> yieldIndex) override;
+                         llvm::Optional<unsigned> yieldIndex) override;
 
   void completeUnresolvedMember(CodeCompletionExpr *E,
                                 SourceLoc DotLoc) override;
-  void completeCaseStmtDotPrefix() override;
 
-  void doneParsing() override;
+  void doneParsing(SourceFile *SrcFile) override;
 };
 
 void ContextInfoCallbacks::completePostfixExprBeginning(CodeCompletionExpr *E) {
@@ -69,8 +73,12 @@ void ContextInfoCallbacks::completeReturnStmt(CodeCompletionExpr *E) {
   CurDeclContext = P.CurDeclContext;
   ParsedExpr = E;
 }
-void ContextInfoCallbacks::completeYieldStmt(CodeCompletionExpr *E,
-                                             Optional<unsigned> yieldIndex) {
+void ContextInfoCallbacks::completeThenStmt(CodeCompletionExpr *E) {
+  CurDeclContext = P.CurDeclContext;
+  ParsedExpr = E;
+}
+void ContextInfoCallbacks::completeYieldStmt(
+    CodeCompletionExpr *E, llvm::Optional<unsigned> yieldIndex) {
   CurDeclContext = P.CurDeclContext;
   ParsedExpr = E;
 }
@@ -80,41 +88,63 @@ void ContextInfoCallbacks::completeUnresolvedMember(CodeCompletionExpr *E,
   ParsedExpr = E;
 }
 
-void ContextInfoCallbacks::completeCaseStmtBeginning() {
-  // TODO: Implement?
-}
-void ContextInfoCallbacks::completeCaseStmtDotPrefix() {
+void ContextInfoCallbacks::completeCaseStmtBeginning(CodeCompletionExpr *E) {
   // TODO: Implement?
 }
 
-void ContextInfoCallbacks::doneParsing() {
+class TypeContextInfoCallback : public TypeCheckCompletionCallback {
+  Expr *ParsedExpr;
+  SmallVector<Type, 2> Types;
+
+  void sawSolutionImpl(const constraints::Solution &S) override {
+    if (!S.hasType(ParsedExpr)) {
+      return;
+    }
+    if (Type T = getTypeForCompletion(S, ParsedExpr)) {
+      Types.push_back(T);
+    }
+  }
+
+public:
+  TypeContextInfoCallback(Expr *ParsedExpr) : ParsedExpr(ParsedExpr) {}
+
+  ArrayRef<Type> getTypes() const { return Types; }
+};
+
+void ContextInfoCallbacks::doneParsing(SourceFile *SrcFile) {
   if (!ParsedExpr)
     return;
 
-  typeCheckContextUntil(
-      CurDeclContext,
-      CurDeclContext->getASTContext().SourceMgr.getCodeCompletionLoc());
-
-  ExprContextInfo Info(CurDeclContext, ParsedExpr);
+  TypeContextInfoCallback TypeCheckCallback(ParsedExpr);
+  {
+    llvm::SaveAndRestore<TypeCheckCompletionCallback *> CompletionCollector(
+        Context.CompletionCallback, &TypeCheckCallback);
+    typeCheckContextAt(
+        TypeCheckASTNodeAtLocContext::declContext(CurDeclContext),
+        ParsedExpr->getLoc());
+  }
 
   llvm::SmallSet<CanType, 2> seenTypes;
   SmallVector<TypeContextInfoItem, 2> results;
 
-  for (auto T : Info.getPossibleTypes()) {
+  for (auto T : TypeCheckCallback.getTypes()) {
     if (T->is<ErrorType>() || T->is<UnresolvedType>())
       continue;
-    if (auto env = CurDeclContext->getGenericEnvironmentOfContext())
-      T = env->mapTypeIntoContext(T);
+
+    T = T->getRValueType();
+
+    auto interfaceTy = T;
+    if (interfaceTy->hasArchetype())
+      interfaceTy = interfaceTy->mapTypeOutOfContext();
 
     // TODO: Do we need '.none' for Optionals?
-    auto objT = T->lookThroughAllOptionalTypes();
-
-    if (!seenTypes.insert(objT->getCanonicalType()).second)
+    auto objTy = T->lookThroughAllOptionalTypes();
+    if (!seenTypes.insert(objTy->getCanonicalType()).second)
       continue;
 
-    results.emplace_back(T);
+    results.emplace_back(interfaceTy);
     auto &item = results.back();
-    getImplicitMembers(objT, item.ImplicitMembers);
+    getImplicitMembers(objTy, item.ImplicitMembers);
   }
 
   Consumer.handleResults(results);
@@ -128,7 +158,6 @@ void ContextInfoCallbacks::getImplicitMembers(
 
   class LocalConsumer : public VisibleDeclConsumer {
     DeclContext *DC;
-    LazyResolver *TypeResolver;
     ModuleDecl *CurModule;
     Type T;
     SmallVectorImpl<ValueDecl *> &Result;
@@ -137,22 +166,19 @@ void ContextInfoCallbacks::getImplicitMembers(
       if (VD->isOperator())
         return false;
 
-      if (!VD->hasInterfaceType()) {
-        TypeResolver->resolveDeclSignature(VD);
-        if (!VD->hasInterfaceType())
-          return false;
-      }
-
       // Enum element decls can always be referenced by implicit member
       // expression.
       if (isa<EnumElementDecl>(VD))
         return true;
 
       // Static properties which is convertible to 'Self'.
-      if (isa<VarDecl>(VD) && VD->isStatic()) {
-        auto declTy = T->getTypeOfMember(CurModule, VD);
-        if (declTy->isEqual(T) || swift::isConvertibleTo(declTy, T, *DC))
-          return true;
+      if (auto *Var = dyn_cast<VarDecl>(VD)) {
+        if (Var->isStatic()) {
+          auto declTy = T->getTypeOfMember(CurModule, Var);
+          if (declTy->isEqual(T) ||
+              swift::isConvertibleTo(declTy, T, /*openArchetypes=*/true, *DC))
+            return true;
+        }
       }
 
       return false;
@@ -160,69 +186,38 @@ void ContextInfoCallbacks::getImplicitMembers(
 
   public:
     LocalConsumer(DeclContext *DC, Type T, SmallVectorImpl<ValueDecl *> &Result)
-        : DC(DC), TypeResolver(DC->getASTContext().getLazyResolver()),
-          CurModule(DC->getParentModule()), T(T), Result(Result) {}
+        : DC(DC), CurModule(DC->getParentModule()), T(T), Result(Result) {}
 
-    void foundDecl(ValueDecl *VD, DeclVisibilityKind Reason) {
+    void foundDecl(ValueDecl *VD, DeclVisibilityKind Reason,
+                   DynamicLookupInfo) override {
       if (canBeImplictMember(VD) && !VD->shouldHideFromEditor())
         Result.push_back(VD);
     }
 
   } LocalConsumer(CurDeclContext, T, Result);
 
-  lookupVisibleMemberDecls(LocalConsumer, MetatypeType::get(T), CurDeclContext,
-                           CurDeclContext->getASTContext().getLazyResolver(),
-                           /*includeInstanceMembers=*/false);
+  lookupVisibleMemberDecls(LocalConsumer, MetatypeType::get(T),
+                           Loc, CurDeclContext,
+                           /*includeInstanceMembers=*/false,
+                           /*includeDerivedRequirements*/false,
+                           /*includeProtocolExtensionMembers*/true);
 }
 
-void PrintingTypeContextInfoConsumer::handleResults(
-    ArrayRef<TypeContextInfoItem> results) {
-  OS << "-----BEGIN TYPE CONTEXT INFO-----\n";
-  for (auto resultItem : results) {
-    OS << "- TypeName: ";
-    resultItem.ExpectedTy.print(OS);
-    OS << "\n";
-
-    OS << "  TypeUSR: ";
-    printTypeUSR(resultItem.ExpectedTy, OS);
-    OS << "\n";
-
-    OS << "  ImplicitMembers:";
-    if (resultItem.ImplicitMembers.empty())
-      OS << " []";
-    OS << "\n";
-    for (auto VD : resultItem.ImplicitMembers) {
-      OS << "   - ";
-
-      OS << "Name: ";
-      VD->getFullName().print(OS);
-      OS << "\n";
-
-      StringRef BriefDoc = VD->getBriefComment();
-      if (!BriefDoc.empty()) {
-        OS << "     DocBrief: \"";
-        OS << VD->getBriefComment();
-        OS << "\"\n";
-      }
-    }
-  }
-  OS << "-----END TYPE CONTEXT INFO-----\n";
-}
-
-CodeCompletionCallbacksFactory *swift::ide::makeTypeContextInfoCallbacksFactory(
+IDEInspectionCallbacksFactory *swift::ide::makeTypeContextInfoCallbacksFactory(
     TypeContextInfoConsumer &Consumer) {
 
   // CC callback factory which produces 'ContextInfoCallbacks'.
   class ContextInfoCallbacksFactoryImpl
-      : public CodeCompletionCallbacksFactory {
+      : public IDEInspectionCallbacksFactory {
     TypeContextInfoConsumer &Consumer;
 
   public:
     ContextInfoCallbacksFactoryImpl(TypeContextInfoConsumer &Consumer)
         : Consumer(Consumer) {}
 
-    CodeCompletionCallbacks *createCodeCompletionCallbacks(Parser &P) override {
-      return new ContextInfoCallbacks(P, Consumer);
+    Callbacks createCallbacks(Parser &P) override {
+      auto Callbacks = std::make_shared<ContextInfoCallbacks>(P, Consumer);
+      return {Callbacks, Callbacks};
     }
   };
 

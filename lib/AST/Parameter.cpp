@@ -52,6 +52,7 @@ void ParameterList::setDeclContextOfParamDecls(DeclContext *DC) {
 /// the ParamDecls, so they can be reparented into a new DeclContext.
 ParameterList *ParameterList::clone(const ASTContext &C,
                                     OptionSet<CloneFlags> options) const {
+  // TODO(distributed): copy types thanks to flag in options
   // If this list is empty, don't actually bother with a copy.
   if (size() == 0)
     return const_cast<ParameterList*>(this);
@@ -59,28 +60,36 @@ ParameterList *ParameterList::clone(const ASTContext &C,
   SmallVector<ParamDecl*, 8> params(begin(), end());
 
   // Remap the ParamDecls inside of the ParameterList.
-  bool withTypes = !options.contains(ParameterList::WithoutTypes);
+  unsigned i = 0;
   for (auto &decl : params) {
-    bool hadDefaultArgument =
-        decl->getDefaultArgumentKind() == DefaultArgumentKind::Normal;
+    auto defaultArgKind = decl->getDefaultArgumentKind();
 
-    decl = new (C) ParamDecl(decl, withTypes);
+    decl = ParamDecl::cloneWithoutType(C, decl);
     if (options & Implicit)
       decl->setImplicit();
 
-    // If the argument isn't named, and we're cloning for an inherited
-    // constructor, give the parameter a name so that silgen will produce a
-    // value for it.
-    if (decl->getName().empty() && (options & Inherited))
-      decl->setName(C.getIdentifier("argument"));
+    // If the argument isn't named, give the parameter a name so that
+    // silgen will produce a value for it.
+    if (decl->getName().empty() && (options & NamedArguments)) {
+      llvm::SmallString<16> s;
+      { llvm::raw_svector_ostream(s) << "__argument" << ++i; }
+      decl->setName(C.getIdentifier(s));
+    }
     
     // If we're inheriting a default argument, mark it as such.
     // FIXME: Figure out how to clone default arguments as well.
-    if (hadDefaultArgument) {
-      if (options & Inherited)
+    if (options & Inherited) {
+      switch (defaultArgKind) {
+      case DefaultArgumentKind::Normal:
+      case DefaultArgumentKind::StoredProperty:
         decl->setDefaultArgumentKind(DefaultArgumentKind::Inherited);
-      else
-        decl->setDefaultArgumentKind(DefaultArgumentKind::None);
+        break;
+
+      default:
+        break;
+      }
+    } else {
+      decl->setDefaultArgumentKind(DefaultArgumentKind::None);
     }
   }
   
@@ -89,29 +98,8 @@ ParameterList *ParameterList::clone(const ASTContext &C,
 
 void ParameterList::getParams(
                         SmallVectorImpl<AnyFunctionType::Param> &params) const {
-  getParams(params,
-            [](ParamDecl *decl) { return decl->getInterfaceType(); });
-}
-
-void ParameterList::getParams(
-                          SmallVectorImpl<AnyFunctionType::Param> &params,
-                          llvm::function_ref<Type(ParamDecl *)> getType) const {
-  if (size() == 0)
-    return;
-
-  for (auto P : *this) {
-    auto type = getType(P);
-
-    if (P->isVariadic())
-      type = ParamDecl::getVarargBaseTy(type);
-
-    auto label = P->getArgumentName();
-    auto flags = ParameterTypeFlags::fromParameterType(type,
-                                                       P->isVariadic(),
-                                                       P->isAutoClosure(),
-                                                       P->getValueOwnership());
-    params.emplace_back(type, label, flags);
-  }
+  for (auto P : *this)
+    params.push_back(P->toFunctionParam());
 }
 
 

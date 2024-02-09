@@ -408,8 +408,8 @@ func testInitializationThroughMetaclassDiag(_ t: C.Type) {
   // expected-note@-1 {{a strong reference is required to prevent the instance from being deallocated}}
   // expected-note@-2 {{'c1' declared here}}
 
-  let optionaCType: C.Type? = t
-  weak var c2 = optionaCType?.init(failable: ()) // expected-warning {{instance will be immediately deallocated because variable 'c2' is 'weak'}}
+  let optionalCType: C.Type? = t
+  weak var c2 = optionalCType?.init(failable: ()) // expected-warning {{instance will be immediately deallocated because variable 'c2' is 'weak'}}
   // expected-note@-1 {{a strong reference is required to prevent the instance from being deallocated}}
   // expected-note@-2 {{'c2' declared here}}
 
@@ -450,7 +450,10 @@ func testGenericWeakClassDiag() {
 // The diagnostic doesn't currently support tuple shuffles.
 func testDontDiagnoseThroughTupleShuffles() {
   unowned let (c1, (c2, c3)): (c: C, (b: C, a: C)) = ((a: D(), b: C()), c: D())
+  // expected-warning@-1 {{expression shuffles the elements of this tuple; this behavior is deprecated}}
+  // expected-warning@-2 {{expression shuffles the elements of this tuple; this behavior is deprecated}}
   unowned let c4 = ((a: C(), b: C()) as (b: C, a: C)).0
+  // expected-warning@-1 {{expression shuffles the elements of this tuple; this behavior is deprecated}}
 
   _ = c1; _ = c2; _ = c3; _ = c4
 }

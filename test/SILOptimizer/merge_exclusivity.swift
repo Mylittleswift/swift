@@ -1,5 +1,6 @@
-// RUN: %target-swift-frontend -O -enforce-exclusivity=checked -emit-sil  -primary-file %s | %FileCheck %s --check-prefix=TESTSIL
+// RUN: %target-swift-frontend -O -enforce-exclusivity=checked -Xllvm -sil-disable-pass=redundant-load-elimination -emit-sil  -primary-file %s | %FileCheck %s --check-prefix=TESTSIL
 // REQUIRES: optimized_stdlib,asserts
+// REQUIRES: swift_stdlib_no_asserts
 // REQUIRES: PTRSIZE=64
 
 public var check: UInt64 = 0
@@ -18,21 +19,21 @@ func sum(_ x: UInt64, _ y: UInt64) -> UInt64 {
 // TESTSIL: [[GLOBALVAR:%.*]] = global_addr @$s17merge_exclusivity5checks6UInt64Vvp
 // TESTSIL: [[B1:%.*]] = begin_access [modify] [dynamic] [no_nested_conflict] [[GLOBALVAR]]
 // TESTSIL: end_access [[B1]]
-// TESTSIL: bb5
+// TESTSIL: bb4{{.*}}:
 // TESTSIL: [[B2a:%.*]] = begin_access [read] [static] [no_nested_conflict] [[GLOBALVAR]]
 // TESTSIL-NEXT: load [[B2a]]
 // TESTSIL: end_access [[B2a]]
 // TESTSIL: [[B2b:%.*]] = begin_access [modify] [static] [no_nested_conflict] [[GLOBALVAR]]
 // TESTSIL: store {{.*}} to [[B2b]]
 // TESTSIL: end_access [[B2b]]
-// TESTSIL: bb6
+// TESTSIL: bb5:
 // TESTSIL: [[B3a:%.*]] = begin_access [read] [static] [no_nested_conflict] [[GLOBALVAR]]
 // TESTSIL-NEXT: load [[B3a]]
 // TESTSIL: end_access [[B3a]]
 // TESTSIL: [[B3b:%.*]] = begin_access [modify] [static] [no_nested_conflict] [[GLOBALVAR]]
 // TESTSIL: store {{.*}} to [[B3b]]
 // TESTSIL: end_access [[B3b]]
-// TESTSIL: bb7
+// TESTSIL: bb6:
 // TESTSIL: [[B4a:%.*]] = begin_access [read] [static] [no_nested_conflict] [[GLOBALVAR]]
 // TESTSIL-NEXT: load [[B4a]]
 // TESTSIL: end_access [[B4a]]
@@ -304,18 +305,22 @@ public final class StreamClass {
         self.buffer = []
     }
 
+    @inline(__always)
     public func write(_ byte: UInt8) {
         buffer.append(byte)
     }
 
+    @inline(__always)
     public func write(_ value: WriteProt) {
         value.writeTo(self)
     }
 
+    @inline(__always)
     public func writeEscaped(_ string: String) {
         writeEscaped(string: string.utf8)
     }
     
+    @inline(__always)
     public func writeEscaped<T: Collection>(
         string sequence: T
     ) where T.Iterator.Element == UInt8 {
@@ -326,12 +331,14 @@ public final class StreamClass {
     }
 }
 
+@inline(__always)
 public func toStream(_ stream: StreamClass, _ value: WriteProt) -> StreamClass {
     stream.write(value)
     return stream
 }
 
 extension UInt8: WriteProt {
+    @inline(__always)
     public func writeTo(_ stream: StreamClass) {
         stream.write(self)
     }
@@ -344,6 +351,7 @@ public func asWriteProt(_ string: String) -> WriteProt {
 private struct EscapedString: WriteProt {
     let value: String
         
+    @inline(__always)
     func writeTo(_ stream: StreamClass) {
         _ = toStream(stream, UInt8(ascii: "a"))
         stream.writeEscaped(value)
@@ -352,13 +360,14 @@ private struct EscapedString: WriteProt {
 }
 
 public func asWriteProt<T>(_ items: [T], transform: @escaping (T) -> String) -> WriteProt {
-    return EscapedTransforme(items: items, transform: transform)
+    return EscapedTransform(items: items, transform: transform)
 }
 
-private struct EscapedTransforme<T>: WriteProt {
+private struct EscapedTransform<T>: WriteProt {
     let items: [T]
     let transform: (T) -> String
 
+    @inline(__always)
     func writeTo(_ stream: StreamClass) {
         for (i, item) in items.enumerated() {
             if i != 0 { _ = toStream(stream, asWriteProt(transform(item))) }
@@ -369,16 +378,12 @@ private struct EscapedTransforme<T>: WriteProt {
 
 // TESTSIL-LABEL: sil [noinline] @$s17merge_exclusivity14run_MergeTest9yySiF : $@convention(thin)
 // TESTSIL: [[REFADDR:%.*]] = ref_element_addr {{.*}} : $StreamClass, #StreamClass.buffer
-// TESTSIL-NEXT: [[B1:%.*]] = begin_access [modify] [dynamic] [no_nested_conflict] [[REFADDR]]
-// TESTSIL: end_access [[B1]]
-// TESTSIL: [[BCONF:%.*]] = begin_access [modify] [dynamic] [[REFADDR]]
-// TESTSIL: apply {{.*}} : $@convention(method) (Int, @inout Array<UInt8>) -> ()
+// TESTSIL-NEXT: store {{.*}} to [[REFADDR]]
+// TESTSIL: [[BCONF:%.*]] = begin_access [modify] [{{.*}}] [[REFADDR]]
 // TESTSIL: end_access [[BCONF]]
-// TESTSIL: [[BCONF:%.*]] = begin_access [modify] [dynamic] [[REFADDR]]
-// TESTSIL: apply {{.*}} : $@convention(method) (Int, @inout Array<UInt8>) -> ()
+// TESTSIL: [[BCONF:%.*]] = begin_access [modify] [{{.*}}] [[REFADDR]]
 // TESTSIL: end_access [[BCONF]]
-// TESTSIL: [[BCONF:%.*]] = begin_access [modify] [dynamic] [[REFADDR]]
-// TESTSIL: apply {{.*}} : $@convention(method) (Int, @inout Array<UInt8>) -> ()
+// TESTSIL: [[BCONF:%.*]] = begin_access [modify] [{{.*}}] [[REFADDR]]
 // TESTSIL: end_access [[BCONF]]
 // TESTSIL-LABEL: } // end sil function '$s17merge_exclusivity14run_MergeTest9yySiF'
 @inline(never)
@@ -391,6 +396,6 @@ public func run_MergeTest9(_ N: Int) {
   let listOfThings: [Thing] = listOfStrings.map(Thing.init)
   for _ in 1...N {
     let stream = StreamClass()
-      _ = toStream(stream, asWriteProt(listOfThings, transform: { $0.value }))
+    _ = toStream(stream, asWriteProt(listOfThings, transform: { $0.value }))
   }
 }

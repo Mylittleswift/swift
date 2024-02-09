@@ -20,17 +20,18 @@
 
 // This test flips the chaining flag.
 // UNSUPPORTED: swift_test_mode_optimize_none_with_implicit_dynamic
+// UNSUPPORTED: wasm
 
 import A
 
 import StdlibUnittest
 
-#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+#if canImport(Darwin)
   import Darwin
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
+#elseif canImport(Glibc)
   import Glibc
 #elseif os(Windows)
-  import MSVCRT
+  import CRT
   import WinSDK
 #else
 #error("Unsupported platform")
@@ -39,7 +40,7 @@ import StdlibUnittest
 var DynamicallyReplaceable = TestSuite("DynamicallyReplaceableChaining")
 
 func target_library_name(_ name: String) -> String {
-#if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
+#if canImport(Darwin)
   return "lib\(name).dylib"
 #elseif os(Windows)
   return "\(name).dll"
@@ -53,14 +54,14 @@ DynamicallyReplaceable.test("DynamicallyReplaceable") {
   executablePath.removeLast(4)
 
 #if os(Linux)
-	_ = dlopen(target_library_name("B"), RTLD_NOW)
-	_ = dlopen(target_library_name("C"), RTLD_NOW)
+  _ = dlopen(target_library_name("B"), RTLD_NOW)
+  _ = dlopen(target_library_name("C"), RTLD_NOW)
 #elseif os(Windows)
-        _ = LoadLibraryA(target_library_name("B"))
-        _ = LoadLibraryA(target_library_name("C"))
+  _ = LoadLibraryA(target_library_name("B"))
+  _ = LoadLibraryA(target_library_name("C"))
 #else
-	_ = dlopen(executablePath+target_library_name("B"), RTLD_NOW)
-	_ = dlopen(executablePath+target_library_name("C"), RTLD_NOW)
+  _ = dlopen(executablePath+target_library_name("B"), RTLD_NOW)
+  _ = dlopen(executablePath+target_library_name("C"), RTLD_NOW)
 #endif
 
 #if CHAINING

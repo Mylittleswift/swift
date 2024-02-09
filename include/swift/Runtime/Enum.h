@@ -20,7 +20,7 @@
 #include "swift/Runtime/Config.h"
 
 namespace swift {
-  
+
 struct OpaqueValue;
 struct InProcess;
 
@@ -32,7 +32,9 @@ using Metadata = TargetMetadata<InProcess>;
 
 template <typename Runtime> struct TargetEnumMetadata;
 using EnumMetadata = TargetEnumMetadata<InProcess>;
-struct TypeLayout;
+template <typename Runtime>
+struct TargetTypeLayout;
+using TypeLayout = TargetTypeLayout<InProcess>;
 
 /// Initialize the type metadata for a single-case enum type.
 ///
@@ -44,6 +46,11 @@ SWIFT_RUNTIME_EXPORT
 void swift_initEnumMetadataSingleCase(EnumMetadata *enumType,
                                       EnumLayoutFlags flags,
                                       const TypeLayout *payload);
+
+SWIFT_RUNTIME_EXPORT
+void swift_initEnumMetadataSingleCaseWithLayoutString(
+    EnumMetadata *self, EnumLayoutFlags layoutFlags,
+    const Metadata *payloadType);
 
 /// Initialize the type metadata for a single-payload enum type.
 ///
@@ -58,8 +65,13 @@ void swift_initEnumMetadataSinglePayload(EnumMetadata *enumType,
                                          const TypeLayout *payload,
                                          unsigned emptyCases);
 
+SWIFT_RUNTIME_EXPORT
+void swift_initEnumMetadataSinglePayloadWithLayoutString(
+    EnumMetadata *enumType, EnumLayoutFlags flags, const Metadata *payload,
+    unsigned emptyCases);
+
 using getExtraInhabitantTag_t =
-  SWIFT_CC(swift) unsigned (const OpaqueValue *vaue,
+  SWIFT_CC(swift) unsigned (const OpaqueValue *value,
                             unsigned numExtraInhabitants,
                             const Metadata *payloadType);
 
@@ -111,6 +123,12 @@ void swift_initEnumMetadataMultiPayload(EnumMetadata *enumType,
                                         unsigned numPayloads,
                                         const TypeLayout * const *payloadTypes);
 
+SWIFT_RUNTIME_EXPORT
+void swift_initEnumMetadataMultiPayloadWithLayoutString(EnumMetadata *enumType,
+                                                        EnumLayoutFlags flags,
+                                                        unsigned numPayloads,
+                                          const Metadata * const *payloadTypes);
+
 /// Return an integer value representing which case of a multi-payload
 ///        enum is inhabited.
 ///
@@ -121,7 +139,7 @@ void swift_initEnumMetadataMultiPayload(EnumMetadata *enumType,
 SWIFT_RUNTIME_EXPORT
 unsigned swift_getEnumCaseMultiPayload(const OpaqueValue *value,
                                        const EnumMetadata *enumType);
-  
+
 /// Store the tag value for the given case into a multi-payload enum,
 ///        whose associated payload (if any) has already been initialized.
 SWIFT_RUNTIME_EXPORT
@@ -129,6 +147,24 @@ void swift_storeEnumTagMultiPayload(OpaqueValue *value,
                                     const EnumMetadata *enumType,
                                     unsigned whichCase);
 
+/// The unspecialized getEnumTagSinglePayload value witness to be used by the
+/// VWTs for specialized generic enums that are multi-payload.
+///
+/// Runtime availability: Swift 5.6
+SWIFT_RUNTIME_EXPORT
+unsigned swift_getMultiPayloadEnumTagSinglePayload(const OpaqueValue *value,
+                                                   uint32_t numExtraCases,
+                                                   const Metadata *enumType);
+
+/// The unspecialized storeEnumTagSinglePayload value witness to be used by the
+/// VWTs for specialized generic enums that are multi-payload.
+///
+/// Runtime availability: Swift 5.6
+SWIFT_RUNTIME_EXPORT
+void swift_storeMultiPayloadEnumTagSinglePayload(OpaqueValue *value,
+                                                 uint32_t index,
+                                                 uint32_t numExtraCases,
+                                                 const Metadata *enumType);
 }
 
 #endif

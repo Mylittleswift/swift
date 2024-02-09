@@ -12,19 +12,18 @@
 
 // RUN: %empty-directory(%t)
 // RUN: %target-build-swift -swift-version 4 -o %t/a.out %s
+// RUN: %target-codesign %t/a.out
 // RUN: %target-run %t/a.out
 // REQUIRES: executable_test
 // REQUIRES: CPU=x86_64
 
-// Requires swift-version 4
-// UNSUPPORTED: swift_test_mode_optimize_none_with_implicit_dynamic
 import StdlibUnittest
-#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+#if canImport(Darwin)
   import Darwin
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
+#elseif canImport(Glibc)
   import Glibc
 #elseif os(Windows)
-  import MSVCRT
+  import CRT
 #else
 #error("Unsupported platform")
 #endif
@@ -95,7 +94,7 @@ public struct _BigInt<Word: FixedWidthInteger & UnsignedInteger> :
 
   /// A Boolean value indicating whether this instance is equal to zero.
   public var isZero: Bool {
-    return _data.count == 0
+    return _data.isEmpty
   }
 
   //===--- Numeric initializers -------------------------------------------===//
@@ -212,7 +211,7 @@ public struct _BigInt<Word: FixedWidthInteger & UnsignedInteger> :
   /// - `_data` has no trailing zero elements
   /// - If `self == 0`, then `isNegative == false`
   func _checkInvariants(source: String = #function) {
-    if _data.count == 0 {
+    if _data.isEmpty {
       assert(isNegative == false,
         "\(source): isNegative with zero length _data")
     }

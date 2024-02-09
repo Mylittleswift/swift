@@ -28,14 +28,18 @@
 /// `Collection` protocol.
 ///
 /// Indices that are moved forward and backward in a bidirectional collection
-/// move by the same amount in each direction. That is, for any index `i` into
-/// a bidirectional collection `c`:
+/// move by the same amount in each direction. That is, for any valid index `i`
+/// into a bidirectional collection `c`:
 ///
-/// - If `i >= c.startIndex && i < c.endIndex`,
+/// - If `i >= c.startIndex && i < c.endIndex`, then
 ///   `c.index(before: c.index(after: i)) == i`.
-/// - If `i > c.startIndex && i <= c.endIndex`
+/// - If `i > c.startIndex && i <= c.endIndex`, then
 ///   `c.index(after: c.index(before: i)) == i`.
-public protocol BidirectionalCollection: Collection
+///
+/// Valid indices are exactly those indices that are reachable from the
+/// collection's `startIndex` by repeated applications of `index(after:)`, up
+/// to, and including, the `endIndex`.
+public protocol BidirectionalCollection<Element>: Collection
 where SubSequence: BidirectionalCollection, Indices: BidirectionalCollection {
   // FIXME: Only needed for associated type inference.
   override associatedtype Element
@@ -342,9 +346,12 @@ extension BidirectionalCollection where SubSequence == Self {
   public mutating func removeLast(_ k: Int) {
     if k == 0 { return }
     _precondition(k >= 0, "Number of elements to remove should be non-negative")
-    _precondition(count >= k,
-      "Can't remove more items from a collection than it contains")
-    self = self[startIndex..<index(endIndex, offsetBy: -k)]
+    guard let end = index(endIndex, offsetBy: -k, limitedBy: startIndex)
+    else {
+      _preconditionFailure(
+        "Can't remove more items from a collection than it contains")
+    }
+    self = self[startIndex..<end]
   }
 }
 

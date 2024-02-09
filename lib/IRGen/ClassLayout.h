@@ -19,6 +19,7 @@
 #define SWIFT_IRGEN_CLASSLAYOUT_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "Field.h"
 #include "IRGen.h"
 #include "StructLayout.h"
 
@@ -93,7 +94,11 @@ enum class ClassMetadataFlags {
   /// or the field offset vector in the metadata, and the Objective-C runtime
   /// will slide offsets based on the actual superclass size, which is not
   /// known at compile time.
-  ClassHasObjCAncestry = (1 << 6)
+  ClassHasObjCAncestry = (1 << 6),
+
+  /// Is the class implemented by an \c @_objcImplementation extension? If so,
+  /// we should generate pure ObjC-compatible metadata.
+  ClassHasObjCImplementation = (1 << 7)
 };
 
 using ClassMetadataOptions = OptionSet<ClassMetadataFlags>;
@@ -114,9 +119,12 @@ class ClassLayout {
   /// The LLVM type for instances of this class.
   llvm::Type *Ty;
 
+  /// The header size of this class.
+  Size HeaderSize;
+
   /// Lazily-initialized array of all fragile stored properties directly defined
   /// in the class itself.
-  ArrayRef<VarDecl *> AllStoredProperties;
+  ArrayRef<Field> AllStoredProperties;
 
   /// Lazily-initialized array of all field access methods.
   ArrayRef<FieldAccess> AllFieldAccesses;
@@ -129,9 +137,10 @@ public:
   ClassLayout(const StructLayoutBuilder &builder,
               ClassMetadataOptions options,
               llvm::Type *classTy,
-              ArrayRef<VarDecl *> allStoredProps,
+              ArrayRef<Field> allStoredProps,
               ArrayRef<FieldAccess> allFieldAccesses,
-              ArrayRef<ElementLayout> allElements);
+              ArrayRef<ElementLayout> allElements,
+              Size headerSize);
 
   Size getInstanceStart() const;
 
@@ -197,7 +206,7 @@ public:
   }
 
   std::pair<FieldAccess, ElementLayout>
-  getFieldAccessAndElement(VarDecl *field) const {
+  getFieldAccessAndElement(Field field) const {
     // FIXME: This is algorithmically terrible.
     auto found = std::find(AllStoredProperties.begin(),
                            AllStoredProperties.end(), field);
@@ -205,6 +214,12 @@ public:
     unsigned index = found - AllStoredProperties.begin();
 
     return std::make_pair(AllFieldAccesses[index], AllElements[index]);
+  }
+
+  /// Returns true if the class is implemented by an \c @_objcImplementation
+  /// extension, and therefore should not have any Swift-specific metadata.
+  bool hasObjCImplementation() const {
+    return Options.contains(ClassMetadataFlags::ClassHasObjCImplementation);
   }
 };
 

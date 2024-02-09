@@ -112,7 +112,7 @@ class KlassWithBuffer {
   var buffer: Buffer
 
   // Make sure that the allocating init forwards into the initializing init at +1.
-  // CHECK-LABEL: sil hidden [ossa] @$ss15KlassWithBufferC3inKABs0A0C_tcfC : $@convention(method) (@owned Klass, @thick KlassWithBuffer.Type) -> @owned KlassWithBuffer {
+  // CHECK-LABEL: sil hidden [exact_self_class] [ossa] @$ss15KlassWithBufferC3inKABs0A0C_tcfC : $@convention(method) (@owned Klass, @thick KlassWithBuffer.Type) -> @owned KlassWithBuffer {
   // CHECK: bb0([[ARG:%.*]] : @owned $Klass,
   // CHECK:   [[INITIALIZING_INIT:%.*]] = function_ref @$ss15KlassWithBufferC3inKABs0A0C_tcfc : $@convention(method) (@owned Klass, @owned KlassWithBuffer) -> @owned KlassWithBuffer
   // CHECK:   apply [[INITIALIZING_INIT]]([[ARG]],
@@ -123,12 +123,12 @@ class KlassWithBuffer {
 
   // This test makes sure that we:
   //
-  // 1. Are able to propagate a +0 value value buffer.k into a +0 value and that
+  // 1. Are able to propagate a +0 value buffer.k into a +0 value and that
   // we then copy that +0 value into a +1 value, before we begin the epilog and
   // then return that value.
   // CHECK-LABEL: sil hidden [ossa] @$ss15KlassWithBufferC03getC14AsNativeObjectBoyF : $@convention(method) (@guaranteed KlassWithBuffer) -> @owned Builtin.NativeObject {
   // CHECK: bb0([[SELF:%.*]] : @guaranteed $KlassWithBuffer):
-  // CHECK:   [[METHOD:%.*]] = class_method [[SELF]] : $KlassWithBuffer, #KlassWithBuffer.buffer!getter.1
+  // CHECK:   [[METHOD:%.*]] = class_method [[SELF]] : $KlassWithBuffer, #KlassWithBuffer.buffer!getter
   // CHECK:   [[BUF:%.*]] = apply [[METHOD]]([[SELF]])
   // CHECK:   [[BUF_BORROW:%.*]] = begin_borrow [[BUF]]
   // CHECK:   [[K:%.*]] = struct_extract [[BUF_BORROW]] : $Buffer, #Buffer.k
@@ -170,25 +170,25 @@ struct ReabstractionThunkTest : Protocol {
 // result.
 extension FakeDictionary {
   // CHECK-LABEL: sil hidden [ossa] @$ss14FakeDictionaryV20makeSureToCopyTuplesyyF : $@convention(method) <Key, Value> (FakeDictionary<Key, Value>) -> () {
-  // CHECK:   [[X:%.*]] = alloc_stack $(Key, Value), let, name "x"
-  // CHECK:   [[INDUCTION_VAR:%.*]] = unchecked_take_enum_data_addr {{%.*}} : $*Optional<(Key, Value)>, #Optional.some!enumelt.1
+  // CHECK:   [[X:%.*]] = alloc_stack [lexical] $(Key, Value), let, name "x"
+  // CHECK:   [[INDUCTION_VAR:%.*]] = unchecked_take_enum_data_addr {{%.*}} : $*Optional<(Key, Value)>, #Optional.some!enumelt
   // CHECK:   [[INDUCTION_VAR_0:%.*]] = tuple_element_addr [[INDUCTION_VAR]] : $*(Key, Value), 0
   // CHECK:   [[INDUCTION_VAR_1:%.*]] = tuple_element_addr [[INDUCTION_VAR]] : $*(Key, Value), 1
   // CHECK:   [[X_0:%.*]] = tuple_element_addr [[X]] : $*(Key, Value), 0
   // CHECK:   [[X_1:%.*]] = tuple_element_addr [[X]] : $*(Key, Value), 1
-  // CHECK:   copy_addr [take] [[INDUCTION_VAR_0]] to [initialization] [[X_0]]
-  // CHECK:   copy_addr [take] [[INDUCTION_VAR_1]] to [initialization] [[X_1]]
+  // CHECK:   copy_addr [take] [[INDUCTION_VAR_0]] to [init] [[X_0]]
+  // CHECK:   copy_addr [take] [[INDUCTION_VAR_1]] to [init] [[X_1]]
   // CHECK:   [[X_0:%.*]] = tuple_element_addr [[X]] : $*(Key, Value), 0
   // CHECK:   [[X_1:%.*]] = tuple_element_addr [[X]] : $*(Key, Value), 1
   // CHECK:   [[TMP_X:%.*]] = alloc_stack $(Key, Value)
   // CHECK:   [[TMP_X_0:%.*]] = tuple_element_addr [[TMP_X]] : $*(Key, Value), 0
   // CHECK:   [[TMP_X_1:%.*]] = tuple_element_addr [[TMP_X]] : $*(Key, Value), 1
   // CHECK:   [[TMP_0:%.*]] = alloc_stack $Key
-  // CHECK:   copy_addr [[X_0]] to [initialization] [[TMP_0]]
-  // CHECK:   copy_addr [take] [[TMP_0]] to [initialization] [[TMP_X_0]]
+  // CHECK:   copy_addr [[X_0]] to [init] [[TMP_0]]
+  // CHECK:   copy_addr [take] [[TMP_0]] to [init] [[TMP_X_0]]
   // CHECK:   [[TMP_1:%.*]] = alloc_stack $Value
-  // CHECK:   copy_addr [[X_1]] to [initialization] [[TMP_1]]
-  // CHECK:   copy_addr [take] [[TMP_1]] to [initialization] [[TMP_X_1]]
+  // CHECK:   copy_addr [[X_1]] to [init] [[TMP_1]]
+  // CHECK:   copy_addr [take] [[TMP_1]] to [init] [[TMP_X_1]]
   // CHECK:   [[FUNC:%.*]] = function_ref @$ss9FakeArrayV6appendyyxF : $@convention(method) <τ_0_0> (@in_guaranteed τ_0_0, @inout FakeArray<τ_0_0>) -> ()
   // CHECK:   apply [[FUNC]]<(Key, Value)>([[TMP_X]],
   // CHECK: } // end sil function '$ss14FakeDictionaryV20makeSureToCopyTuplesyyF'
@@ -197,18 +197,6 @@ extension FakeDictionary {
     for x in self {
       result.append(x)
     }
-  }
-}
-
-extension Unmanaged {
-  // Just make sure that we do not crash on this.
-  func unsafeGuaranteedTest<Result>(
-    _ body: (Instance) -> Result
-  ) -> Result {
-    let (guaranteedInstance, token) = Builtin.unsafeGuaranteed(_value)
-    let result = body(guaranteedInstance)
-    Builtin.unsafeGuaranteedEnd(token)
-    return result
   }
 }
 

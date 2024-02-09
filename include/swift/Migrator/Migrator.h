@@ -18,7 +18,7 @@
 #define SWIFT_MIGRATOR_MIGRATOR_H
 
 #include "swift/Migrator/MigrationState.h"
-#include "swift/Syntax/References.h"
+#include "llvm/ADT/IntrusiveRefCntPtr.h"
 
 namespace swift {
 class CompilerInstance;
@@ -28,8 +28,7 @@ namespace migrator {
 /// If needed, run the migrator on the compiler invocation's input file and emit
 /// a "replacement map" describing the requested changes to the source file.
 /// \return true on error.
-bool updateCodeAndEmitRemapIfNeeded(CompilerInstance *Instance,
-                                    const CompilerInvocation &Invocation);
+bool updateCodeAndEmitRemapIfNeeded(CompilerInstance *Instance);
 
 /// Specify options when running syntactic migration pass.
 struct SyntacticPassOptions {
@@ -40,7 +39,7 @@ struct Migrator {
   CompilerInstance *StartInstance;
   const CompilerInvocation &StartInvocation;
   SourceManager SrcMgr;
-  std::vector<RC<MigrationState>> States;
+  std::vector<llvm::IntrusiveRefCntPtr<MigrationState>> States;
 
   Migrator(CompilerInstance *StartInstance,
            const CompilerInvocation &StartInvocation);

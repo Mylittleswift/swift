@@ -106,7 +106,7 @@ func test() throws -> Int {
     try break // expected-error {{'try' cannot be used with 'break'}}
   }
   
-  try throw // expected-error {{'try' must be placed on the thrown expression}} {{3-7=}} {{3-3=try }} expected-error {{expected expression in 'throw' statement}}
+  try throw // expected-error {{'try' must be placed on the thrown expression}} {{+1:3-3=try }} {{3-7=}} expected-error {{expected expression in 'throw' statement}}
   ; // Reset parser.
   
   try return // expected-error {{'try' cannot be used with 'return'}} expected-error {{non-void function should return a value}}
@@ -183,7 +183,8 @@ let _: Int = try? foo() // expected-error {{value of optional type 'Int?' not un
 class X {}
 func test(_: X) {}
 func producesObject() throws -> AnyObject { return X() }
-test(try producesObject()) // expected-error {{'AnyObject' is not convertible to 'X'; did you mean to use 'as!' to force downcast?}} {{26-26= as! X}}
+test(try producesObject()) // expected-error {{'AnyObject' is not convertible to 'X'}} 
+// expected-note@-1{{did you mean to use 'as!' to force downcast?}} {{26-26= as! X}}
 
 _ = "a\(try maybeThrow())b"
 _ = try "a\(maybeThrow())b"
@@ -263,7 +264,7 @@ let _: Int??? = try? producer.produceDoubleOptionalInt() // good
 let _: String = try? producer.produceDoubleOptionalInt() // expected-error {{cannot convert value of type 'Int??' to specified type 'String'}}
 
 // rdar://problem/46742002
-protocol Dummy : class {}
+protocol Dummy : AnyObject {}
 
 class F<T> {
   func wait() throws -> T { fatalError() }

@@ -25,6 +25,7 @@ namespace llvm {
   class Constant;
   class Value;
   class Function;
+  class MDString;
 }
 
 namespace swift {
@@ -50,12 +51,14 @@ namespace irgen {
   
   enum class ClassDeallocationKind : unsigned char;
   enum class FieldAccess : uint8_t;
-  
-  OwnedAddress projectPhysicalClassMemberAddress(IRGenFunction &IGF,
-                                                 llvm::Value *base,
-                                                 SILType baseType,
-                                                 SILType fieldType,
-                                                 VarDecl *field);
+
+  /// Return the lowered type for the class's 'self' type within its context.
+  SILType getSelfType(const ClassDecl *base);
+
+  OwnedAddress projectPhysicalClassMemberAddress(
+      IRGenFunction &IGF, llvm::Value *base,
+      SILType baseType, SILType fieldType, VarDecl *field,
+      GenericSignature fnSig);
 
   /// Return a strategy for accessing the given stored class property.
   ///
@@ -83,6 +86,11 @@ namespace irgen {
                                             llvm::ArrayRef<SILType> tailTypes);
 
   ClassDecl *getRootClassForMetaclass(IRGenModule &IGM, ClassDecl *theClass);
+
+  ClassDecl *getSuperclassDeclForMetadata(IRGenModule &IGM, ClassDecl *theClass);
+  CanType getSuperclassForMetadata(IRGenModule &IGM, ClassDecl *theClass);
+  CanType getSuperclassForMetadata(IRGenModule &IGM, CanType theClass,
+                                   bool useArchetypes = true);
 
   enum class ClassMetadataStrategy {
     /// Does the given class have resilient ancestry, or is the class itself
@@ -120,6 +128,11 @@ namespace irgen {
                              ClassDecl *cls);
   
   llvm::Constant *emitClassPrivateData(IRGenModule &IGM, ClassDecl *theClass);
+
+  llvm::Constant *emitSpecializedGenericClassPrivateData(IRGenModule &IGM,
+                                                         ClassDecl *theClass,
+                                                         CanType theType);
+
   void emitGenericClassPrivateDataTemplate(IRGenModule &IGM,
                                       ClassDecl *theClass,
                                       llvm::SmallVectorImpl<llvm::Constant*> &fields,
@@ -133,7 +146,8 @@ namespace irgen {
   /// Emit a projection from a class instance to the first tail allocated
   /// element.
   Address emitTailProjection(IRGenFunction &IGF, llvm::Value *Base,
-                                  SILType ClassType, SILType TailType);
+                             SILType ClassType, SILType TailType,
+                             GenericSignature fnSig);
 
   using TailArraysRef = llvm::ArrayRef<std::pair<SILType, llvm::Value *>>;
 
@@ -152,31 +166,34 @@ namespace irgen {
   /// The returned \p StackAllocSize value is the actual size if the object is
   /// allocated on the stack or -1, if the object is allocated on the heap.
   llvm::Value *emitClassAllocation(IRGenFunction &IGF, SILType selfType,
-                  bool objc, int &StackAllocSize, TailArraysRef TailArrays);
+                  bool objc, bool isBare, int &StackAllocSize, TailArraysRef TailArrays);
 
   /// Emit an allocation of a class using a metadata value.
-  llvm::Value *emitClassAllocationDynamic(IRGenFunction &IGF, 
+  llvm::Value *emitClassAllocationDynamic(IRGenFunction &IGF,
                                           llvm::Value *metadata,
                                           SILType selfType,
-                                          bool objc, TailArraysRef TailArrays);
+                                          bool objc,
+                                          int &StackAllocSize,
+                                          TailArraysRef TailArrays);
 
   /// Emit class deallocation.
-  void emitClassDeallocation(IRGenFunction &IGF, SILType selfType,
-                             llvm::Value *selfValue);
+  void emitClassDeallocation(IRGenFunction &IGF,
+                             SILType selfType,
+                             llvm::Value *selfValue,
+                             GenericSignature fnSig);
 
   /// Emit class deallocation.
   void emitPartialClassDeallocation(IRGenFunction &IGF,
                                     SILType selfType,
                                     llvm::Value *selfValue,
-                                    llvm::Value *metadataValue);
+                                    llvm::Value *metadataValue,
+                                    GenericSignature fnSig);
 
   /// Emit the constant fragile offset of the given property inside an instance
   /// of the class.
-  llvm::Constant *
-  tryEmitConstantClassFragilePhysicalMemberOffset(IRGenModule &IGM,
-                                                  SILType baseType,
-                                                  VarDecl *field);
-                                                  
+  llvm::Constant *tryEmitConstantClassFragilePhysicalMemberOffset(
+      IRGenModule &IGM, SILType baseType, VarDecl *field);
+
   FieldAccess getClassFieldAccess(IRGenModule &IGM,
                                   SILType baseType,
                                   VarDecl *field);
@@ -192,6 +209,9 @@ namespace irgen {
                                              ClassDecl *theClass,
                                              llvm::Value *metadata);
 
+  /// For VFE, returns a type identifier for the given base method on a class.
+  llvm::MDString *typeIdForMethod(IRGenModule &IGM, SILDeclRef method);
+
   /// Given a metadata pointer, emit the callee for the given method.
   FunctionPointer emitVirtualMethodValue(IRGenFunction &IGF,
                                          llvm::Value *metadata,
@@ -200,11 +220,10 @@ namespace irgen {
 
   /// Given an instance pointer (or, for a static method, a class
   /// pointer), emit the callee for the given method.
-  FunctionPointer emitVirtualMethodValue(IRGenFunction &IGF,
-                                         llvm::Value *base,
-                                         SILType baseType,
-                                         SILDeclRef method,
+  FunctionPointer emitVirtualMethodValue(IRGenFunction &IGF, llvm::Value *base,
+                                         SILType baseType, SILDeclRef method,
                                          CanSILFunctionType methodType,
+                                         GenericSignature fnSig,
                                          bool useSuperVTable);
 
   /// Is the given class known to have Swift-compatible metadata?

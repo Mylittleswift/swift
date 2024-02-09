@@ -11,11 +11,14 @@
 //===----------------------------------------------------------------------===//
 //
 // This is an interface over the standard OSF uuid library that gives UUIDs
-// sane value semantics and operators.
+// sound value semantics and operators.
 //
 //===----------------------------------------------------------------------===//
 
 #include "swift/Basic/UUID.h"
+#include "llvm/ADT/None.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallString.h"
 
 // WIN32 doesn't natively support <uuid/uuid.h>. Instead, we use Win32 APIs.
 #if defined(_WIN32)
@@ -63,14 +66,14 @@ swift::UUID::UUID() {
 #endif
 }
 
-Optional<swift::UUID> swift::UUID::fromString(const char *s) {
+llvm::Optional<swift::UUID> swift::UUID::fromString(const char *s) {
 #if defined(_WIN32)
   RPC_CSTR t = const_cast<RPC_CSTR>(reinterpret_cast<const unsigned char*>(s));
 
   ::UUID uuid;
   RPC_STATUS status = UuidFromStringA(t, &uuid);
   if (status == RPC_S_INVALID_STRING_UUID) {
-    return None;
+    return llvm::None;
   }
 
   swift::UUID result = UUID();
@@ -79,7 +82,7 @@ Optional<swift::UUID> swift::UUID::fromString(const char *s) {
 #else
   swift::UUID result;
   if (uuid_parse(s, result.Value))
-    return None;
+    return llvm::None;
   return result;
 #endif
 }
@@ -95,7 +98,7 @@ void swift::UUID::toString(llvm::SmallVectorImpl<char> &out) const {
 
   char* signedStr = reinterpret_cast<char*>(str);
   memcpy(out.data(), signedStr, StringBufferSize);
-  std::transform(std::begin(out), std::end(out), std::begin(out), toupper);
+  llvm::transform(out, std::begin(out), toupper);
 #else
   uuid_unparse_upper(Value, out.data());
 #endif

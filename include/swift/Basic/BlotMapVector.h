@@ -16,6 +16,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/Range.h"
+#include "llvm/ADT/Optional.h"
 #include <vector>
 
 namespace swift {
@@ -29,7 +30,8 @@ bool compareKeyAgainstDefaultKey(const std::pair<KeyT, ValueT> &Pair) {
 /// iteration over its elements. Plus the special blot operation.
 template <typename KeyT, typename ValueT,
           typename MapT = llvm::DenseMap<KeyT, size_t>,
-          typename VectorT = std::vector<Optional<std::pair<KeyT, ValueT>>>>
+          typename VectorT =
+              std::vector<llvm::Optional<std::pair<KeyT, ValueT>>>>
 class BlotMapVector {
   /// Map keys to indices in Vector.
   MapT Map;
@@ -63,18 +65,43 @@ public:
       Vector.push_back({std::make_pair(Arg, ValueT())});
       return (*Vector[Num]).second;
     }
-    return Vector[Pair.first->second].getValue().second;
+    return Vector[Pair.first->second].value().second;
+  }
+
+  template <typename... Ts>
+  std::pair<iterator, bool> try_emplace(KeyT &&Key, Ts &&... Args) {
+    auto Pair = Map.insert(std::make_pair(std::move(Key), size_t(0)));
+    if (!Pair.second) {
+      return std::make_pair(Vector.begin() + Pair.first->second, false);
+    }
+
+    size_t Num = Vector.size();
+    Pair.first->second = Num;
+    Vector.emplace_back(
+        std::make_pair(Pair.first->first, ValueT(std::forward<Ts>(Args)...)));
+    return std::make_pair(Vector.begin() + Num, true);
+  }
+
+  template <typename... Ts>
+  std::pair<iterator, bool> try_emplace(const KeyT &Key, Ts &&... Args) {
+    auto Pair = Map.insert(std::make_pair(std::move(Key), size_t(0)));
+    if (!Pair.second) {
+      return std::make_pair(Vector.begin() + Pair.first->second, false);
+    }
+
+    size_t Num = Vector.size();
+    Pair.first->second = Num;
+    Vector.emplace_back(
+        std::make_pair(Pair.first->first, ValueT(std::forward<Ts>(Args)...)));
+    return std::make_pair(Vector.begin() + Num, true);
+  }
+
+  std::pair<iterator, bool> insert(std::pair<KeyT, ValueT> &InsertPair) {
+    return try_emplace(InsertPair.first, InsertPair.second);
   }
 
   std::pair<iterator, bool> insert(const std::pair<KeyT, ValueT> &InsertPair) {
-    auto Pair = Map.insert(std::make_pair(InsertPair.first, size_t(0)));
-    if (Pair.second) {
-      size_t Num = Vector.size();
-      Pair.first->second = Num;
-      Vector.push_back(InsertPair);
-      return std::make_pair(Vector.begin() + Num, true);
-    }
-    return std::make_pair(Vector.begin() + Pair.first->second, false);
+    return try_emplace(InsertPair.first, InsertPair.second);
   }
 
   iterator find(const KeyT &Key) {
@@ -82,7 +109,7 @@ public:
     if (It == Map.end())
       return Vector.end();
     auto Iter = Vector.begin() + It->second;
-    if (!Iter->hasValue())
+    if (!Iter->has_value())
       return Vector.end();
     return Iter;
   }
@@ -100,7 +127,7 @@ public:
     typename MapT::iterator It = Map.find(Key);
     if (It == Map.end())
       return false;
-    Vector[It->second] = None;
+    Vector[It->second] = llvm::None;
     Map.erase(It);
     return true;
   }
@@ -123,7 +150,7 @@ public:
     if (Iter == Map.end())
       return ValueT();
     auto &P = Vector[Iter->second];
-    if (!P.hasValue())
+    if (!P.has_value())
       return ValueT();
     return P->second;
   }
@@ -136,7 +163,7 @@ public:
 template <typename KeyT, typename ValueT, unsigned N,
           typename MapT = llvm::SmallDenseMap<KeyT, size_t, N>,
           typename VectorT =
-              llvm::SmallVector<Optional<std::pair<KeyT, ValueT>>, N>>
+              llvm::SmallVector<llvm::Optional<std::pair<KeyT, ValueT>>, N>>
 class SmallBlotMapVector : public BlotMapVector<KeyT, ValueT, MapT, VectorT> {
 public:
   SmallBlotMapVector() {}

@@ -45,8 +45,7 @@ public:
   Explosion &operator=(const Explosion &) = delete;
   Explosion(Explosion &&other) : NextValue(0) {
     // Do an uninitialized copy of the non-consumed elements.
-    Values.reserve(other.size());
-    Values.set_size(other.size());
+    Values.resize_for_overwrite(other.size());
     std::uninitialized_copy(other.begin(), other.end(), Values.begin());
 
     // Remove everything from the other explosion.
@@ -59,6 +58,10 @@ public:
     Values.swap(o.Values);
     o.reset();
     return *this;
+  }
+
+  Explosion(llvm::Value *singleValue) : NextValue(0) {
+    add(singleValue);
   }
 
   ~Explosion() {
@@ -97,6 +100,10 @@ public:
     Values.append(values.begin(), values.end());
   }
 
+  void insert(unsigned index, llvm::Value *value) {
+    Values.insert(Values.begin() + index, value);
+  }
+
   /// Return an array containing the given range of values.  The values
   /// are not claimed.
   ArrayRef<llvm::Value*> getRange(unsigned from, unsigned to) const {
@@ -128,6 +135,10 @@ public:
   llvm::Value *claimNext() {
     assert(NextValue < Values.size());
     return Values[NextValue++];
+  }
+
+  llvm::Constant *claimNextConstant() {
+    return cast<llvm::Constant>(claimNext());
   }
 
   /// Claim and return the next N values in this explosion.

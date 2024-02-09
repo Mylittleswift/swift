@@ -10,12 +10,13 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "DictionaryKeys.h"
 #include "sourcekitd/CodeCompletionResultsArray.h"
+#include "sourcekitd/DictionaryKeys.h"
 #include "sourcekitd/DocStructureArray.h"
 #include "sourcekitd/DocSupportAnnotationArray.h"
 #include "sourcekitd/TokenAnnotationsArray.h"
 #include "sourcekitd/ExpressionTypeArray.h"
+#include "sourcekitd/VariableTypeArray.h"
 #include "sourcekitd/RawData.h"
 #include "sourcekitd/RequestResponsePrinterBase.h"
 #include "SourceKit/Support/UIdent.h"
@@ -69,24 +70,25 @@ public:
     return getPtr()+1;
   }
 
-  static CustomXPCData createErrorRequestInvalid(const char *Description) {
+  static CustomXPCData createErrorRequestInvalid(StringRef Description) {
     return createKindAndString(Kind::ErrorRequestInvalid, Description);
   }
-  static CustomXPCData createErrorRequestFailed(const char *Description) {
+  static CustomXPCData createErrorRequestFailed(StringRef Description) {
     return createKindAndString(Kind::ErrorRequestFailed, Description);
   }
-  static CustomXPCData createErrorRequestInterrupted(const char *Description) {
+  static CustomXPCData createErrorRequestInterrupted(StringRef Description) {
     return createKindAndString(Kind::ErrorRequestInterrupted, Description);
   }
-  static CustomXPCData createErrorRequestCancelled(const char *Description) {
+  static CustomXPCData createErrorRequestCancelled(StringRef Description) {
     return createKindAndString(Kind::ErrorRequestCancelled, Description);
   }
 
 private:
-  static CustomXPCData createKindAndString(Kind K, const char *Str) {
+  static CustomXPCData createKindAndString(Kind K, StringRef Str) {
     llvm::SmallVector<char, 128> Buf;
     Buf.push_back((char)K);
-    Buf.append(Str, Str+strlen(Str)+1);
+    Buf.append(Str.begin(), Str.end());
+    Buf.push_back('\0');
     return CustomXPCData(xpc_data_create(Buf.begin(), Buf.size()));
   }
 
@@ -236,6 +238,16 @@ void ResponseBuilder::Dictionary::set(SourceKit::UIdent Key,
   xpc_release(arr);
 }
 
+void ResponseBuilder::Dictionary::set(SourceKit::UIdent Key,
+                                      ArrayRef<SourceKit::UIdent> UIDs) {
+  xpc_object_t arr = xpc_array_create(nullptr, 0);
+  for (auto UID : UIDs) {
+    xpc_array_set_uint64(arr, XPC_ARRAY_APPEND, uintptr_t(SKDUIDFromUIdent(UID)));
+  }
+  xpc_dictionary_set_value(Impl, Key.c_str(), arr);
+  xpc_release(arr);
+}
+
 void ResponseBuilder::Dictionary::setBool(UIdent Key, bool val) {
   xpc_dictionary_set_bool(Impl, Key.c_str(), val);
 }
@@ -257,19 +269,9 @@ ResponseBuilder::Dictionary::setDictionary(UIdent Key) {
 }
 
 void ResponseBuilder::Dictionary::setCustomBuffer(
-      SourceKit::UIdent Key,
-      CustomBufferKind Kind, std::unique_ptr<llvm::MemoryBuffer> MemBuf) {
-
-  std::unique_ptr<llvm::WritableMemoryBuffer> CustomBuf;
-  CustomBuf = llvm::WritableMemoryBuffer::getNewUninitMemBuffer(
-      sizeof(uint64_t) + MemBuf->getBufferSize());
-  char *BufPtr = CustomBuf->getBufferStart();
-  *reinterpret_cast<uint64_t*>(BufPtr) = (uint64_t)Kind;
-  BufPtr += sizeof(uint64_t);
-  memcpy(BufPtr, MemBuf->getBufferStart(), MemBuf->getBufferSize());
-
-  xpc_object_t xdata = xpc_data_create(CustomBuf->getBufferStart(),
-                                       CustomBuf->getBufferSize());
+    SourceKit::UIdent Key, std::unique_ptr<llvm::MemoryBuffer> Buf) {
+  xpc_object_t xdata = xpc_data_create(Buf->getBufferStart(),
+                                       Buf->getBufferSize());
   xpc_dictionary_set_value(Impl, Key.c_str(), xdata);
   xpc_release(xdata);
 }
@@ -281,11 +283,11 @@ ResponseBuilder::Dictionary ResponseBuilder::Array::appendDictionary() {
   return Dictionary(dict);
 }
 
-sourcekitd_uid_t RequestDict::getUID(UIdent Key) {
+sourcekitd_uid_t RequestDict::getUID(UIdent Key) const {
   return sourcekitd_uid_t(xpc_dictionary_get_uint64(Dict, Key.c_str()));
 }
 
-Optional<StringRef> RequestDict::getString(UIdent Key) {
+Optional<StringRef> RequestDict::getString(UIdent Key) const {
   xpc_object_t xobj = xpc_dictionary_get_value(Dict, Key.c_str());
   if (!xobj)
     return None;
@@ -295,7 +297,7 @@ Optional<StringRef> RequestDict::getString(UIdent Key) {
                    xpc_string_get_length(xobj));
 }
 
-Optional<RequestDict> RequestDict::getDictionary(SourceKit::UIdent Key) {
+Optional<RequestDict> RequestDict::getDictionary(SourceKit::UIdent Key) const {
   xpc_object_t xobj = xpc_dictionary_get_value(Dict, Key.c_str());
   if (!xobj)
     return None;
@@ -306,7 +308,7 @@ Optional<RequestDict> RequestDict::getDictionary(SourceKit::UIdent Key) {
 
 bool RequestDict::getStringArray(SourceKit::UIdent Key,
                                  llvm::SmallVectorImpl<const char *> &Arr,
-                                 bool isOptional) {
+                                 bool isOptional) const {
   xpc_object_t xarr = xpc_dictionary_get_value(Dict, Key.c_str());
   if (!xarr)
     return !isOptional;
@@ -325,7 +327,7 @@ bool RequestDict::getStringArray(SourceKit::UIdent Key,
 
 bool RequestDict::getUIDArray(SourceKit::UIdent Key,
                               llvm::SmallVectorImpl<sourcekitd_uid_t> &Arr,
-                              bool isOptional) {
+                              bool isOptional) const {
   xpc_object_t xarr = xpc_dictionary_get_value(Dict, Key.c_str());
   if (!xarr)
     return !isOptional;
@@ -343,7 +345,8 @@ bool RequestDict::getUIDArray(SourceKit::UIdent Key,
 }
 
 bool RequestDict::dictionaryArrayApply(
-    SourceKit::UIdent key, llvm::function_ref<bool(RequestDict)> applier) {
+    SourceKit::UIdent key,
+    llvm::function_ref<bool(RequestDict)> applier) const {
   xpc_object_t xarr = xpc_dictionary_get_value(Dict, key.c_str());
   if (!xarr || xpc_get_type(xarr) != XPC_TYPE_ARRAY)
     return true;
@@ -359,7 +362,7 @@ bool RequestDict::dictionaryArrayApply(
 }
 
 bool RequestDict::getInt64(SourceKit::UIdent Key, int64_t &Val,
-                           bool isOptional) {
+                           bool isOptional) const {
   xpc_object_t xobj = xpc_dictionary_get_value(Dict, Key.c_str());
   if (!xobj)
     return !isOptional;
@@ -367,7 +370,7 @@ bool RequestDict::getInt64(SourceKit::UIdent Key, int64_t &Val,
   return false;
 }
 
-Optional<int64_t> RequestDict::getOptionalInt64(SourceKit::UIdent Key) {
+Optional<int64_t> RequestDict::getOptionalInt64(SourceKit::UIdent Key) const {
   xpc_object_t xobj = xpc_dictionary_get_value(Dict, Key.c_str());
   if (!xobj)
     return None;
@@ -375,20 +378,20 @@ Optional<int64_t> RequestDict::getOptionalInt64(SourceKit::UIdent Key) {
 }
 
 sourcekitd_response_t
-sourcekitd::createErrorRequestInvalid(const char *Description) {
+sourcekitd::createErrorRequestInvalid(StringRef Description) {
   return CustomXPCData::createErrorRequestInvalid(Description).getXObj();
 }
 sourcekitd_response_t
-sourcekitd::createErrorRequestFailed(const char *Description) {
+sourcekitd::createErrorRequestFailed(StringRef Description) {
   return CustomXPCData::createErrorRequestFailed(Description).getXObj();
 }
 sourcekitd_response_t
-sourcekitd::createErrorRequestInterrupted(const char *Description) {
+sourcekitd::createErrorRequestInterrupted(StringRef Description) {
   return CustomXPCData::createErrorRequestInterrupted(Description).getXObj();
 }
 sourcekitd_response_t
 sourcekitd::createErrorRequestCancelled() {
-  return CustomXPCData::createErrorRequestCancelled("").getXObj();
+  return CustomXPCData::createErrorRequestCancelled(StringRef("")).getXObj();
 }
 
 //===----------------------------------------------------------------------===//
@@ -623,6 +626,7 @@ static sourcekitd_variant_type_t XPCVar_get_type(sourcekitd_variant_t var) {
     case CustomBufferKind::DocStructureElementArray:
     case CustomBufferKind::AttributesArray:
     case CustomBufferKind::ExpressionTypeArray:
+    case CustomBufferKind::VariableTypeArray:
       return SOURCEKITD_VARIANT_TYPE_ARRAY;
     case CustomBufferKind::RawData:
       return SOURCEKITD_VARIANT_TYPE_DATA;
@@ -785,6 +789,9 @@ static sourcekitd_variant_t variantFromXPCObject(xpc_object_t obj) {
                 (uintptr_t)CUSTOM_BUF_START(obj), 0 }};
     case CustomBufferKind::ExpressionTypeArray:
       return {{ (uintptr_t)getVariantFunctionsForExpressionTypeArray(),
+                (uintptr_t)CUSTOM_BUF_START(obj), 0 }};
+    case CustomBufferKind::VariableTypeArray:
+      return {{ (uintptr_t)getVariantFunctionsForVariableTypeArray(),
                 (uintptr_t)CUSTOM_BUF_START(obj), 0 }};
     case sourcekitd::CustomBufferKind::RawData:
       return {{ (uintptr_t)getVariantFunctionsForRawData(),

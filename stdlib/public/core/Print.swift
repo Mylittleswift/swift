@@ -10,14 +10,16 @@
 //
 //===----------------------------------------------------------------------===//
 
+#if !SWIFT_STDLIB_STATIC_PRINT
+
 /// Writes the textual representations of the given items into the standard
 /// output.
 ///
 /// You can pass zero or more items to the `print(_:separator:terminator:)`
 /// function. The textual representation for each item is the same as that
-/// obtained by calling `String(item)`. The following example prints a string,
-/// a closed range of integers, and a group of floating-point values to
-/// standard output:
+/// obtained by calling `String(describing: item)`. The following example
+/// prints a string, a closed range of integers, and a group of floating-point
+/// values to standard output:
 ///
 ///     print("One two three four five")
 ///     // Prints "One two three four five"
@@ -126,8 +128,8 @@ public func debugPrint(
 ///
 /// You can pass zero or more items to the `print(_:separator:terminator:to:)`
 /// function. The textual representation for each item is the same as that
-/// obtained by calling `String(item)`. The following example prints a closed
-/// range of integers to a string:
+/// obtained by calling `String(describing: item)`. The following example
+/// prints a closed range of integers to a string:
 ///
 ///     var range = "My range: "
 ///     print(1...5, to: &range)
@@ -158,7 +160,7 @@ public func debugPrint(
 ///     default is a newline (`"\n"`).
 ///   - output: An output stream to receive the text representation of each
 ///     item.
-public func print<Target : TextOutputStream>(
+public func print<Target: TextOutputStream>(
   _ items: Any...,
   separator: String = " ",
   terminator: String = "\n",
@@ -205,7 +207,7 @@ public func print<Target : TextOutputStream>(
 ///     default is a newline (`"\n"`).
 ///   - output: An output stream to receive the text representation of each
 ///     item.
-public func debugPrint<Target : TextOutputStream>(
+public func debugPrint<Target: TextOutputStream>(
   _ items: Any...,
   separator: String = " ",
   terminator: String = "\n",
@@ -214,7 +216,7 @@ public func debugPrint<Target : TextOutputStream>(
   _debugPrint(items, separator: separator, terminator: terminator, to: &output)
 }
 
-internal func _print<Target : TextOutputStream>(
+internal func _print<Target: TextOutputStream>(
   _ items: [Any],
   separator: String = " ",
   terminator: String = "\n",
@@ -231,7 +233,7 @@ internal func _print<Target : TextOutputStream>(
   output.write(terminator)
 }
 
-internal func _debugPrint<Target : TextOutputStream>(
+internal func _debugPrint<Target: TextOutputStream>(
   _ items: [Any],
   separator: String = " ",
   terminator: String = "\n",
@@ -247,3 +249,5 @@ internal func _debugPrint<Target : TextOutputStream>(
   }
   output.write(terminator)
 }
+
+#endif

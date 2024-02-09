@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -Xllvm -sil-inline-generics -emit-sorted-sil -emit-sil -O %s | %FileCheck %s
+// RUN: %target-swift-frontend -Xllvm -sil-inline-generics -emit-sorted-sil -emit-sil -enable-spec-devirt -O %s | %FileCheck %s
 
 // We used to crash on this when trying to devirtualize t.boo(a, 1),
 // because it is an "apply" with replacement types that contain
@@ -44,7 +44,7 @@ class Derived<T> : Base<T> {
 
 // Check that testDevirt is specialized and uses speculative devirtualization.
 // CHECK-LABEL: sil shared [noinline] @{{.*}}testDevirt
-// CHECK: checked_cast_br [exact] %{{.*}} : $CC<Int32> to $CC<Int32>
+// CHECK: checked_cast_br [exact] CC<Int32> in %{{.*}} : $CC<Int32> to CC<Int32>
 // CHECK: class_method
 // CHECK: }
 @inline(never)
@@ -178,7 +178,7 @@ public func test5() -> Int32? {
 //
 // rdar://25891588
 //
-// CHECK-LABEL: sil private [noinline] @{{.*}}test6
+// CHECK-LABEL: sil private [noinline] {{.*}}@{{.*}}test6
 // CHECK-NOT: class_method
 // CHECK-NOT: checked_cast_br
 // CHECK-NOT: class_method

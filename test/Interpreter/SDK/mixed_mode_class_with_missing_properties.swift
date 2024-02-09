@@ -1,6 +1,8 @@
 // RUN: %empty-directory(%t)
 // RUN: cp %s %t/main.swift
-// RUN: %target-build-swift -whole-module-optimization -emit-module-path %t/UsingObjCStuff.swiftmodule -c -o %t/UsingObjCStuff.o -module-name UsingObjCStuff -I %t -I %S/Inputs/mixed_mode -swift-version 5 -parse-as-library %S/Inputs/mixed_mode/UsingObjCStuff.swift
+
+// CMO does not work because of a deserialization failure: rdar://86575886
+// RUN: %target-build-swift -Xllvm -sil-disable-pass=cmo -whole-module-optimization -emit-module-path %t/UsingObjCStuff.swiftmodule -c -o %t/UsingObjCStuff.o -module-name UsingObjCStuff -I %t -I %S/Inputs/mixed_mode -swift-version 5 -parse-as-library %S/Inputs/mixed_mode/UsingObjCStuff.swift
 // RUN: %target-build-swift -o %t/a.out.v4 -I %t -I %S/Inputs/mixed_mode -module-name main -swift-version 4 %t/main.swift %t/UsingObjCStuff.o
 // RUN: %target-build-swift -o %t/a.out.v5 -I %t -I %S/Inputs/mixed_mode -module-name main -swift-version 5 %t/main.swift %t/UsingObjCStuff.o
 // RUN: %target-codesign %t/a.out.v4
@@ -10,9 +12,6 @@
 
 // REQUIRES: objc_interop
 // REQUIRES: executable_test
-
-// Requires swift-version 4
-// UNSUPPORTED: swift_test_mode_optimize_none_with_implicit_dynamic
 
 import UsingObjCStuff
 

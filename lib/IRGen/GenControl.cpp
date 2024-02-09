@@ -15,7 +15,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/IR/CallSite.h"
 #include "llvm/IR/Function.h"
 #include "IRGenFunction.h"
 #include "IRGenModule.h"
@@ -29,7 +28,7 @@ void IRBuilder::emitBlock(llvm::BasicBlock *BB) {
   assert(ClearedIP == nullptr);
   llvm::BasicBlock *CurBB = GetInsertBlock();
   assert(CurBB && "current insertion point is invalid");
-  CurBB->getParent()->getBasicBlockList().insertAfter(CurBB->getIterator(), BB);
+  CurBB->getParent()->insert(std::next(CurBB->getIterator()), BB);
   IRBuilderBase::SetInsertPoint(BB);
 }
 

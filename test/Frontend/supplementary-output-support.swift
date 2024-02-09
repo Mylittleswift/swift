@@ -18,13 +18,24 @@
 // RESOLVE_IMPORTS_NO_REFERENCE_DEPS: error: this mode does not support emitting reference dependency files{{$}}
 
 // RUN: not %target-swift-frontend -parse -emit-objc-header %s 2>&1 | %FileCheck -check-prefix=PARSE_NO_OBJC_HEADER %s
-// PARSE_NO_OBJC_HEADER: error: this mode does not support emitting Objective-C headers{{$}}
+// PARSE_NO_OBJC_HEADER: error: this mode does not support emitting Objective-C or C++ headers{{$}}
 // RUN: not %target-swift-frontend -dump-ast -emit-objc-header %s 2>&1 | %FileCheck -check-prefix=DUMP_NO_OBJC_HEADER %s
-// DUMP_NO_OBJC_HEADER: error: this mode does not support emitting Objective-C headers{{$}}
+// DUMP_NO_OBJC_HEADER: error: this mode does not support emitting Objective-C or C++ headers{{$}}
 // RUN: not %target-swift-frontend -resolve-imports -emit-objc-header %s 2>&1 | %FileCheck -check-prefix=RESOLVE_IMPORTS_NO_OBJC_HEADER %s
-// RESOLVE_IMPORTS_NO_OBJC_HEADER: error: this mode does not support emitting Objective-C headers{{$}}
+// RESOLVE_IMPORTS_NO_OBJC_HEADER: error: this mode does not support emitting Objective-C or C++ headers{{$}}
 
-// RUN: not %target-swift-frontend -parse -emit-parseable-module-interface-path %t %s 2>&1 | %FileCheck -check-prefix=PARSE_NO_INTERFACE %s
-// PARSE_NO_INTERFACE: error: this mode does not support emitting parseable interface files{{$}}
-// RUN: not %target-swift-frontend -emit-silgen -emit-parseable-module-interface-path %t %s 2>&1 | %FileCheck -check-prefix=SILGEN_NO_INTERFACE %s
-// SILGEN_NO_INTERFACE: error: this mode does not support emitting parseable interface files{{$}}
+// RUN: not %target-swift-frontend -parse -emit-module-interface-path %t %s 2>&1 | %FileCheck -check-prefix=PARSE_NO_INTERFACE %s
+// PARSE_NO_INTERFACE: error: this mode does not support emitting module interface files{{$}}
+// RUN: not %target-swift-frontend -emit-silgen -emit-module-interface-path %t %s 2>&1 | %FileCheck -check-prefix=SILGEN_NO_INTERFACE %s
+// SILGEN_NO_INTERFACE: error: this mode does not support emitting module interface files{{$}}
+
+// RUN: not %target-swift-frontend -parse -emit-private-module-interface-path %t %s 2>&1 | %FileCheck -check-prefix=PARSE_NO_PRIVATE_INTERFACE %s
+// PARSE_NO_PRIVATE_INTERFACE: error: this mode does not support emitting module interface files{{$}}
+// RUN: not %target-swift-frontend -emit-silgen -emit-private-module-interface-path %t %s 2>&1 | %FileCheck -check-prefix=SILGEN_NO_PRIVATE_INTERFACE %s
+// SILGEN_NO_PRIVATE_INTERFACE: error: this mode does not support emitting module interface files{{$}}
+
+// RUN: not %target-swift-frontend -parse -emit-const-values-path %t %s 2>&1 | %FileCheck -check-prefix=PARSE_NO_CONST_VALUES %s
+// PARSE_NO_CONST_VALUES: error: this mode does not support emitting extracted const values{{$}}
+
+// RUN: not %target-swift-frontend -parse -emit-api-descriptor-path %t %s 2>&1 | %FileCheck -check-prefix=PARSE_NO_API_DESCRIPTOR %s
+// PARSE_NO_API_DESCRIPTOR: error: this mode does not support emitting API descriptor files{{$}}

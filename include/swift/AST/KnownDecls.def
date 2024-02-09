@@ -44,6 +44,8 @@ FUNC_DECL(AllocateUninitializedArray,
           "_allocateUninitializedArray")
 FUNC_DECL(DeallocateUninitializedArray,
           "_deallocateUninitializedArray")
+FUNC_DECL(FinalizeUninitializedArray,
+          "_finalizeUninitializedArray")
 
 FUNC_DECL(ForceBridgeFromObjectiveC,
           "_forceBridgeFromObjectiveC")
@@ -62,10 +64,16 @@ FUNC_DECL(BridgeAnyObjectToAny,
 
 FUNC_DECL(ConvertToAnyHashable, "_convertToAnyHashable")
 
+FUNC_DECL(WillThrowTyped, "_willThrowTyped")
+
 FUNC_DECL(DiagnoseUnexpectedError, "_unexpectedError")
+FUNC_DECL(DiagnoseUnexpectedErrorTyped, "_unexpectedErrorTyped")
+FUNC_DECL(ErrorInMainTyped, "_errorInMainTyped")
 FUNC_DECL(DiagnoseUnexpectedNilOptional, "_diagnoseUnexpectedNilOptional")
 FUNC_DECL(DiagnoseUnexpectedEnumCase, "_diagnoseUnexpectedEnumCase")
 FUNC_DECL(DiagnoseUnexpectedEnumCaseValue, "_diagnoseUnexpectedEnumCaseValue")
+FUNC_DECL(DiagnoseUnavailableCodeReached, "_diagnoseUnavailableCodeReached")
+FUNC_DECL(DiagnoseUnavailableCodeReachedAEIC, "_diagnoseUnavailableCodeReached_aeic")
 
 FUNC_DECL(GetErrorEmbeddedNSError, "_getErrorEmbeddedNSError")
 
@@ -82,5 +90,8 @@ FUNC_DECL(ModifyAtWritableKeyPath, "_modifyAtWritableKeyPath")
 FUNC_DECL(ModifyAtReferenceWritableKeyPath, "_modifyAtReferenceWritableKeyPath")
 
 FUNC_DECL(Swap, "swap")
+
+FUNC_DECL(UnimplementedInitializer, "_unimplementedInitializer")
+FUNC_DECL(Undefined, "_undefined")
 
 #undef FUNC_DECL

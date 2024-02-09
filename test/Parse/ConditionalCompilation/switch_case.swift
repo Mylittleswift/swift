@@ -137,7 +137,7 @@ func foo(x: E, intVal: Int) {
   }
 
   // Empty check.
-  switch intVal { // expected-error {{'switch' statement body must have at least one 'case' or 'default' block; do you want to add a default case?}}
+  switch intVal { // expected-error {{'switch' statement body must have at least one 'case' or 'default' block; add a default case}}
 #if NEVER
     case 1:
       break
@@ -209,6 +209,7 @@ func foo(x: E, intVal: Int) {
       fallthrough // expected-error {{'fallthrough' from a case which doesn't bind variable 'val'}}
 #if ENABLE_C
     case let val:
+      _ = val
       break
 #endif
     case 2:

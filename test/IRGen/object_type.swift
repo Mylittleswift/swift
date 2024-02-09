@@ -4,6 +4,7 @@
 // RUN: %target-codesign %t/a.out
 // RUN: %target-run %t/a.out | %FileCheck %s
 // REQUIRES: executable_test
+// REQUIRES: objc_interop
 
 // Check if the runtime function swift_getObjectType is not readnone and
 // therefore not re-scheduled with release-calls, which would lead to a crash
@@ -32,9 +33,10 @@ func work() {
   myProtocolType.printit()
 }
 
-// CHECK-IR: call {{.*}} @swift_getObjectType({{.*}}) #[[M:[0-9]]]
-// CHECK-IR: declare {{.*}} @swift_getObjectType{{.*}} #[[M]]
-// CHECK-IR: attributes #[[M]] = { nounwind readonly }
+// CHECK-IR: call {{.*}} @swift_getObjectType({{.*}}) #[[M:[0-9]+]]
+// CHECK-IR: declare {{.*}} @swift_getObjectType{{.*}} local_unnamed_addr #[[N:[0-9]+]]
+// CHECK-IR: attributes #[[N]] = { mustprogress nofree nounwind willreturn memory(read) }
+// CHECK-IR: attributes #[[M]] = { nounwind willreturn memory(read) }
 
 // CHECK: okay
 work()

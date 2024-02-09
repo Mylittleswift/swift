@@ -22,11 +22,11 @@ using namespace Lowering;
 //===----------------------------------------------------------------------===//
 
 SwitchCaseFullExpr::SwitchCaseFullExpr(SILGenFunction &SGF, CleanupLocation loc)
-    : SGF(SGF), scope(SGF.Cleanups, loc), loc(loc), branchDest() {}
+    : SGF(SGF), scope(SGF, loc), loc(loc), branchDest() {}
 
 SwitchCaseFullExpr::SwitchCaseFullExpr(SILGenFunction &SGF, CleanupLocation loc,
                                        SwitchCaseBranchDest branchDest)
-    : SGF(SGF), scope(SGF.Cleanups, loc), loc(loc), branchDest(branchDest) {}
+    : SGF(SGF), scope(SGF, loc), loc(loc), branchDest(branchDest) {}
 
 void SwitchCaseFullExpr::exitAndBranch(SILLocation loc,
                                        ArrayRef<SILValue> branchArgs) {
@@ -67,44 +67,62 @@ void SwitchCaseFullExpr::unreachableExit() {
 //===----------------------------------------------------------------------===//
 
 void SwitchEnumBuilder::emit() && {
-  bool isAddressOnly = optional.getType().isAddressOnly(builder.getModule()) &&
-                       getSGF().silConv.useLoweredAddresses();
+  bool isAddressOnly =
+      subjectExprOperand.getType().isAddressOnly(builder.getFunction()) &&
+      getSGF().silConv.useLoweredAddresses();
   using DeclBlockPair = std::pair<EnumElementDecl *, SILBasicBlock *>;
+  SwitchEnumInst *switchEnum = nullptr;
   {
     // TODO: We could store the data in CaseBB form and not have to do this.
     llvm::SmallVector<DeclBlockPair, 8> caseBlocks;
     llvm::SmallVector<ProfileCounter, 8> caseBlockCounts;
-    std::transform(caseDataArray.begin(), caseDataArray.end(),
-                   std::back_inserter(caseBlocks),
-                   [](NormalCaseData &caseData) -> DeclBlockPair {
-                     return {caseData.decl, caseData.block};
-                   });
-    std::transform(caseDataArray.begin(), caseDataArray.end(),
-                   std::back_inserter(caseBlockCounts),
-                   [](NormalCaseData &caseData) -> ProfileCounter {
-                     return caseData.count;
-                   });
+    llvm::transform(caseDataArray, std::back_inserter(caseBlocks),
+                    [](NormalCaseData &caseData) -> DeclBlockPair {
+                      return {caseData.decl, caseData.block};
+                    });
+    llvm::transform(caseDataArray, std::back_inserter(caseBlockCounts),
+                    [](NormalCaseData &caseData) -> ProfileCounter {
+                      return caseData.count;
+                    });
     SILBasicBlock *defaultBlock =
         defaultBlockData ? defaultBlockData->block : nullptr;
     ProfileCounter defaultBlockCount =
         defaultBlockData ? defaultBlockData->count : ProfileCounter();
     ArrayRef<ProfileCounter> caseBlockCountsRef = caseBlockCounts;
     if (isAddressOnly) {
-      builder.createSwitchEnumAddr(loc, optional.getValue(), defaultBlock,
-                                   caseBlocks, caseBlockCountsRef,
+      if (subjectExprOperand.getType().isMoveOnlyWrapped()) {
+        subjectExprOperand = ManagedValue::forBorrowedAddressRValue(
+            builder.createMoveOnlyWrapperToCopyableAddr(
+                loc, subjectExprOperand.getValue()));
+      }
+      builder.createSwitchEnumAddr(loc, subjectExprOperand.getValue(),
+                                   defaultBlock, caseBlocks, caseBlockCountsRef,
                                    defaultBlockCount);
     } else {
-      if (optional.getType().isAddress()) {
-        // TODO: Refactor this into a maybe load.
-        if (optional.hasCleanup()) {
-          optional = builder.createLoadTake(loc, optional);
-        } else {
-          optional = builder.createLoadCopy(loc, optional);
+      if (subjectExprOperand.getType().isAddress()) {
+        bool hasCleanup = subjectExprOperand.hasCleanup();
+        SILValue value = subjectExprOperand.forward(getSGF());
+        if (value->getType().isMoveOnlyWrapped()) {
+          value = builder.createMoveOnlyWrapperToCopyableAddr(
+              loc, subjectExprOperand.getValue());
         }
+        if (hasCleanup) {
+          value = builder.emitLoadValueOperation(loc, value,
+                                                 LoadOwnershipQualifier::Take);
+        } else {
+          value = builder.emitLoadValueOperation(loc, value,
+                                                 LoadOwnershipQualifier::Copy);
+        }
+        subjectExprOperand = getSGF().emitManagedRValueWithCleanup(value);
+      } else {
+        if (subjectExprOperand.getType().isMoveOnlyWrapped())
+          subjectExprOperand =
+              builder.createOwnedMoveOnlyWrapperToCopyableValue(
+                  loc, subjectExprOperand);
       }
-      builder.createSwitchEnum(loc, optional.forward(getSGF()), defaultBlock,
-                               caseBlocks, caseBlockCountsRef,
-                               defaultBlockCount);
+      switchEnum = builder.createSwitchEnum(
+          loc, subjectExprOperand.forward(getSGF()), defaultBlock, caseBlocks,
+          caseBlockCountsRef, defaultBlockCount);
     }
   }
 
@@ -119,11 +137,13 @@ void SwitchEnumBuilder::emit() && {
 
     // Don't allow cleanups to escape the conditional block.
     SwitchCaseFullExpr presentScope(builder.getSILGenFunction(),
-                                    CleanupLocation::get(loc), branchDest);
+                                    CleanupLocation(loc), branchDest);
     builder.emitBlock(defaultBlock);
-    ManagedValue input = optional;
+    ManagedValue input = subjectExprOperand;
     if (!isAddressOnly) {
-      input = builder.createOwnedPhiArgument(optional.getType());
+      /// Produces an invalid ManagedValue for a no-payload unique default case.
+      input = ManagedValue::forForwardedRValue(
+          getSGF(), switchEnum->createDefaultResult());
     }
     handler(input, std::move(presentScope));
     builder.clearInsertionPoint();
@@ -137,18 +157,23 @@ void SwitchEnumBuilder::emit() && {
 
     // Don't allow cleanups to escape the conditional block.
     SwitchCaseFullExpr presentScope(builder.getSILGenFunction(),
-                                    CleanupLocation::get(loc), branchDest);
+                                    CleanupLocation(loc), branchDest);
+    // Begin a new binding scope, which is popped when the next innermost debug
+    // scope ends. The cleanup location loc isn't the perfect source location
+    // but it's close enough.
+    builder.getSILGenFunction().enterDebugScope(loc,
+                                                /*isBindingScope=*/true);
 
     builder.emitBlock(caseBlock);
 
     ManagedValue input;
     if (decl->hasAssociatedValues()) {
       // Pull the payload out if we have one.
-      SILType inputType =
-          optional.getType().getEnumElementType(decl, builder.getModule());
-      input = optional;
+      SILType inputType = subjectExprOperand.getType().getEnumElementType(
+          decl, builder.getModule(), builder.getFunction());
+      input = subjectExprOperand;
       if (!isAddressOnly) {
-        input = builder.createOwnedPhiArgument(inputType);
+        input = builder.createForwardedTermResult(inputType);
       }
     }
     handler(input, std::move(presentScope));
@@ -165,11 +190,13 @@ void SwitchEnumBuilder::emit() && {
 
     // Don't allow cleanups to escape the conditional block.
     SwitchCaseFullExpr presentScope(builder.getSILGenFunction(),
-                                    CleanupLocation::get(loc), branchDest);
+                                    CleanupLocation(loc), branchDest);
     builder.emitBlock(defaultBlock);
-    ManagedValue input = optional;
+    ManagedValue input = subjectExprOperand;
     if (!isAddressOnly) {
-      input = builder.createOwnedPhiArgument(optional.getType());
+      /// Produces an invalid ManagedValue for a no-payload unique default case.
+      input = ManagedValue::forForwardedRValue(
+          getSGF(), switchEnum->createDefaultResult());
     }
     handler(input, std::move(presentScope));
     builder.clearInsertionPoint();

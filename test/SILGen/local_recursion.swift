@@ -1,5 +1,4 @@
 // RUN: %target-swift-emit-silgen  -parse-as-library %s | %FileCheck %s
-// RUN: %target-swift-emit-silgen -enable-astscope-lookup  -parse-as-library %s | %FileCheck %s
 
 // CHECK-LABEL: sil hidden [ossa] @$s15local_recursionAA_1yySi_SitF : $@convention(thin) (Int, Int) -> () {
 // CHECK:       bb0([[X:%0]] : $Int, [[Y:%1]] : $Int):
@@ -15,14 +14,14 @@ func local_recursion(_ x: Int, y: Int) {
 
   // CHECK: [[SELF_RECURSIVE_REF:%.*]] = function_ref [[SELF_RECURSIVE]]
   // CHECK: [[CLOSURE:%.*]] = partial_apply [callee_guaranteed] [[SELF_RECURSIVE_REF]]([[X]])
-  // CHECK: [[BORROWED_CLOSURE:%.*]] = begin_borrow [[CLOSURE]]
+  // CHECK: [[MOVED_CLOSURE:%.*]] = move_value [lexical] [var_decl] [[CLOSURE]]
+  // CHECK: [[BORROWED_CLOSURE:%.*]] = begin_borrow [[MOVED_CLOSURE]]
   // CHECK: [[CLOSURE_COPY:%.*]] = copy_value [[BORROWED_CLOSURE]]
   let sr = self_recursive
   // CHECK: [[B:%.*]] = begin_borrow [[CLOSURE_COPY]]
   // CHECK: apply [[B]]([[Y]])
   // CHECK: end_borrow [[B]]
   // CHECK: destroy_value [[CLOSURE_COPY]]
-  // CHECK: end_borrow [[BORROWED_CLOSURE]]
   sr(y)
 
   func mutually_recursive_1(_ a: Int) {
@@ -52,14 +51,14 @@ func local_recursion(_ x: Int, y: Int) {
 
   // CHECK: [[TRANS_CAPTURE_REF:%.*]] = function_ref [[TRANS_CAPTURE]]
   // CHECK: [[CLOSURE:%.*]] = partial_apply [callee_guaranteed] [[TRANS_CAPTURE_REF]]([[X]], [[Y]])
-  // CHECK: [[BORROWED_CLOSURE:%.*]] = begin_borrow [[CLOSURE]]
+  // CHECK: [[MOVED_CLOSURE:%.*]] = move_value [lexical] [var_decl] [[CLOSURE]]
+  // CHECK: [[BORROWED_CLOSURE:%.*]] = begin_borrow [[MOVED_CLOSURE]]
   // CHECK: [[CLOSURE_COPY:%.*]] = copy_value [[BORROWED_CLOSURE]]
   let tc = transitive_capture_2
   // CHECK: [[B:%.*]] = begin_borrow [[CLOSURE_COPY]]
   // CHECK: apply [[B]]([[X]])
   // CHECK: end_borrow [[B]]
   // CHECK: destroy_value [[CLOSURE_COPY]]
-  // CHECK: end_borrow [[BORROWED_CLOSURE]]
   tc(x)
 
   // CHECK: [[CLOSURE_REF:%.*]] = function_ref @$s15local_recursionAA_1yySi_SitFySiXEfU_
@@ -71,13 +70,13 @@ func local_recursion(_ x: Int, y: Int) {
 
   // CHECK: [[CLOSURE_REF:%.*]] = function_ref @$s15local_recursionAA_1yySi_SitFySicfU0_
   // CHECK: [[CLOSURE:%.*]] = partial_apply [callee_guaranteed] [[CLOSURE_REF]]([[X]], [[Y]])
-  // CHECK: [[BORROWED_CLOSURE:%.*]] = begin_borrow [[CLOSURE]]
+  // CHECK: [[MOVED_CLOSURE:%.*]] = move_value [lexical] [var_decl] [[CLOSURE]]
+  // CHECK: [[BORROWED_CLOSURE:%.*]] = begin_borrow [[MOVED_CLOSURE]]
   // CHECK: [[CLOSURE_COPY:%.*]] = copy_value [[BORROWED_CLOSURE]]
   // CHECK: [[B:%.*]] = begin_borrow [[CLOSURE_COPY]]
   // CHECK: apply [[B]]([[X]])
   // CHECK: end_borrow [[B]]
   // CHECK: destroy_value [[CLOSURE_COPY]]
-  // CHECK: end_borrow [[BORROWED_CLOSURE]]
   let f: (Int) -> () = {
     self_recursive($0)
     transitive_capture_2($0)
@@ -86,25 +85,25 @@ func local_recursion(_ x: Int, y: Int) {
 }
 
 // CHECK: sil private [ossa] [[SELF_RECURSIVE]] :
-// CHECK: bb0([[A:%0]] : $Int, [[X:%1]] : $Int):
+// CHECK: bb0([[A:%0]] : $Int, [[X:%1]] : @closureCapture $Int):
 // CHECK:   [[SELF_REF:%.*]] = function_ref [[SELF_RECURSIVE]] :
 // CHECK:   apply [[SELF_REF]]({{.*}}, [[X]])
 
 // CHECK: sil private [ossa] [[MUTUALLY_RECURSIVE_1]]
-// CHECK: bb0([[A:%0]] : $Int, [[Y:%1]] : $Int, [[X:%2]] : $Int):
+// CHECK: bb0([[A:%0]] : $Int, [[Y:%1]] : @closureCapture $Int, [[X:%2]] : @closureCapture $Int):
 // CHECK:   [[MUTUALLY_RECURSIVE_REF:%.*]] = function_ref [[MUTUALLY_RECURSIVE_2:@\$s15local_recursionAA_1yySi_SitF20mutually_recursive_2L_yySiF]]
 // CHECK:   apply [[MUTUALLY_RECURSIVE_REF]]({{.*}}, [[X]], [[Y]])
 // CHECK: sil private [ossa] [[MUTUALLY_RECURSIVE_2]]
-// CHECK: bb0([[B:%0]] : $Int, [[X:%1]] : $Int, [[Y:%2]] : $Int):
+// CHECK: bb0([[B:%0]] : $Int, [[X:%1]] : @closureCapture $Int, [[Y:%2]] : @closureCapture $Int):
 // CHECK:   [[MUTUALLY_RECURSIVE_REF:%.*]] = function_ref [[MUTUALLY_RECURSIVE_1]]
 // CHECK:   apply [[MUTUALLY_RECURSIVE_REF]]({{.*}}, [[Y]], [[X]])
 
 
 // CHECK: sil private [ossa] [[TRANS_CAPTURE_1:@\$s15local_recursionAA_1yySi_SitF20transitive_capture_1L_yS2iF]]
-// CHECK: bb0([[A:%0]] : $Int, [[X:%1]] : $Int):
+// CHECK: bb0([[A:%0]] : $Int, [[X:%1]] : @closureCapture $Int):
 
 // CHECK: sil private [ossa] [[TRANS_CAPTURE]]
-// CHECK: bb0([[B:%0]] : $Int, [[X:%1]] : $Int, [[Y:%2]] : $Int):
+// CHECK: bb0([[B:%0]] : $Int, [[X:%1]] : @closureCapture $Int, [[Y:%2]] : @closureCapture $Int):
 // CHECK:   [[TRANS_CAPTURE_1_REF:%.*]] = function_ref [[TRANS_CAPTURE_1]]
 // CHECK:   apply [[TRANS_CAPTURE_1_REF]]({{.*}}, [[X]])
 

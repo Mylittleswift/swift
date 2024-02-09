@@ -16,7 +16,7 @@
 /// Because `_UnsafeBitset` implements a flat bit vector, it isn't suitable for
 /// holding arbitrarily large integers. The maximal element a bitset can store
 /// is fixed at its initialization.
-@_fixed_layout
+@frozen
 @usableFromInline // @testable
 internal struct _UnsafeBitset {
   @usableFromInline
@@ -118,7 +118,7 @@ extension _UnsafeBitset {
   @inlinable
   @inline(__always)
   internal func clear() {
-    words.assign(repeating: .empty, count: wordCount)
+    words.update(repeating: .empty, count: wordCount)
   }
 }
 
@@ -146,7 +146,7 @@ extension _UnsafeBitset: Sequence {
   }
 
   @usableFromInline
-  @_fixed_layout
+  @frozen
   internal struct Iterator: IteratorProtocol {
     @usableFromInline
     internal let bitset: _UnsafeBitset
@@ -182,7 +182,7 @@ extension _UnsafeBitset: Sequence {
 ////////////////////////////////////////////////////////////////////////////////
 
 extension _UnsafeBitset {
-  @_fixed_layout
+  @frozen
   @usableFromInline
   internal struct Word {
     @usableFromInline
@@ -309,6 +309,12 @@ extension _UnsafeBitset.Word {
 // problems in normal use, because `next()` is usually called on a separate
 // iterator, not the original word.
 extension _UnsafeBitset.Word: Sequence, IteratorProtocol {
+
+#if $NoncopyableGenerics
+  @usableFromInline
+  typealias Element = Int
+#endif
+
   @inlinable
   internal var count: Int {
     return value.nonzeroBitCount
@@ -335,5 +341,53 @@ extension _UnsafeBitset.Word: Sequence, IteratorProtocol {
     let bit = value.trailingZeroBitCount
     value &= value &- 1       // Clear lowest nonzero bit.
     return bit
+  }
+}
+
+extension _UnsafeBitset {
+  @_alwaysEmitIntoClient
+  @inline(__always)
+  internal static func _withTemporaryUninitializedBitset<R>(
+    wordCount: Int,
+    body: (_UnsafeBitset) throws -> R
+  ) rethrows -> R {
+    try withUnsafeTemporaryAllocation(
+      of: _UnsafeBitset.Word.self, capacity: wordCount
+    ) { buffer in
+      let bitset = _UnsafeBitset(
+        words: buffer.baseAddress!, wordCount: buffer.count)
+      return try body(bitset)
+    }
+  }
+
+  @_alwaysEmitIntoClient
+  @inline(__always)
+  internal static func withTemporaryBitset<R>(
+    capacity: Int,
+    body: (_UnsafeBitset) throws -> R
+  ) rethrows -> R {
+    let wordCount = Swift.max(1, Self.wordCount(forCapacity: capacity))
+    return try _withTemporaryUninitializedBitset(
+      wordCount: wordCount
+    ) { bitset in
+      bitset.clear()
+      return try body(bitset)
+    }
+  }
+}
+
+extension _UnsafeBitset {
+  @_alwaysEmitIntoClient
+  @inline(__always)
+  internal static func withTemporaryCopy<R>(
+    of original: _UnsafeBitset,
+    body: (_UnsafeBitset) throws -> R
+  ) rethrows -> R {
+    try _withTemporaryUninitializedBitset(
+      wordCount: original.wordCount
+    ) { bitset in
+      bitset.words.initialize(from: original.words, count: original.wordCount)
+      return try body(bitset)
+    }
   }
 }

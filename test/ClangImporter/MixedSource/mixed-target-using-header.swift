@@ -48,7 +48,7 @@ func testStruct(_ p: Point2D) -> Point2D {
 
 #if !SILGEN
 func testSuppressed() {
-  let _: __int128_t? = nil // expected-error{{use of undeclared type '__int128_t'}}
+  let _: __int128_t? = nil // expected-error{{cannot find type '__int128_t' in scope}}
 }
 #endif
 
@@ -65,12 +65,12 @@ func testFoundationOverlay() {
 func testProtocolNamingConflict() {
   let a: ConflictingName1?
   var b: ConflictingName1Protocol?
-  b = a // expected-error {{cannot assign value of type 'ConflictingName1?' to type 'ConflictingName1Protocol?'}}
+  b = a // expected-error {{cannot assign value of type 'ConflictingName1?' to type '(any ConflictingName1Protocol)?'}}
   _ = b
 
   let c: ConflictingName2?
   var d: ConflictingName2Protocol?
-  d = c // expected-error {{cannot assign value of type 'ConflictingName2?' to type 'ConflictingName2Protocol?'}}
+  d = c // expected-error {{cannot assign value of type 'ConflictingName2?' to type '(any ConflictingName2Protocol)?'}}
   _ = d
 }
 

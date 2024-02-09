@@ -1,8 +1,12 @@
-// RUN: %target-sil-opt -verify-sil-ownership -enable-sil-verify-all %s -diagnostic-constant-propagation | %FileCheck %s
-// RUN: %target-sil-opt -verify-sil-ownership -enable-sil-verify-all %s -performance-constant-propagation | %FileCheck %s
+// RUN: %target-sil-opt -enable-sil-verify-all %s -diagnostic-constant-propagation | %FileCheck %s
+// RUN: %target-sil-opt -enable-sil-verify-all %s -performance-constant-propagation | %FileCheck %s
 
 import Swift
 import Builtin
+
+//////////////////
+// Declarations //
+//////////////////
 
 struct UInt {
   var value: Builtin.Word
@@ -19,6 +23,20 @@ struct Int64 {
 struct UInt64 {
   var value: Builtin.Int64
 }
+
+class Klass {}
+
+sil @klass_allocator : $@convention(method) (@thick Klass.Type) -> @owned Klass
+sil @generic_user : $@convention(thin) <τ_0_0> (@in_guaranteed τ_0_0) -> ()
+
+struct NativeObjectOptNativeObjectPair {
+  var lhs: Builtin.NativeObject
+  var rhs: Optional<Builtin.NativeObject>
+}
+
+///////////
+// Tests //
+///////////
 
 sil [ossa] @count_leading_zeros_corner_case : $@convention(thin) () -> Builtin.Int64 {
 bb0:
@@ -382,9 +400,9 @@ bb0:
 // CHECK-LABEL: sil [ossa] @fold_binary_bitwise
 // CHECK: bb0:
 // CHECK-NEXT: %0 = integer_literal $Builtin.Int64, 0
-// CHECK_NEXT: %1 = integer_literal $Builtin.Int64, 1
-// CHECK_NEXT: %2 = integer_literal $Builtin.Int64, 1
-// CHECK_NEXT: return %2 : $Builtin.Int64
+// CHECK-NEXT: %1 = integer_literal $Builtin.Int64, 1
+// CHECK-NEXT: %2 = integer_literal $Builtin.Int64, 1
+// CHECK-NEXT: return %2 : $Builtin.Int64
 }
 
 // For any x of the same size as Int.max and n>=1 , (x>>n) is always <= Int.max,
@@ -521,22 +539,11 @@ bb0:
 // CHECK-NEXT: return %4 : $Builtin.Int64
 }
 
-// Fold x < 0 into false, if x is known to be a result of an unsigned
-// operation with overflow checks enabled.
-// At the same time x >= 0 is always true under the same conditions.
-//
-// CHECK-LABEL: sil [ossa] @fold_unsigned_op_with_overflow_lt_zero :
+// CHECK-LABEL: sil [ossa] @dont_fold_unsigned_op_with_overflow_lt_zero :
 // CHECK: builtin "uadd_with_overflow_Int64"
-// CHECK: integer_literal $Builtin.Int1, 0
-// CHECK: integer_literal $Builtin.Int1, -1
-// CHECK: builtin "usub_with_overflow_Int64"
-// CHECK: integer_literal $Builtin.Int1, 0
-// CHECK: integer_literal $Builtin.Int1, -1
-// CHECK: builtin "umul_with_overflow_Int64"
-// CHECK: integer_literal $Builtin.Int1, 0
-// CHECK: integer_literal $Builtin.Int1, -1
-// CHECK-NEXT: return {{.*}}$Builtin.Int64
-sil [ossa] @fold_unsigned_op_with_overflow_lt_zero : $@convention(thin) (Builtin.Int64, Builtin.Int64) -> Builtin.Int64 {
+// CHECK-NOT: integer_literal
+// CHECK: } // end sil function 'dont_fold_unsigned_op_with_overflow_lt_zero'
+sil [ossa] @dont_fold_unsigned_op_with_overflow_lt_zero : $@convention(thin) (Builtin.Int64, Builtin.Int64) -> Builtin.Int64 {
 bb0(%0 : $Builtin.Int64, %1 : $Builtin.Int64):
  %zero  = integer_literal $Builtin.Int64, 0
  %2 = integer_literal $Builtin.Int1, -1
@@ -567,18 +574,11 @@ bb0(%0 : $Builtin.Int64, %1 : $Builtin.Int64):
  return %uadd_with_overflow_result : $Builtin.Int64
 }
 
-// CHECK-LABEL: sil [ossa] @fold_unsigned_op_with_overflow_lt_zero_destructure :
+// CHECK-LABEL: sil [ossa] @dont_fold_unsigned_op_with_overflow_lt_zero_destructure :
 // CHECK: builtin "uadd_with_overflow_Int64"
-// CHECK: integer_literal $Builtin.Int1, 0
-// CHECK: integer_literal $Builtin.Int1, -1
-// CHECK: builtin "usub_with_overflow_Int64"
-// CHECK: integer_literal $Builtin.Int1, 0
-// CHECK: integer_literal $Builtin.Int1, -1
-// CHECK: builtin "umul_with_overflow_Int64"
-// CHECK: integer_literal $Builtin.Int1, 0
-// CHECK: integer_literal $Builtin.Int1, -1
-// CHECK-NEXT: return {{.*}}$Builtin.Int64
-sil [ossa] @fold_unsigned_op_with_overflow_lt_zero_destructure : $@convention(thin) (Builtin.Int64, Builtin.Int64) -> Builtin.Int64 {
+// CHECK-NOT: integer_literal
+// CHECK: } // end sil function 'dont_fold_unsigned_op_with_overflow_lt_zero_destructure'
+sil [ossa] @dont_fold_unsigned_op_with_overflow_lt_zero_destructure : $@convention(thin) (Builtin.Int64, Builtin.Int64) -> Builtin.Int64 {
 bb0(%0 : $Builtin.Int64, %1 : $Builtin.Int64):
  %zero  = integer_literal $Builtin.Int64, 0
  %2 = integer_literal $Builtin.Int1, -1
@@ -857,9 +857,8 @@ class AnSubObject : AnObject {}
 // CHECK-LABEL: sil [ossa] @replace_unconditional_check_cast_failure
 // CHECK:  bb2:
 // CHECK:  alloc_stack $AnObject
-// CHECK:  store undef to [trivial] %0
-// CHECK:  dealloc_stack
-// CHECK:  builtin "int_trap"()
+// CHECK: [[ONE:%[0-9]+]] = integer_literal $Builtin.Int1, -1
+// CHECK: cond_fail [[ONE]] : $Builtin.Int1, "failed cast"
 // CHECK:  unreachable
 
 sil [ossa] @replace_unconditional_check_cast_failure : $@convention(thin) (Builtin.Int1, @guaranteed AnObject) -> (@out Value) {
@@ -867,8 +866,7 @@ bb0(%2 : $*Value, %0 : $Builtin.Int1, %1 : @guaranteed $AnObject):
   cond_br %0, bb1, bb2
 
 bb1:
-  %3 = tuple()
-  return %3 : $()
+  br bb3
 
 bb2:
   %31 = alloc_stack $AnObject
@@ -878,7 +876,11 @@ bb2:
   %32 = alloc_stack $AnObject
   dealloc_stack %32: $*AnObject
   dealloc_stack %31 : $*AnObject
-  br bb1
+  br bb3
+
+bb3:
+  %3 = tuple()
+  return %3 : $()
 }
 
 public protocol P {
@@ -921,7 +923,7 @@ bb0(%0 : $*P, %1 : $*PP):
 }
 
 // Check that an unconditional_checked_cast_addr from a non-existential loadable type to a protocol
-// can be replaced by a more efficient code sequence if it is statitcally known that this
+// can be replaced by a more efficient code sequence if it is statistically known that this
 // type conforms to this protocol.
 // CHECK-LABEL: sil [ossa] @replace_unconditional_check_cast_addr_for_type_to_existential
 // CHECK-NOT: unconditional_checked_cast_addr
@@ -1074,10 +1076,10 @@ bb0(%0 : $*MyError, %1 : $*E2<X>):
 // Check casts to Error.
 // CHECK-LABEL: sil [ossa] @replace_unconditional_check_cast_addr_for_type_to_error_existential
 // CHECK-NOT: unconditional_checked_cast_addr
-// CHECK: [[ALLOC_BOX:%.*]] = alloc_existential_box $Error, $E1
-// CHECK: [[PROJ:%.*]] = project_existential_box $E1 in [[ALLOC_BOX]] : $Error
-// CHECK: copy_addr [take] %1 to [initialization] [[PROJ]]
-// CHECK: store [[ALLOC_BOX]] to [init] %0 : $*Error
+// CHECK: [[ALLOC_BOX:%.*]] = alloc_existential_box $any Error, $E1
+// CHECK: [[PROJ:%.*]] = project_existential_box $E1 in [[ALLOC_BOX]] : $any Error
+// CHECK: copy_addr [take] %1 to [init] [[PROJ]]
+// CHECK: store [[ALLOC_BOX]] to [init] %0 : $*any Error
 // CHECK: return
 sil [ossa] @replace_unconditional_check_cast_addr_for_type_to_error_existential : $@convention(thin) (@in E1) -> (@out Error) {
 bb0(%0 : $*Error, %1 : $*E1):
@@ -1086,15 +1088,15 @@ bb0(%0 : $*Error, %1 : $*E1):
   return %2 : $()
 }
 
-// CHECK-LABEL: sil [ossa] @always_fail_protocolmeta_to_concretemeta_checkedcastbr : $@convention(thin) (@thin P.Protocol) -> Builtin.Int1 {
+// CHECK-LABEL: sil [ossa] @always_fail_protocolmeta_to_concretemeta_checkedcastbr : $@convention(thin) (@thin (any P).Type) -> Builtin.Int1 {
 // CHECK: bb0(
 // CHECK-NEXT: metatype
-// CHECK-NEXT: br bb2(
+// CHECK-NEXT: br bb2
 // CHECK: } // end sil function 'always_fail_protocolmeta_to_concretemeta_checkedcastbr'
 sil [ossa] @always_fail_protocolmeta_to_concretemeta_checkedcastbr : $@convention(thin) (@thin P.Protocol) -> Builtin.Int1 {
 bb0(%0 : $@thin P.Protocol):
   %2 = metatype $@thick P.Protocol
-  checked_cast_br %2 : $@thick P.Protocol to $@thick X.Type, bb1, bb2
+  checked_cast_br P.Protocol in %2 : $@thick P.Protocol to X.Type, bb1, bb2
 
 bb1(%4 : $@thick X.Type):
   %5 = metatype $@thin X.Type
@@ -1112,11 +1114,11 @@ bb3(%11 : $Builtin.Int1):
 // CHECK-LABEL: sil [ossa] @always_succeed_subtoparent : $@convention(thin) (@owned AnSubObject) -> Builtin.Int1 {
 // CHECK: bb0(
 // CHECK-NEXT: upcast
-// CHECK-NEXT: br bb1(
+// CHECK-NEXT: br bb1
 // CHECK: } // end sil function 'always_succeed_subtoparent'
 sil [ossa] @always_succeed_subtoparent : $@convention(thin) (@owned AnSubObject) -> Builtin.Int1 {
 bb0(%0 : @owned $AnSubObject):
-  checked_cast_br %0 : $AnSubObject to $AnObject, bb1, bb2
+  checked_cast_br AnSubObject in %0 : $AnSubObject to AnObject, bb1, bb2
 
 bb1(%4 : @owned $AnObject):
   %5 = metatype $@thin X.Type
@@ -1131,4 +1133,76 @@ bb2(%8 : @owned $AnSubObject):
 
 bb3(%11 : $Builtin.Int1):
   return %11 : $Builtin.Int1
+}
+
+sil [ossa] @do_not_infinite_loop : $@convention(thin) () -> () {
+bb0:
+  %0 = integer_literal $Builtin.Word, 1
+  %1 = struct $Int (%0 : $Builtin.Word)
+  %2 = metatype $@thick Klass.Type
+  %3 = function_ref @klass_allocator : $@convention(method) (@thick Klass.Type) -> @owned Klass
+  %4 = apply %3(%2) : $@convention(method) (@thick Klass.Type) -> @owned Klass
+  // We can never in constant propagation forward %5 today since we would need
+  // to know that we are eliminating all of its uses. But the pass doesn't
+  // understand that today and so destroy_value %5 in bb2 stops our ability to
+  // optimize.
+  %5 = tuple (%1 : $Int, %4 : $Klass)
+  cond_br undef, bb1, bb2
+
+bb1:
+  %6 = alloc_stack $(Int, Klass)
+  %7 = tuple_element_addr %6 : $*(Int, Klass), 0
+  %8 = tuple_element_addr %6 : $*(Int, Klass), 1
+  (%9, %10) = destructure_tuple %5 : $(Int, Klass)
+  store %1 to [trivial] %7 : $*Int
+  store %10 to [init] %8 : $*Klass
+  %13 = function_ref @generic_user : $@convention(thin) <τ_0_0> (@in_guaranteed τ_0_0) -> ()
+  %14 = apply %13<(Int, Klass)>(%6) : $@convention(thin) <τ_0_0> (@in_guaranteed τ_0_0) -> ()
+  destroy_addr %6 : $*(Int, Klass)
+  dealloc_stack %6 : $*(Int, Klass)
+  br bb3
+
+bb2:
+  destroy_value %5 : $(Int, Klass)
+  br bb3
+
+bb3:
+  %9999 = tuple()
+  return %9999 : $()
+}
+
+// CHECK-LABEL: sil [ossa] @do_not_RAUW_owned_destructure_with_nontrivial_none_value_tuple : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+// CHECK: ({{%.*}}, [[DESTRUCTURE_RESULT_2:%.*]]) = destructure_tuple
+// CHECK: store [[DESTRUCTURE_RESULT_2]] to [init]
+// CHECK: } // end sil function 'do_not_RAUW_owned_destructure_with_nontrivial_none_value_tuple'
+sil [ossa] @do_not_RAUW_owned_destructure_with_nontrivial_none_value_tuple : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+bb0(%arg : @owned $Builtin.NativeObject):
+  %0 = alloc_stack $Optional<Builtin.NativeObject>
+  %1 = enum $Optional<Builtin.NativeObject>, #Optional.none!enumelt
+  %2 = tuple(%arg : $Builtin.NativeObject, %1 : $Optional<Builtin.NativeObject>)
+  (%3, %4) = destructure_tuple %2 : $(Builtin.NativeObject, Optional<Builtin.NativeObject>)
+  store %4 to [init] %0 : $*Optional<Builtin.NativeObject>
+  destroy_addr %0 : $*Optional<Builtin.NativeObject>
+  dealloc_stack %0 : $*Optional<Builtin.NativeObject>
+  destroy_value %3 : $Builtin.NativeObject
+  %9999 = tuple()
+  return %9999 : $()
+}
+
+// CHECK-LABEL: sil [ossa] @do_not_RAUW_owned_destructure_with_nontrivial_none_value_struct : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+// CHECK: ({{%.*}}, [[DESTRUCTURE_RESULT_2:%.*]]) = destructure_struct
+// CHECK: store [[DESTRUCTURE_RESULT_2]] to [init]
+// CHECK: } // end sil function 'do_not_RAUW_owned_destructure_with_nontrivial_none_value_struct'
+sil [ossa] @do_not_RAUW_owned_destructure_with_nontrivial_none_value_struct : $@convention(thin) (@owned Builtin.NativeObject) -> () {
+bb0(%arg : @owned $Builtin.NativeObject):
+  %0 = alloc_stack $Optional<Builtin.NativeObject>
+  %1 = enum $Optional<Builtin.NativeObject>, #Optional.none!enumelt
+  %2 = struct $NativeObjectOptNativeObjectPair (%arg : $Builtin.NativeObject, %1 : $Optional<Builtin.NativeObject>)
+  (%3, %4) = destructure_struct %2 : $NativeObjectOptNativeObjectPair
+  store %4 to [init] %0 : $*Optional<Builtin.NativeObject>
+  destroy_addr %0 : $*Optional<Builtin.NativeObject>
+  dealloc_stack %0 : $*Optional<Builtin.NativeObject>
+  destroy_value %3 : $Builtin.NativeObject
+  %9999 = tuple()
+  return %9999 : $()
 }

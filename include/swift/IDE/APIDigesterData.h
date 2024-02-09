@@ -38,7 +38,7 @@ enum class SDKNodeKind: uint8_t {
 #include "DigesterEnums.def"
 };
 
-Optional<SDKNodeKind> parseSDKNodeKind(StringRef Content);
+llvm::Optional<SDKNodeKind> parseSDKNodeKind(StringRef Content);
 
 enum class NodeAnnotation: uint8_t{
 #define NODE_ANNOTATION(NAME) NAME,
@@ -65,7 +65,7 @@ raw_ostream &operator<<(raw_ostream &Out, const NodeAnnotation Value);
 // Redefine << so that we can output the name of the node kind.
 raw_ostream &operator<<(raw_ostream &Out, const SDKNodeKind Value);
 
-StringRef getDeclKindStr(const DeclKind Value);
+StringRef getDeclKindStr(const DeclKind Value, bool lower);
 
 // Redefine << so that we can output the name of decl kind.
 raw_ostream &operator<<(raw_ostream &Out, const DeclKind Value);
@@ -162,8 +162,7 @@ public:
 
   bool rightCommentUnderscored() const {
     DeclNameViewer Viewer(RightComment);
-    auto HasUnderScore =
-      [](StringRef S) { return S.find('_') != StringRef::npos; };
+    auto HasUnderScore = [](StringRef S) { return S.contains('_'); };
     auto Args = Viewer.args();
     return HasUnderScore(Viewer.base()) ||
         std::any_of(Args.begin(), Args.end(), HasUnderScore);
@@ -266,8 +265,8 @@ struct TypeMemberDiffItem: public APIDiffItem {
   StringRef usr;
   StringRef newTypeName;
   StringRef newPrintedName;
-  Optional<uint8_t> selfIndex;
-  Optional<uint8_t> removedIndex;
+  llvm::Optional<uint8_t> selfIndex;
+  llvm::Optional<uint8_t> removedIndex;
   StringRef oldTypeName;
   StringRef oldPrintedName;
 private:
@@ -279,15 +278,17 @@ public:
 
 public:
   TypeMemberDiffItem(StringRef usr, StringRef newTypeName,
-                     StringRef newPrintedName, Optional<uint8_t> selfIndex,
-                     Optional<uint8_t> removedIndex, StringRef oldTypeName,
-                     StringRef oldPrintedName) : usr(usr),
-    newTypeName(newTypeName), newPrintedName(newPrintedName),
-    selfIndex(selfIndex), removedIndex(removedIndex), oldTypeName(oldTypeName),
-    oldPrintedName(oldPrintedName), OldNameViewer(oldPrintedName),
-    NewNameViewer(newPrintedName),
-    NewTypeDot(isNewNameGlobal() ? "" : (llvm::Twine(newTypeName) + ".").str()),
-    Subkind(getSubKind()) {}
+                     StringRef newPrintedName,
+                     llvm::Optional<uint8_t> selfIndex,
+                     llvm::Optional<uint8_t> removedIndex,
+                     StringRef oldTypeName, StringRef oldPrintedName)
+      : usr(usr), newTypeName(newTypeName), newPrintedName(newPrintedName),
+        selfIndex(selfIndex), removedIndex(removedIndex),
+        oldTypeName(oldTypeName), oldPrintedName(oldPrintedName),
+        OldNameViewer(oldPrintedName), NewNameViewer(newPrintedName),
+        NewTypeDot(isNewNameGlobal() ? ""
+                                     : (llvm::Twine(newTypeName) + ".").str()),
+        Subkind(getSubKind()) {}
   static StringRef head();
   static void describe(llvm::raw_ostream &os);
   static void undef(llvm::raw_ostream &os);

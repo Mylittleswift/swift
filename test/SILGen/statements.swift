@@ -167,9 +167,8 @@ func for_loops2() {
   // rdar://problem/19316670
   // CHECK: alloc_stack $Optional<MyClass>
   // CHECK-NEXT: [[WRITE:%.*]] = begin_access [modify] [unknown]
-  // CHECK: [[NEXT:%[0-9]+]] = function_ref @$ss16IndexingIteratorV4next{{[_0-9a-zA-Z]*}}F
+  // CHECK: [[NEXT:%[0-9]+]] = function_ref @$ss16IndexingIteratorV4next7ElementQzSgyF : $@convention(method) <τ_0_0 where τ_0_0 : Collection> (@inout IndexingIterator<τ_0_0>) -> @out Optional<τ_0_0.Element>
   // CHECK-NEXT: apply [[NEXT]]<[MyClass]>
-  // CHECK: class_method [[OBJ:%[0-9]+]] : $MyClass, #MyClass.foo!1
   let objects = [MyClass(), MyClass() ]
   for obj in objects {
     obj.foo()
@@ -246,7 +245,7 @@ func test_if_break(_ c : C?) {
 // CHECK: bb0([[ARG:%.*]] : @guaranteed $Optional<C>):
 label1:
   // CHECK: [[ARG_COPY:%.*]] = copy_value [[ARG]]
-  // CHECK: switch_enum [[ARG_COPY]] : $Optional<C>, case #Optional.some!enumelt.1: [[TRUE:bb[0-9]+]], case #Optional.none!enumelt: [[FALSE:bb[0-9]+]]
+  // CHECK: switch_enum [[ARG_COPY]] : $Optional<C>, case #Optional.some!enumelt: [[TRUE:bb[0-9]+]], case #Optional.none!enumelt: [[FALSE:bb[0-9]+]]
   if let x = c {
 // CHECK: [[TRUE]]({{.*}} : @owned $C):
 
@@ -268,7 +267,7 @@ func test_if_else_break(_ c : C?) {
 // CHECK: bb0([[ARG:%.*]] : @guaranteed $Optional<C>):
 label2:
   // CHECK: [[ARG_COPY:%.*]] = copy_value [[ARG]]
-  // CHECK: switch_enum [[ARG_COPY]] : $Optional<C>, case #Optional.some!enumelt.1: [[TRUE:bb[0-9]+]], case #Optional.none!enumelt: [[FALSE:bb[0-9]+]]
+  // CHECK: switch_enum [[ARG_COPY]] : $Optional<C>, case #Optional.some!enumelt: [[TRUE:bb[0-9]+]], case #Optional.none!enumelt: [[FALSE:bb[0-9]+]]
 
   if let x = c {
     // CHECK: [[TRUE]]({{.*}} : @owned $C):
@@ -292,7 +291,7 @@ func test_if_else_then_break(_ a : Bool, _ c : C?) {
 label3:
   // CHECK: bb0({{.*}}, [[ARG2:%.*]] : @guaranteed $Optional<C>):
   // CHECK: [[ARG2_COPY:%.*]] = copy_value [[ARG2]]
-  // CHECK: switch_enum [[ARG2_COPY]] : $Optional<C>, case #Optional.some!enumelt.1: [[TRUE:bb[0-9]+]], case #Optional.none!enumelt: [[FALSE:bb[0-9]+]]
+  // CHECK: switch_enum [[ARG2_COPY]] : $Optional<C>, case #Optional.some!enumelt: [[TRUE:bb[0-9]+]], case #Optional.none!enumelt: [[FALSE:bb[0-9]+]]
 
   if let x = c {
     // CHECK: [[TRUE]]({{.*}} : @owned $C):
@@ -362,6 +361,7 @@ func test_do() {
   do {
     // CHECK: [[CTOR:%.*]] = function_ref @$s10statements7MyClassC{{[_0-9a-zA-Z]*}}fC
     // CHECK: [[OBJ:%.*]] = apply [[CTOR]](
+    // CHECK: [[OBJMOVE:%.*]] = move_value [lexical] [var_decl] [[OBJ]]
     let obj = MyClass()
     _ = obj
     
@@ -371,7 +371,7 @@ func test_do() {
     bar(1)
 
     // CHECK-NOT: br bb
-    // CHECK: destroy_value [[OBJ]]
+    // CHECK: destroy_value [[OBJMOVE]]
     // CHECK-NOT: br bb
   }
 
@@ -392,6 +392,7 @@ func test_do_labeled() {
   lbl: do {
     // CHECK: [[CTOR:%.*]] = function_ref @$s10statements7MyClassC{{[_0-9a-zA-Z]*}}fC
     // CHECK: [[OBJ:%.*]] = apply [[CTOR]](
+    // CHECK: [[OBJMOVE:%.*]] = move_value [lexical] [var_decl] [[OBJ]]
     let obj = MyClass()
     _ = obj
 
@@ -404,7 +405,7 @@ func test_do_labeled() {
     // CHECK: cond_br {{%.*}}, bb2, bb3
     if (global_cond) {
       // CHECK: bb2:
-      // CHECK: destroy_value [[OBJ]]
+      // CHECK: destroy_value [[OBJMOVE]]
       // CHECK: br bb1
       continue lbl
     }
@@ -419,7 +420,7 @@ func test_do_labeled() {
     // CHECK: cond_br {{%.*}}, bb4, bb5
     if (global_cond) {
       // CHECK: bb4:
-      // CHECK: destroy_value [[OBJ]]
+      // CHECK: destroy_value [[OBJMOVE]]
       // CHECK: br bb6
       break lbl
     }
@@ -430,7 +431,7 @@ func test_do_labeled() {
     // CHECK: apply [[BAR]](
     bar(3)
 
-    // CHECK: destroy_value [[OBJ]]
+    // CHECK: destroy_value [[OBJMOVE]]
     // CHECK: br bb6
   }
 
@@ -518,20 +519,22 @@ func defer_in_closure_in_generic<T>(_ x: T) {
   // CHECK-LABEL: sil private [ossa] @$s10statements017defer_in_closure_C8_genericyyxlFyycfU_ : $@convention(thin) <T> () -> ()
   _ = {
     // CHECK-LABEL: sil private [ossa] @$s10statements017defer_in_closure_C8_genericyyxlFyycfU_6$deferL_yylF : $@convention(thin) <T> () -> ()
-    defer { generic_callee_1(T.self) } // expected-warning {{'defer' statement before end of scope always executes immediately}}{{5-10=do}}
+    defer { generic_callee_1(T.self) } // expected-warning {{'defer' statement at end of scope always executes immediately}}{{5-10=do}}
   }
 }
 
 // CHECK-LABEL: sil hidden [ossa] @$s10statements13defer_mutableyySiF
 func defer_mutable(_ x: Int) {
   var x = x
+  // expected-warning@-1 {{variable 'x' was never mutated; consider changing to 'let' constant}}
   // CHECK: [[BOX:%.*]] = alloc_box ${ var Int }
-  // CHECK-NEXT: project_box [[BOX]]
+  // CHECK-NEXT: [[BOX_LIFETIME:%.*]] = begin_borrow [var_decl] [[BOX]]
+  // CHECK-NEXT: project_box [[BOX_LIFETIME]]
   // CHECK-NOT: [[BOX]]
   // CHECK: function_ref @$s10statements13defer_mutableyySiF6$deferL_yyF : $@convention(thin) (@inout_aliasable Int) -> ()
   // CHECK-NOT: [[BOX]]
   // CHECK: destroy_value [[BOX]]
-  defer { _ = x } // expected-warning {{'defer' statement before end of scope always executes immediately}}{{3-8=do}}
+  defer { _ = x } // expected-warning {{'defer' statement at end of scope always executes immediately}}{{3-8=do}}
 }
 
 protocol StaticFooProtocol { static func foo() }
@@ -578,7 +581,7 @@ func testRequireExprPattern(_ a : Int) {
 // CHECK-LABEL: sil hidden [ossa] @$s10statements20testRequireOptional1yS2iSgF
 // CHECK: bb0([[ARG:%.*]] : $Optional<Int>):
 // CHECK-NEXT:   debug_value [[ARG]] : $Optional<Int>, let, name "a"
-// CHECK-NEXT:   switch_enum [[ARG]] : $Optional<Int>, case #Optional.some!enumelt.1: [[SOME:bb[0-9]+]], case #Optional.none!enumelt: [[NONE:bb[0-9]+]]
+// CHECK-NEXT:   switch_enum [[ARG]] : $Optional<Int>, case #Optional.some!enumelt: [[SOME:bb[0-9]+]], case #Optional.none!enumelt: [[NONE:bb[0-9]+]]
 func testRequireOptional1(_ a : Int?) -> Int {
 
   // CHECK: [[SOME]]([[PAYLOAD:%.*]] : $Int):
@@ -598,16 +601,17 @@ func testRequireOptional1(_ a : Int?) -> Int {
 // CHECK: bb0([[ARG:%.*]] : @guaranteed $Optional<String>):
 // CHECK-NEXT:   debug_value [[ARG]] : $Optional<String>, let, name "a"
 // CHECK-NEXT:   [[ARG_COPY:%.*]] = copy_value [[ARG]] : $Optional<String>
-// CHECK-NEXT:   switch_enum [[ARG_COPY]] : $Optional<String>, case #Optional.some!enumelt.1: [[SOME_BB:bb[0-9]+]], case #Optional.none!enumelt: [[NONE_BB:bb[0-9]+]]
+// CHECK-NEXT:   switch_enum [[ARG_COPY]] : $Optional<String>, case #Optional.some!enumelt: [[SOME_BB:bb[0-9]+]], case #Optional.none!enumelt: [[NONE_BB:bb[0-9]+]]
 func testRequireOptional2(_ a : String?) -> String {
   guard let t = a else { abort() }
 
   // CHECK:  [[SOME_BB]]([[STR:%.*]] : @owned $String):
-  // CHECK-NEXT:   debug_value [[STR]] : $String, let, name "t"
-  // CHECK-NEXT:   [[BORROWED_STR:%.*]] = begin_borrow [[STR]]
+  // CHECK: [[STRMOVE:%.*]] = move_value [var_decl] [[STR]]
+  // CHECK-NEXT:   debug_value [[STRMOVE]] : $String, let, name "t"
+  // CHECK-NEXT:   [[BORROWED_STR:%.*]] = begin_borrow [[STRMOVE]]
   // CHECK-NEXT:   [[RETURN:%.*]] = copy_value [[BORROWED_STR]]
   // CHECK-NEXT:   end_borrow [[BORROWED_STR]]
-  // CHECK-NEXT:   destroy_value [[STR]] : $String
+  // CHECK-NEXT:   destroy_value [[STRMOVE]] : $String
   // CHECK-NEXT:   return [[RETURN]] : $String
 
   // CHECK: [[NONE_BB]]:
@@ -631,7 +635,7 @@ func testCleanupEmission<T>(_ x: T) {
 
 // CHECK-LABEL: sil hidden [ossa] @$s10statements15test_is_patternyyAA9BaseClassCF
 func test_is_pattern(_ y : BaseClass) {
-  // checked_cast_br %0 : $BaseClass to $DerivedClass
+  // checked_cast_br BaseClass in %0 : $BaseClass to DerivedClass
   guard case is DerivedClass = y else { marker_1(); return }
 
   marker_2()
@@ -641,26 +645,124 @@ func test_is_pattern(_ y : BaseClass) {
 func test_as_pattern(_ y : BaseClass) -> DerivedClass {
   // CHECK: bb0([[ARG:%.*]] : @guaranteed $BaseClass):
   // CHECK:   [[ARG_COPY:%.*]] = copy_value [[ARG]]
-  // CHECK:   checked_cast_br [[ARG_COPY]] : $BaseClass to $DerivedClass
+  // CHECK:   checked_cast_br BaseClass in [[ARG_COPY]] : $BaseClass to DerivedClass
   guard case let result as DerivedClass = y else {  }
   // CHECK: bb{{.*}}({{.*}} : @owned $DerivedClass):
 
 
   // CHECK: bb{{.*}}([[PTR:%[0-9]+]] : @owned $DerivedClass):
-  // CHECK-NEXT: debug_value [[PTR]] : $DerivedClass, let, name "result"
-  // CHECK-NEXT: [[BORROWED_PTR:%.*]] = begin_borrow [[PTR]]
+  // CHECK-NEXT: [[MOVED_PTR:%.*]] = move_value [lexical] [var_decl] [[PTR]]
+  // CHECK-NEXT: debug_value [[MOVED_PTR]] : $DerivedClass, let, name "result"
+  // CHECK-NEXT: [[BORROWED_PTR:%.*]] = begin_borrow [[MOVED_PTR]]
   // CHECK-NEXT: [[RESULT:%.*]] = copy_value [[BORROWED_PTR]]
   // CHECK-NEXT: end_borrow [[BORROWED_PTR]]
-  // CHECK-NEXT: destroy_value [[PTR]] : $DerivedClass
+  // CHECK-NEXT: destroy_value [[MOVED_PTR]] : $DerivedClass
   // CHECK-NEXT: return [[RESULT]] : $DerivedClass
   return result
 }
+
+// https://github.com/apple/swift/issues/56139
+
+// CHECK-LABEL: sil hidden [ossa] @$s10statements31test_isa_pattern_array_downcastyySayAA9BaseClassCGF : $@convention(thin) (@guaranteed Array<BaseClass>) -> () {
+func test_isa_pattern_array_downcast(_ arr: [BaseClass]) {
+  // CHECK: [[ARR_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF:ss21_arrayConditionalCastySayq_GSgSayxGr0_lF]] : $@convention(thin) <τ_0_0, τ_0_1> (@guaranteed Array<τ_0_0>) -> @owned Optional<Array<τ_0_1>>
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[ARR_CAST_FN]]<BaseClass, DerivedClass>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  if case _ as [DerivedClass] = arr {}
+  // CHECK: [[ARR_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[ARR_CAST_FN]]<BaseClass, DerivedClass>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  guard case _ as [DerivedClass] = arr else {}
+  // CHECK: [[ARR_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[ARR_CAST_FN]]<BaseClass, DerivedClass>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  while case _ as [DerivedClass] = arr {}
+
+  // CHECK: [[ARR_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[ARR_CAST_FN]]<BaseClass, DerivedClass>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  if case is [DerivedClass] = arr {}
+  // CHECK: [[ARR_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[ARR_CAST_FN]]<BaseClass, DerivedClass>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  guard case is [DerivedClass] = arr else {}
+  // CHECK: [[ARR_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[ARR_CAST_FN]]<BaseClass, DerivedClass>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  while case is [DerivedClass] = arr {}
+}
+// CHECK: } // end sil function '$s10statements31test_isa_pattern_array_downcastyySayAA9BaseClassCGF'
+
+// CHECK-LABEL: sil hidden [ossa] @$s10statements36test_isa_pattern_dictionary_downcastyySDySSAA9BaseClassCGF : $@convention(thin) (@guaranteed Dictionary<String, BaseClass>) -> () {
+func test_isa_pattern_dictionary_downcast(_ dict: Dictionary<String, BaseClass>) {
+  // CHECK: [[DICT_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF:ss30_dictionaryDownCastConditionalySDyq0_q1_GSgSDyxq_GSHRzSHR0_r2_lF]] : $@convention(thin) <τ_0_0, τ_0_1, τ_0_2, τ_0_3 where τ_0_0 : Hashable, τ_0_2 : Hashable> (@guaranteed Dictionary<τ_0_0, τ_0_1>) -> @owned Optional<Dictionary<τ_0_2, τ_0_3>>
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[DICT_CAST_FN]]<String, BaseClass, String, DerivedClass>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  if case _ as [String : DerivedClass] = dict {}
+  // CHECK: [[DICT_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[DICT_CAST_FN]]<String, BaseClass, String, DerivedClass>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  guard case _ as [String : DerivedClass] = dict else {}
+  // CHECK: [[DICT_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[DICT_CAST_FN]]<String, BaseClass, String, DerivedClass>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  while case _ as [String : DerivedClass] = dict {}
+
+  // CHECK: [[DICT_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[DICT_CAST_FN]]<String, BaseClass, String, DerivedClass>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  if case is [String : DerivedClass] = dict {}
+  // CHECK: [[DICT_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[DICT_CAST_FN]]<String, BaseClass, String, DerivedClass>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  guard case is [String : DerivedClass] = dict else {}
+  // CHECK: [[DICT_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[DICT_CAST_FN]]<String, BaseClass, String, DerivedClass>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  while case is [String : DerivedClass] = dict {}
+}
+// CHECK: } // end sil function '$s10statements36test_isa_pattern_dictionary_downcastyySDySSAA9BaseClassCGF'
+
+// CHECK-LABEL: sil hidden [ossa] @$s10statements29test_isa_pattern_set_downcastyyShyxGSHRzlF : $@convention(thin) <T where T : Hashable> (@guaranteed Set<T>) -> () {
+func test_isa_pattern_set_downcast<T: Hashable>(_ set: Set<T>) {
+  // CHECK: [[SET_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF:ss23_setDownCastConditionalyShyq_GSgShyxGSHRzSHR_r0_lF]] : $@convention(thin) <τ_0_0, τ_0_1 where τ_0_0 : Hashable, τ_0_1 : Hashable> (@guaranteed Set<τ_0_0>) -> @owned Optional<Set<τ_0_1>>
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[SET_CAST_FN]]<T, Bool>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  if case let t as Set<Bool> = set {}
+  // FIXME: Get rid of these warnings when https://github.com/apple/swift/issues/60808 is fixed
+  // expected-warning@-2 {{immutable value 't' was never used; consider replacing with '_' or removing it}}
+  // CHECK: [[SET_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[SET_CAST_FN]]<T, Bool>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  guard case let t as Set<Bool> = set else {}
+  // expected-warning@-1 {{immutable value 't' was never used; consider replacing with '_' or removing it}}
+  // CHECK: [[SET_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[SET_CAST_FN]]<T, Bool>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  while case let t as Set<Bool> = set {}
+  // expected-warning@-1 {{immutable value 't' was never used; consider replacing with '_' or removing it}}
+
+  // CHECK: [[SET_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[SET_CAST_FN]]<T, Int>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  if case is Set<Int> = set {}
+  // CHECK: [[SET_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[SET_CAST_FN]]<T, Int>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  guard case is Set<Int> = set else {}
+  // CHECK: [[SET_CAST_FN:%[0-9]+]] = function_ref @$[[FN_REF]]
+  // CHECK-NEXT: [[RESULT:%[0-9]+]] = apply [[SET_CAST_FN]]<T, Int>
+  // CHECK-NEXT: switch_enum [[RESULT]]
+  while case is Set<Int> = set {}
+}
+// CHECK: } // end sil function '$s10statements29test_isa_pattern_set_downcastyyShyxGSHRzlF'
+
 // CHECK-LABEL: sil hidden [ossa] @$s10statements22let_else_tuple_bindingyS2i_SitSgF
 func let_else_tuple_binding(_ a : (Int, Int)?) -> Int {
 
   // CHECK: bb0([[ARG:%.*]] : $Optional<(Int, Int)>):
   // CHECK-NEXT:   debug_value [[ARG]] : $Optional<(Int, Int)>, let, name "a"
-  // CHECK-NEXT:   switch_enum [[ARG]] : $Optional<(Int, Int)>, case #Optional.some!enumelt.1: [[SOME_BB:bb[0-9]+]], case #Optional.none!enumelt: [[NONE_BB:bb[0-9]+]]
+  // CHECK-NEXT:   switch_enum [[ARG]] : $Optional<(Int, Int)>, case #Optional.some!enumelt: [[SOME_BB:bb[0-9]+]], case #Optional.none!enumelt: [[NONE_BB:bb[0-9]+]]
 
   guard let (x, y) = a else { }
   _ = y

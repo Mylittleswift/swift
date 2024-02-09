@@ -33,7 +33,8 @@ struct DidSetWillSetTests: ForceAccessors {
       var unrelatedValue = DidSetWillSetTests.defaultValue
 
       // CHECK: [[BOX:%.*]] = alloc_box ${ var DidSetWillSetTests }, var, name "unrelatedValue"
-      // CHECK-NEXT: [[BOXADDR:%.*]] = project_box [[BOX]] : ${ var DidSetWillSetTests }, 0
+      // CHECK-NEXT: [[BOXLIFETIME:%.*]] = begin_borrow [var_decl] [[BOX]]
+      // CHECK-NEXT: [[BOXADDR:%.*]] = project_box [[BOXLIFETIME]] : ${ var DidSetWillSetTests }, 0
       // CHECK-NEXT: [[METATYPE:%.*]] = metatype $@thin DidSetWillSetTests.Type
       // CHECK-NEXT: // function_ref static properties.DidSetWillSetTests.defaultValue.getter : properties.DidSetWillSetTests
       // CHECK-NEXT: [[DEFAULTVALUE_FN:%.*]] = function_ref @$s10properties{{[_0-9a-zA-Z]*}}vgZ : $@convention(method) (@thin DidSetWillSetTests.Type) -> DidSetWillSetTests
@@ -70,14 +71,15 @@ struct DidSetWillSetTests: ForceAccessors {
       // CHECK-NEXT: [[READ:%.*]] = begin_access [read] [dynamic] [[ZEROADDR]] : $*Int
       // CHECK-NEXT: [[ZERO:%.*]] = load [trivial] [[READ]]
       // CHECK-NEXT: end_access [[READ]] : $*Int
-      // CHECK-NEXT: [[WRITE:%.*]] = begin_access [modify] [unknown] %1
+      // CHECK-NEXT: [[WRITE:%.*]] = begin_access [modify] [unknown] %0
       // CHECK-NEXT: [[AADDR:%.*]] = struct_element_addr [[WRITE]] : $*DidSetWillSetTests, #DidSetWillSetTests.a
       // CHECK-NEXT: assign [[ZERO]] to [[AADDR]]
 
       var unrelatedValue = DidSetWillSetTests.defaultValue
 
       // CHECK: [[BOX:%.*]] = alloc_box ${ var DidSetWillSetTests }, var, name "unrelatedValue"
-      // CHECK-NEXT: [[BOXADDR:%.*]] = project_box [[BOX]] : ${ var DidSetWillSetTests }, 0
+      // CHECK-NEXT: [[BOXLIFETIME:%.*]] = begin_borrow [var_decl] [[BOX]]
+      // CHECK-NEXT: [[BOXADDR:%.*]] = project_box [[BOXLIFETIME]] : ${ var DidSetWillSetTests }, 0
       // CHECK-NEXT: [[METATYPE:%.*]] = metatype $@thin DidSetWillSetTests.Type
       // CHECK-NEXT: // function_ref static properties.DidSetWillSetTests.defaultValue.getter : properties.DidSetWillSetTests
       // CHECK-NEXT: [[DEFAULTVALUE_FN:%.*]] = function_ref @$s10properties{{[_0-9a-zA-Z]*}}vgZ : $@convention(method) (@thin DidSetWillSetTests.Type) -> DidSetWillSetTests
@@ -106,9 +108,10 @@ struct DidSetWillSetTests: ForceAccessors {
       var other = self
 
       // CHECK: [[BOX:%.*]] = alloc_box ${ var DidSetWillSetTests }, var, name "other"
-      // CHECK-NEXT: [[BOXADDR:%.*]] = project_box [[BOX]] : ${ var DidSetWillSetTests }, 0
-      // CHECK-NEXT: [[READ_SELF:%.*]] = begin_access [read] [unknown] %1 : $*DidSetWillSetTests
-      // CHECK-NEXT: copy_addr [[READ_SELF]] to [initialization] [[BOXADDR]] : $*DidSetWillSetTests
+      // CHECK-NEXT: [[BOXLIFETIME:%.*]] = begin_borrow [var_decl] [[BOX]]
+      // CHECK-NEXT: [[BOXADDR:%.*]] = project_box [[BOXLIFETIME]] : ${ var DidSetWillSetTests }, 0
+      // CHECK-NEXT: [[READ_SELF:%.*]] = begin_access [read] [unknown] %0 : $*DidSetWillSetTests
+      // CHECK-NEXT: copy_addr [[READ_SELF]] to [init] [[BOXADDR]] : $*DidSetWillSetTests
       // CHECK-NEXT: end_access [[READ_SELF]] : $*DidSetWillSetTests
 
       other.a = zero

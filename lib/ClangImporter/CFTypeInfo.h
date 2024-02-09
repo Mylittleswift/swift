@@ -14,9 +14,10 @@
 //
 //===----------------------------------------------------------------------===//
 #ifndef SWIFT_IMPORTER_CFTYPEINFO_H
-#define SWIFT_IMPORTER_CFTYPEINFO_H 
+#define SWIFT_IMPORTER_CFTYPEINFO_H
 
 #include "llvm/ADT/PointerUnion.h"
+#include "llvm/ADT/StringRef.h"
 
 namespace clang {
   class RecordDecl;
@@ -75,6 +76,8 @@ class CFPointeeInfo {
 
 public:
   static CFPointeeInfo classifyTypedef(const clang::TypedefNameDecl *decl);
+
+  static bool isKnownCFTypeName(llvm::StringRef name);
 
   bool isValid() const { return IsValid; }
   explicit operator bool() const { return isValid(); }

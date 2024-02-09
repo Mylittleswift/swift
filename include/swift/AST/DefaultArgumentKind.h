@@ -17,7 +17,9 @@
 #ifndef SWIFT_DEFAULTARGUMENTKIND_H
 #define SWIFT_DEFAULTARGUMENTKIND_H
 
+#include "llvm/ADT/StringRef.h"
 #include <cstdint>
+#include <string>
 
 namespace llvm {
 class StringRef;
@@ -36,24 +38,60 @@ enum class DefaultArgumentKind : uint8_t {
   /// The default argument is inherited from the corresponding argument of the
   /// overridden declaration.
   Inherited,
-  /// The #file default argument, which is expanded at the call site.
-  File,
-  /// The #line default argument, which is expanded at the call site.
-  Line,
-  /// The #column default argument, which is expanded at the call site.
-  Column,
-  /// The #function default argument, which is expanded at the call site.
-  Function,
-  /// The #dsohandle default argument, which is expanded at the call site.
-  DSOHandle,
   /// The "nil" literal.
   NilLiteral,
   /// An empty array literal.
   EmptyArray,
   /// An empty dictionary literal.
   EmptyDictionary,
+  /// A reference to the stored property. This is a special default argument
+  /// kind for the synthesized memberwise constructor to emit a call to the
+  /// property's initializer.
+  StoredProperty,
+  // Magic identifier literals expanded at the call site:
+#define MAGIC_IDENTIFIER(NAME, STRING, SYNTAX_KIND) NAME,
+#include "swift/AST/MagicIdentifierKinds.def"
 };
 enum { NumDefaultArgumentKindBits = 4 };
+
+/// Determine the kind of a default argument given a parsed expression that has
+/// not yet been type-checked.
+/// FIXME: Requestify/internalize the computation of the default arg expr and its kind (given a parsed expr) once the old parser no longer needs this.
+DefaultArgumentKind getDefaultArgKind(Expr *init);
+
+struct ArgumentAttrs {
+  DefaultArgumentKind argumentKind;
+  bool isUnavailableInSwift = false;
+  llvm::StringRef CXXOptionsEnumName = "";
+
+  ArgumentAttrs(DefaultArgumentKind argumentKind,
+                bool isUnavailableInSwift = false,
+                llvm::StringRef CXXOptionsEnumName = "")
+      : argumentKind(argumentKind), isUnavailableInSwift(isUnavailableInSwift),
+        CXXOptionsEnumName(CXXOptionsEnumName) {}
+
+  bool operator !=(const DefaultArgumentKind &rhs) const {
+    return argumentKind != rhs;
+  }
+
+  bool operator==(const DefaultArgumentKind &rhs) const {
+    return argumentKind == rhs;
+  }
+
+  bool hasDefaultArg() const {
+    return argumentKind != DefaultArgumentKind::None;
+  }
+
+  bool hasAlternateCXXOptionsEnumName() const {
+    return !CXXOptionsEnumName.empty() && isUnavailableInSwift;
+  }
+
+  llvm::StringRef getAlternateCXXOptionsEnumName() const {
+    assert(hasAlternateCXXOptionsEnumName() &&
+           "Expected a C++ Options type for C++-Interop but found none.");
+    return CXXOptionsEnumName;
+  }
+};
 
 } // end namespace swift
 

@@ -10,7 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "DictionaryKeys.h"
+#include "sourcekitd/DictionaryKeys.h"
 #include "sourcekitd/Internal.h"
 #include "sourcekitd/CodeCompletionResultsArray.h"
 #include "sourcekitd/DocStructureArray.h"
@@ -18,10 +18,12 @@
 #include "sourcekitd/RawData.h"
 #include "sourcekitd/TokenAnnotationsArray.h"
 #include "sourcekitd/ExpressionTypeArray.h"
+#include "sourcekitd/VariableTypeArray.h"
 #include "sourcekitd/Logging.h"
 #include "SourceKit/Core/LLVM.h"
 #include "SourceKit/Support/UIdent.h"
 #include "swift/Basic/ThreadSafeRefCounted.h"
+#include "swift/Basic/StringExtras.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
@@ -237,19 +239,15 @@ private:
 
 class SKDCustomData: public SKDObject {
 public:
-  SKDCustomData(CustomBufferKind BufferKind, 
-                std::unique_ptr<llvm::MemoryBuffer>& MemBuf)
-  : SKDObject(ObjectKind::CustomData), BufferKind(BufferKind),
-    BufferPtr(llvm::MemoryBuffer::getMemBufferCopy(
-                                                MemBuf->getBuffer(), 
-                                                MemBuf->getBufferIdentifier())) 
+  SKDCustomData(std::unique_ptr<llvm::MemoryBuffer> MemBuf)
+  : SKDObject(ObjectKind::CustomData), BufferPtr(std::move(MemBuf))
     {}
 
   SKDCustomData(SKDCustomData const&) = delete;
   SKDCustomData &operator=(SKDCustomData const&) = delete;
 
   sourcekitd_variant_type_t getVariantType() const override {
-    switch (BufferKind) {
+    switch (getBufferKind()) {
       case CustomBufferKind::TokenAnnotationsArray:
       case CustomBufferKind::DocSupportAnnotationArray:
       case CustomBufferKind::CodeCompletionResultsArray:
@@ -258,6 +256,7 @@ public:
       case CustomBufferKind::DocStructureElementArray:
       case CustomBufferKind::AttributesArray:
       case CustomBufferKind::ExpressionTypeArray:
+      case CustomBufferKind::VariableTypeArray:
         return SOURCEKITD_VARIANT_TYPE_ARRAY;
       case CustomBufferKind::RawData:
         return SOURCEKITD_VARIANT_TYPE_DATA;
@@ -266,23 +265,24 @@ public:
   }
 
   CustomBufferKind getBufferKind() const {
-    return BufferKind;
+    return ((CustomBufferKind)*(const uint64_t*)_getStartPtr());
   }
 
   const void *getDataPtr() const override {
-    return BufferPtr->getBuffer().data();
+    return ((const void*)(((const uint64_t*)_getStartPtr())+1));
   }
 
   size_t getDataSize() const override {
-    return BufferPtr->getBuffer().size();
+    return BufferPtr->getBuffer().size() - sizeof(uint64_t);
   }
 
   static bool classof(const SKDObject *O) {
     return O->getKind() == ObjectKind::CustomData;
   }
 private:
-  CustomBufferKind BufferKind;
   std::unique_ptr<llvm::MemoryBuffer> BufferPtr;
+
+  const void *_getStartPtr() const { return BufferPtr->getBuffer().data(); }
 };
 
 class SKDError: public SKDObject {
@@ -352,8 +352,8 @@ public:
       return static_cast<ImplClass*>(this)->visitString(CString);
     }
     auto OptInt = Object->getInt64();
-    if (OptInt.hasValue()) {
-      return static_cast<ImplClass*>(this)->visitInt64(OptInt.getValue());
+    if (OptInt.has_value()) {
+      return static_cast<ImplClass*>(this)->visitInt64(OptInt.value());
     }
     llvm_unreachable("unknown sourcekitd_object_t");
   }
@@ -406,7 +406,7 @@ public:
     OS << '\"';
     // Avoid raw_ostream's write_escaped, we don't want to escape unicode
     // characters because it will be invalid JSON.
-    writeEscaped(Str, OS);
+    swift::writeEscaped(Str, OS);
     OS << '\"';
   }
   
@@ -633,7 +633,7 @@ void ResponseBuilder::Dictionary::set(UIdent Key, const char *Str) {
 
 void ResponseBuilder::Dictionary::set(UIdent Key, StringRef Str) {
   static_cast<SKDObject *>(Impl)->set(SKDUIDFromUIdent(Key), 
-                                      new SKDString(Str));
+                                      new SKDString(std::string(Str)));
 }
 
 void ResponseBuilder::Dictionary::set(UIdent Key, const std::string &Str) {
@@ -649,7 +649,7 @@ void ResponseBuilder::Dictionary::set(SourceKit::UIdent Key,
                                       ArrayRef<StringRef> Strs) {
   auto ArrayObject = new SKDArray();
   for (auto Str : Strs) {
-    ArrayObject->set(SOURCEKITD_ARRAY_APPEND, new SKDString(Str));
+    ArrayObject->set(SOURCEKITD_ARRAY_APPEND, new SKDString(std::string(Str)));
   }
   static_cast<SKDObject *>(Impl)->set(SKDUIDFromUIdent(Key), ArrayObject);
 }
@@ -659,6 +659,15 @@ void ResponseBuilder::Dictionary::set(SourceKit::UIdent Key,
   auto ArrayObject = new SKDArray();
   for (auto Str : Strs) {
     ArrayObject->set(SOURCEKITD_ARRAY_APPEND, new SKDString(std::string(Str)));
+  }
+  static_cast<SKDObject *>(Impl)->set(SKDUIDFromUIdent(Key), ArrayObject);
+}
+
+void ResponseBuilder::Dictionary::set(SourceKit::UIdent Key,
+                                      ArrayRef<SourceKit::UIdent> UIDs) {
+  auto ArrayObject = new SKDArray();
+  for (auto UID : UIDs) {
+    ArrayObject->set(SOURCEKITD_ARRAY_APPEND, new SKDUID(SKDUIDFromUIdent(UID)));
   }
   static_cast<SKDObject *>(Impl)->set(SKDUIDFromUIdent(Key), ArrayObject);
 }
@@ -675,10 +684,9 @@ ResponseBuilder::Dictionary::setDictionary(UIdent Key) {
 }
 
 void ResponseBuilder::Dictionary::setCustomBuffer(
-      SourceKit::UIdent Key,
-      CustomBufferKind Kind, std::unique_ptr<llvm::MemoryBuffer> MemBuf) {
+      SourceKit::UIdent Key, std::unique_ptr<llvm::MemoryBuffer> MemBuf) {
   static_cast<SKDObject *>(Impl)->set(SKDUIDFromUIdent(Key), 
-                                      new SKDCustomData(Kind, MemBuf));
+                                      new SKDCustomData(std::move(MemBuf)));
 }
 
 ResponseBuilder::Array
@@ -698,19 +706,19 @@ ResponseBuilder::Dictionary ResponseBuilder::Array::appendDictionary() {
 // Internal RequestDict Implementation
 //===----------------------------------------------------------------------===//
 
-sourcekitd_uid_t RequestDict::getUID(UIdent Key) {
+sourcekitd_uid_t RequestDict::getUID(UIdent Key) const {
   auto Object = static_cast<SKDObject *>(Dict)->get(SKDUIDFromUIdent(Key));
   return Object ? Object->getUID() : nullptr;
 }
 
-Optional<StringRef> RequestDict::getString(UIdent Key) {
+Optional<StringRef> RequestDict::getString(UIdent Key) const {
   if (auto Object = static_cast<SKDObject *>(Dict)->get(SKDUIDFromUIdent(Key))) {
     return Object->getString();
   }
   return None;
 }
 
-Optional<RequestDict> RequestDict::getDictionary(SourceKit::UIdent Key) {
+Optional<RequestDict> RequestDict::getDictionary(SourceKit::UIdent Key) const {
   SKDDictionary *DictObject = nullptr;
   if (auto Object = static_cast<SKDObject *>(Dict)->get(SKDUIDFromUIdent(Key))) {
     DictObject = dyn_cast<SKDDictionary>(Object);
@@ -720,7 +728,7 @@ Optional<RequestDict> RequestDict::getDictionary(SourceKit::UIdent Key) {
 
 bool RequestDict::getStringArray(SourceKit::UIdent Key,
                                  llvm::SmallVectorImpl<const char *> &Arr,
-                                 bool isOptional) {
+                                 bool isOptional) const {
   auto Object = static_cast<SKDObject *>(Dict)->get(SKDUIDFromUIdent(Key));
   if (!Object)
     return !isOptional;
@@ -740,7 +748,7 @@ bool RequestDict::getStringArray(SourceKit::UIdent Key,
 
 bool RequestDict::getUIDArray(SourceKit::UIdent Key,
                               llvm::SmallVectorImpl<sourcekitd_uid_t> &Arr,
-                              bool isOptional) {
+                              bool isOptional) const {
   auto Object = static_cast<SKDObject *>(Dict)->get(SKDUIDFromUIdent(Key));
   if (!Object)
     return !isOptional;
@@ -759,7 +767,8 @@ bool RequestDict::getUIDArray(SourceKit::UIdent Key,
 }
 
 bool RequestDict::dictionaryArrayApply(
-    SourceKit::UIdent Key, llvm::function_ref<bool(RequestDict)> Applier) {
+    SourceKit::UIdent Key,
+    llvm::function_ref<bool(RequestDict)> Applier) const {
   auto Object = static_cast<SKDObject *>(Dict)->get(SKDUIDFromUIdent(Key));
   if (!Object)
     return true;
@@ -776,31 +785,31 @@ bool RequestDict::dictionaryArrayApply(
 }
 
 bool RequestDict::getInt64(SourceKit::UIdent Key, int64_t &Val,
-                           bool isOptional) {
+                           bool isOptional) const {
   auto Object = static_cast<SKDObject *>(Dict)->get(SKDUIDFromUIdent(Key));
   if (!Object)
     return !isOptional;
-  Val = Object->getInt64().getValueOr(0);
+  Val = Object->getInt64().value_or(0);
   return false;
 }
 
-Optional<int64_t> RequestDict::getOptionalInt64(SourceKit::UIdent Key) {
+Optional<int64_t> RequestDict::getOptionalInt64(SourceKit::UIdent Key) const {
   auto Object = static_cast<SKDObject *>(Dict)->get(SKDUIDFromUIdent(Key));
   if (!Object)
     return None;
-  return Object->getInt64().getValueOr(0);
+  return Object->getInt64().value_or(0);
 }
 
 sourcekitd_response_t
-sourcekitd::createErrorRequestInvalid(const char *Description) {
+sourcekitd::createErrorRequestInvalid(StringRef Description) {
   return retained(new SKDError(SOURCEKITD_ERROR_REQUEST_INVALID, 
-                               StringRef(Description)));
+                               Description));
 }
 
 sourcekitd_response_t
-sourcekitd::createErrorRequestFailed(const char *Description) {
+sourcekitd::createErrorRequestFailed(StringRef Description) {
   return retained(new SKDError(SOURCEKITD_ERROR_REQUEST_FAILED, 
-                      StringRef(Description)));
+                               Description));
 }
 
 sourcekitd_response_t
@@ -840,7 +849,7 @@ static size_t SKDVar_array_get_count(sourcekitd_variant_t array) {
 }
 
 static int64_t SKDVar_array_get_int64(sourcekitd_variant_t array, size_t index) {
-  return SKD_OBJ(array)->get(index)->getInt64().getValueOr(0);
+  return SKD_OBJ(array)->get(index)->getInt64().value_or(0);
 }
 
 static const char *
@@ -882,7 +891,7 @@ SKDVar_dictionary_get_bool(sourcekitd_variant_t dict, sourcekitd_uid_t key) {
 static int64_t
 SKDVar_dictionary_get_int64(sourcekitd_variant_t dict, sourcekitd_uid_t key) {
   if (auto Object = SKD_OBJ(dict)->get(key)) {
-    return Object->getInt64().getValueOr(0);
+    return Object->getInt64().value_or(0);
   }
   return 0;
 }
@@ -910,7 +919,7 @@ SKDVar_dictionary_get_uid(sourcekitd_variant_t dict, sourcekitd_uid_t key) {
 
 static size_t SKDVar_string_get_length(sourcekitd_variant_t obj) {
   auto String = SKD_OBJ(obj)->getString();
-  return String.hasValue() ? String->size() : 0;
+  return String.has_value() ? String->size() : 0;
 }
 
 static const char *SKDVar_string_get_ptr(sourcekitd_variant_t obj) {
@@ -918,7 +927,7 @@ static const char *SKDVar_string_get_ptr(sourcekitd_variant_t obj) {
 }
 
 static int64_t SKDVar_int64_get_value(sourcekitd_variant_t obj) {
-  return SKD_OBJ(obj)->getInt64().getValueOr(0);
+  return SKD_OBJ(obj)->getInt64().value_or(0);
 }
 
 static sourcekitd_uid_t SKDVar_uid_get_value(sourcekitd_variant_t obj) {
@@ -987,6 +996,9 @@ static sourcekitd_variant_t variantFromSKDObject(SKDObjectRef Object) {
       case CustomBufferKind::ExpressionTypeArray:
         return {{ (uintptr_t)getVariantFunctionsForExpressionTypeArray(),
           (uintptr_t)DataObject->getDataPtr(), 0 }};
+      case CustomBufferKind::VariableTypeArray:
+        return {{ (uintptr_t)getVariantFunctionsForVariableTypeArray(),
+                  (uintptr_t)DataObject->getDataPtr(), 0 }};
       case CustomBufferKind::RawData:
         return {{ (uintptr_t)getVariantFunctionsForRawData(),
                   (uintptr_t)DataObject->getDataPtr(),

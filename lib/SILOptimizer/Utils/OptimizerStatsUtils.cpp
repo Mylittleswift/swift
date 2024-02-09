@@ -141,7 +141,7 @@ public:
       unsigned index = getIndexForKind(kind);
       if (!ShouldComputeInstCounts[index]) {
         ShouldComputeInstCounts[index] = true;
-        NumInstCounts++;
+        ++NumInstCounts;
       }
     }
   }
@@ -164,7 +164,7 @@ llvm::cl::opt<StatsOnlyInstructionsOpt, true, llvm::cl::parser<std::string>>
     StatsOnlyInstructions(
         "sil-stats-only-instructions",
         llvm::cl::desc(
-            "Comma separated list of SIL insruction names, whose stats "
+            "Comma separated list of SIL instruction names, whose stats "
             "should be collected"),
         llvm::cl::Hidden, llvm::cl::ZeroOrMore,
         llvm::cl::value_desc("instruction name"),
@@ -215,7 +215,7 @@ llvm::cl::opt<double> UsedMemoryDeltaThreshold(
 
 llvm::cl::opt<double> UsedMemoryMinDeltaThreshold(
   "sil-stats-used-memory-min-threshold", llvm::cl::init(1),
-    llvm::cl::desc("Min hreshold for reporting changed memory usage numbers"));
+    llvm::cl::desc("Min threshold for reporting changed memory usage numbers"));
 
 /// A threshold in percents for the basic blocks counter inside a SILFunction.
 /// Has effect only if it is used together with -sil-stats-functions.
@@ -456,7 +456,7 @@ public:
   }
 };
 
-/// A helper class to repesent the module stats as an analysis,
+/// A helper class to represent the module stats as an analysis,
 /// so that it is preserved across multiple passes.
 class OptimizerStatsAnalysis : public SILAnalysis {
   SILModule &M;
@@ -514,7 +514,7 @@ public:
   /// Get the collected statistics for a function.
   FunctionStat &getFunctionStat(const SILFunction *F) {
     if (!Cache)
-      Cache = llvm::make_unique<AccumulatedOptimizerStats>();
+      Cache = std::make_unique<AccumulatedOptimizerStats>();
 
     return Cache->getFunctionStat(F);
   }
@@ -522,7 +522,7 @@ public:
   /// Get the collected statistics for a module.
   ModuleStat &getModuleStat() {
     if (!Cache)
-      Cache = llvm::make_unique<AccumulatedOptimizerStats>();
+      Cache = std::make_unique<AccumulatedOptimizerStats>();
 
     return Cache->getModuleStat();
   }
@@ -557,8 +557,8 @@ llvm::raw_ostream &stats_os() {
     if (!SILStatsOutputFile.empty()) {
       // Try to open the file.
       std::error_code EC;
-      auto fd_stream = llvm::make_unique<llvm::raw_fd_ostream>(
-          SILStatsOutputFile, EC, llvm::sys::fs::OpenFlags::F_Text);
+      auto fd_stream = std::make_unique<llvm::raw_fd_ostream>(
+          SILStatsOutputFile, EC, llvm::sys::fs::OpenFlags::OF_Text);
       if (!fd_stream->has_error() && !EC) {
         stats_output_stream = {fd_stream.release(),
                                [](llvm::raw_ostream *d) { delete d; }};
@@ -648,7 +648,7 @@ bool isMatchingFunction(SILFunction *F, bool shouldHaveNamePattern = false) {
     return FuncName.contains(StatsOnlyFunctionsNamePattern);
   }
 
-  return shouldHaveNamePattern ? true : false;
+  return shouldHaveNamePattern;
 }
 
 /// Compute the delta between the old and new values.

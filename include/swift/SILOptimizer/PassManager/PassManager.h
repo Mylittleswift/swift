@@ -11,15 +11,20 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/SIL/Notifications.h"
+#include "swift/SIL/InstructionUtils.h"
+#include "swift/SIL/BasicBlockBits.h"
+#include "swift/SIL/NodeBits.h"
 #include "swift/SILOptimizer/Analysis/Analysis.h"
 #include "swift/SILOptimizer/PassManager/PassPipeline.h"
 #include "swift/SILOptimizer/PassManager/Passes.h"
-#include "llvm/ADT/ArrayRef.h"
+#include "swift/SILOptimizer/Utils/SILSSAUpdater.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/Chrono.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <vector>
+#include <bitset>
 
 #ifndef SWIFT_SILOPTIMIZER_PASSMANAGER_PASSMANAGER_H
 #define SWIFT_SILOPTIMIZER_PASSMANAGER_PASSMANAGER_H
@@ -32,18 +37,148 @@ class SILModule;
 class SILModuleTransform;
 class SILOptions;
 class SILTransform;
+class SILPassManager;
+class SILCombiner;
 
 namespace irgen {
 class IRGenModule;
+class IRGenerator;
 }
+
+/// The main entrypoint for executing a pipeline pass on a SIL module.
+void executePassPipelinePlan(SILModule *SM, const SILPassPipelinePlan &plan,
+                             bool isMandatory = false,
+                             irgen::IRGenModule *IRMod = nullptr);
+
+/// Utility class to invoke Swift passes.
+class SwiftPassInvocation {
+  /// Backlink to the pass manager.
+  SILPassManager *passManager;
+
+  /// The current transform.
+  SILTransform *transform = nullptr;
+
+  /// The currently optimized function.
+  SILFunction *function = nullptr;
+
+  /// Non-null if this is an instruction pass, invoked from SILCombine.
+  SILCombiner *silCombiner = nullptr;
+
+  /// Change notifications, collected during a pass run.
+  SILAnalysis::InvalidationKind changeNotifications =
+      SILAnalysis::InvalidationKind::Nothing;
+
+  /// All slabs, allocated by the pass.
+  SILModule::SlabList allocatedSlabs;
+
+  SILSSAUpdater *ssaUpdater = nullptr;
+
+  static constexpr int BlockSetCapacity = 8;
+  char blockSetStorage[sizeof(BasicBlockSet) * BlockSetCapacity];
+  bool aliveBlockSets[BlockSetCapacity];
+  int numBlockSetsAllocated = 0;
+
+  static constexpr int NodeSetCapacity = 8;
+  char nodeSetStorage[sizeof(NodeSet) * NodeSetCapacity];
+  bool aliveNodeSets[NodeSetCapacity];
+  int numNodeSetsAllocated = 0;
+
+  int numClonersAllocated = 0;
+
+  bool needFixStackNesting = false;
+
+  void endPass();
+
+public:
+  SwiftPassInvocation(SILPassManager *passManager, SILFunction *function,
+                         SILCombiner *silCombiner) :
+    passManager(passManager), function(function), silCombiner(silCombiner) {}
+
+  SwiftPassInvocation(SILPassManager *passManager, SILTransform *transform,
+                      SILFunction *function) :
+    passManager(passManager), transform(transform), function(function) {}
+
+  SwiftPassInvocation(SILPassManager *passManager) :
+    passManager(passManager) {}
+
+  ~SwiftPassInvocation();
+
+  SILPassManager *getPassManager() const { return passManager; }
+  
+  SILTransform *getTransform() const { return transform; }
+
+  SILFunction *getFunction() const { return function; }
+
+  irgen::IRGenModule *getIRGenModule();
+
+  FixedSizeSlab *allocSlab(FixedSizeSlab *afterSlab);
+
+  FixedSizeSlab *freeSlab(FixedSizeSlab *slab);
+
+  BasicBlockSet *allocBlockSet();
+
+  void freeBlockSet(BasicBlockSet *set);
+
+  NodeSet *allocNodeSet();
+
+  void freeNodeSet(NodeSet *set);
+
+  /// The top-level API to erase an instruction, called from the Swift pass.
+  void eraseInstruction(SILInstruction *inst);
+
+  /// Called by the pass when changes are made to the SIL.
+  void notifyChanges(SILAnalysis::InvalidationKind invalidationKind);
+
+  /// Called by the pass manager before the pass starts running.
+  void startModulePassRun(SILModuleTransform *transform);
+
+  /// Called by the pass manager before the pass starts running.
+  void startFunctionPassRun(SILFunctionTransform *transform);
+
+  /// Called by the SILCombiner before the instruction pass starts running.
+  void startInstructionPassRun(SILInstruction *inst);
+
+  /// Called by the pass manager when the pass has finished.
+  void finishedModulePassRun();
+
+  /// Called by the pass manager when the pass has finished.
+  void finishedFunctionPassRun();
+
+  /// Called by the SILCombiner when the instruction pass has finished.
+  void finishedInstructionPassRun();
+  
+  void beginTransformFunction(SILFunction *function);
+
+  void endTransformFunction();
+
+  void notifyNewCloner() { numClonersAllocated++; }
+  void notifyClonerDestroyed() { numClonersAllocated--; }
+
+  void setNeedFixStackNesting(bool newValue) { needFixStackNesting = newValue; }
+  bool getNeedFixStackNesting() const { return needFixStackNesting; }
+
+  void initializeSSAUpdater(SILType type, ValueOwnershipKind ownership) {
+    if (!ssaUpdater)
+      ssaUpdater = new SILSSAUpdater;
+    ssaUpdater->initialize(type, ownership);
+  }
+
+  SILSSAUpdater *getSSAUpdater() const {
+    assert(ssaUpdater && "SSAUpdater not initialized");
+    return ssaUpdater;
+  }
+};
 
 /// The SIL pass manager.
 class SILPassManager {
+  friend class ExecuteSILPipelineRequest;
+
   /// The module that the pass manager will transform.
   SILModule *Mod;
 
   /// An optional IRGenModule associated with this PassManager.
   irgen::IRGenModule *IRMod;
+  irgen::IRGenerator *irgen;
 
   /// The list of transformations to run.
   llvm::SmallVector<SILTransform *, 16> Transformations;
@@ -72,6 +207,13 @@ class SILPassManager {
 
   /// The number of passes run so far.
   unsigned NumPassesRun = 0;
+  unsigned numSubpassesRun = 0;
+
+  unsigned maxNumPassesToRun = UINT_MAX;
+  unsigned maxNumSubpassesToRun = UINT_MAX;
+
+  /// For invoking Swift passes.
+  SwiftPassInvocation swiftPassInvocation;
 
   /// A mask which has one bit for each pass. A one for a pass-bit means that
   /// the pass doesn't need to run, because nothing has changed since the
@@ -91,16 +233,15 @@ class SILPassManager {
   /// Set to true when a pass invalidates an analysis.
   bool CurrentPassHasInvalidated = false;
 
+  bool currentPassDependsOnCalleeBodies = false;
+
   /// True if we need to stop running passes and restart again on the
   /// same function.
   bool RestartPipeline = false;
 
   /// If true, passes are also run for functions which have
   /// OptimizationMode::NoOptimization.
-  bool isMandatoryPipeline = false;
-
-  /// The IRGen SIL passes. These have to be dynamically added by IRGen.
-  llvm::DenseMap<unsigned, SILTransform *> IRGenPasses;
+  bool isMandatory = false;
 
   /// The notification handler for this specific SILPassManager.
   ///
@@ -110,20 +251,12 @@ class SILPassManager {
   /// pass manager is destroyed.
   DeserializationNotificationHandler *deserializationNotificationHandler;
 
+  std::chrono::nanoseconds totalPassRuntime = std::chrono::nanoseconds(0);
+
 public:
   /// C'tor. It creates and registers all analysis passes, which are defined
   /// in Analysis.def.
-  ///
-  /// If \p isMandatoryPipeline is true, passes are also run for functions
-  /// which have OptimizationMode::NoOptimization.
-  SILPassManager(SILModule *M, llvm::StringRef Stage = "",
-                 bool isMandatoryPipeline = false);
-
-  /// C'tor. It creates an IRGen pass manager. Passes can query for the
-  /// IRGenModule.
-  SILPassManager(SILModule *M, irgen::IRGenModule *IRMod,
-                 llvm::StringRef Stage = "",
-                 bool isMandatoryPipeline = false);
+  SILPassManager(SILModule *M, bool isMandatory, irgen::IRGenModule *IRMod);
 
   const SILOptions &getOptions() const;
 
@@ -138,12 +271,25 @@ public:
     llvm_unreachable("Unable to find analysis for requested type.");
   }
 
+  template<typename T>
+  T *getAnalysis(SILFunction *f) {
+    for (SILAnalysis *A : Analyses) {
+      if (A->getKind() == T::getAnalysisKind())
+        return static_cast<FunctionAnalysisBase<T> *>(A)->get(f);
+    }
+    llvm_unreachable("Unable to find analysis for requested type.");
+  }
+
   /// \returns the module that the pass manager owns.
   SILModule *getModule() { return Mod; }
 
   /// \returns the associated IGenModule or null if this is not an IRGen
   /// pass manager.
-  irgen::IRGenModule *getIRGenModule() { return IRMod; }
+  irgen::IRGenModule *getIRGenModule();
+
+  SwiftPassInvocation *getSwiftPassInvocation() {
+    return &swiftPassInvocation;
+  }
 
   /// Restart the function pass pipeline on the same function
   /// that is currently being processed.
@@ -223,6 +369,10 @@ public:
     CompletedPassesMap[F].reset();
   }
 
+  void setDependingOnCalleeBodies() {
+    currentPassDependsOnCalleeBodies = true;
+  }
+
   /// Reset the state of the pass manager and remove all transformation
   /// owned by the pass manager. Analysis passes will be kept.
   void resetAndRemoveTransformations();
@@ -241,9 +391,12 @@ public:
   ~SILPassManager();
 
   /// Verify all analyses.
-  void verifyAnalyses() const {
+  void verifyAnalyses() const;
+
+  /// Precompute all analyses.
+  void forcePrecomputeAnalyses(SILFunction *F) {
     for (auto *A : Analyses) {
-      A->verify();
+      A->forcePrecompute(F);
     }
   }
 
@@ -253,33 +406,24 @@ public:
   /// Discussion: We leave it up to the analyses to decide how to implement
   /// this. If no override is provided the SILAnalysis should just call the
   /// normal verify method.
-  void verifyAnalyses(SILFunction *F) const {
-    for (auto *A : Analyses) {
-      A->verify(F);
-    }
-  }
+  void verifyAnalyses(SILFunction *F) const;
 
-  void executePassPipelinePlan(const SILPassPipelinePlan &Plan) {
-    for (const SILPassPipeline &Pipeline : Plan.getPipelines()) {
-      setStageName(Pipeline.Name);
-      resetAndRemoveTransformations();
-      for (PassKind Kind : Plan.getPipelinePasses(Pipeline)) {
-        addPass(Kind);
-      }
-      execute();
-    }
-  }
+  void executePassPipelinePlan(const SILPassPipelinePlan &Plan);
 
-  void registerIRGenPass(PassKind Kind, SILTransform *Transform) {
-    assert(IRGenPasses.find(unsigned(Kind)) == IRGenPasses.end() &&
-           "Pass already registered");
-    assert(
-        IRMod &&
-        "Attempting to register an IRGen pass with a non-IRGen pass manager");
-    IRGenPasses[unsigned(Kind)] = Transform;
-  }
+  bool continueWithNextSubpassRun(SILInstruction *forInst, SILFunction *function,
+                                  SILTransform *trans);
+
+  static bool isPassDisabled(StringRef passName);
+  static bool isInstructionPassDisabled(StringRef instName);
+  static bool disablePassesForFunction(SILFunction *function);
 
 private:
+  void parsePassCount(StringRef countsStr);
+
+  bool doPrintBefore(SILTransform *T, SILFunction *F);
+
+  bool doPrintAfter(SILTransform *T, SILFunction *F, bool PassChangedSIL);
+
   void execute();
 
   /// Add a pass of a specific kind.
@@ -298,6 +442,11 @@ private:
   /// Run the passes in Transform from \p FromTransIdx to \p ToTransIdx.
   void runFunctionPasses(unsigned FromTransIdx, unsigned ToTransIdx);
 
+  /// Helper function to check if the function pass should be run mandatorily
+  /// All passes in mandatory pass pipeline and ownership model elimination are
+  /// mandatory function passes.
+  bool isMandatoryFunctionPass(SILFunctionTransform *);
+
   /// A helper function that returns (based on SIL stage and debug
   /// options) whether we should continue running passes.
   bool continueTransforming();
@@ -306,7 +455,8 @@ private:
   bool analysesUnlocked();
 
   /// Dumps information about the pass with index \p TransIdx to llvm::dbgs().
-  void dumpPassInfo(const char *Title, SILTransform *Tr, SILFunction *F);
+  void dumpPassInfo(const char *Title, SILTransform *Tr, SILFunction *F,
+                    int passIdx = -1);
 
   /// Dumps information about the pass with index \p TransIdx to llvm::dbgs().
   void dumpPassInfo(const char *Title, unsigned TransIdx,
@@ -317,6 +467,12 @@ private:
   /// When asserts are disabled, this is a NoOp.
   void viewCallGraph();
 };
+
+inline void SwiftPassInvocation::
+notifyChanges(SILAnalysis::InvalidationKind invalidationKind) {
+    changeNotifications = (SILAnalysis::InvalidationKind)
+        (changeNotifications | invalidationKind);
+}
 
 } // end namespace swift
 

@@ -19,33 +19,45 @@
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <Windows.h>
 #include <Bcrypt.h>
 #pragma comment(lib, "bcrypt.lib")
-#else
+#elif !defined(__APPLE__)
+
 #include <errno.h>
 #include <fcntl.h>
-#include <unistd.h>
-#endif
 
 #if __has_include(<sys/random.h>)
 #include <sys/random.h>
 #endif
+#if __has_include(<sys/stat.h>)
 #include <sys/stat.h>
+#endif
 #if __has_include(<sys/syscall.h>)
 #include <sys/syscall.h>
 #endif
 
+#endif
+
+#if __has_include(<unistd.h>)
+#include <unistd.h>
+#endif
+
 #include <stdlib.h>
 
+#include "swift/shims/Random.h"
 #include "swift/Runtime/Debug.h"
-#include "swift/Runtime/Mutex.h"
-#include "../SwiftShims/Random.h"
+#include "swift/Threading/Mutex.h"
+
+#include <algorithm> // required for std::min
+
+using namespace swift;
 
 #if defined(__APPLE__)
 
 SWIFT_RUNTIME_STDLIB_API
-void swift::swift_stdlib_random(void *buf, __swift_size_t nbytes) {
+void swift_stdlib_random(void *buf, __swift_size_t nbytes) {
   arc4random_buf(buf, nbytes);
 }
 
@@ -53,27 +65,33 @@ void swift::swift_stdlib_random(void *buf, __swift_size_t nbytes) {
 #warning TODO: Test swift_stdlib_random on Windows
 
 SWIFT_RUNTIME_STDLIB_API
-void swift::swift_stdlib_random(void *buf, __swift_size_t nbytes) {
-  NTSTATUS status = BCryptGenRandom(nullptr,
-                                    static_cast<PUCHAR>(buf),
-                                    static_cast<ULONG>(nbytes),
-                                    BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-  if (!BCRYPT_SUCCESS(status)) {
-    fatalError(0, "Fatal error: 0x%.8X in '%s'\n", status, __func__);
+void swift_stdlib_random(void *buf, __swift_size_t nbytes) {
+  while (nbytes > 0) {
+    auto actual_nbytes = std::min(nbytes, (__swift_size_t)ULONG_MAX);
+    NTSTATUS status = BCryptGenRandom(nullptr,
+                                      static_cast<PUCHAR>(buf),
+                                      static_cast<ULONG>(actual_nbytes),
+                                      BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    if (!BCRYPT_SUCCESS(status)) {
+      fatalError(0, "Fatal error: 0x%lX in '%s'\n", status, __func__);
+    }
+
+    buf = static_cast<uint8_t *>(buf) + actual_nbytes;
+    nbytes -= actual_nbytes;
   }
 }
 
 #else
 
 #undef  WHILE_EINTR
-#define WHILE_EINTR(expression) ({                                             \
+#define WHILE_EINTR(expression) ([&] () -> decltype(expression) {              \
   decltype(expression) result = -1;                                            \
   do { result = (expression); } while (result == -1 && errno == EINTR);        \
-  result;                                                                      \
-})
+  return result;                                                               \
+}())
 
 SWIFT_RUNTIME_STDLIB_API
-void swift::swift_stdlib_random(void *buf, __swift_size_t nbytes) {
+void swift_stdlib_random(void *buf, __swift_size_t nbytes) {
   while (nbytes > 0) {
     __swift_ssize_t actual_nbytes = -1;
 
@@ -84,7 +102,7 @@ void swift::swift_stdlib_random(void *buf, __swift_size_t nbytes) {
     if (getrandom_available) {
       actual_nbytes = WHILE_EINTR(syscall(__NR_getrandom, buf, nbytes, 0));
     }
-#elif __has_include(<sys/random.h>) && (defined(__CYGWIN__) || defined(__Fuchsia__))
+#elif __has_include(<sys/random.h>) && (defined(__CYGWIN__) || defined(__Fuchsia__) || defined(__wasi__))
     __swift_size_t getentropy_nbytes = std::min(nbytes, __swift_size_t{256});
     
     if (0 == getentropy(buf, getentropy_nbytes)) {
@@ -97,7 +115,8 @@ void swift::swift_stdlib_random(void *buf, __swift_size_t nbytes) {
         WHILE_EINTR(open("/dev/urandom", O_RDONLY | O_CLOEXEC, 0));
         
       if (fd != -1) {
-        static StaticMutex mutex;
+        // ###FIXME: Why is this locked?  None of the others are.
+        static LazyMutex mutex;
         mutex.withLock([&] {
           actual_nbytes = WHILE_EINTR(read(fd, buf, nbytes));
         });

@@ -31,10 +31,6 @@ enum class TypeResolutionStage : uint8_t {
   /// Produces a complete interface type where all member references have been
   /// resolved.
   Interface,
-
-  /// Produces a contextual type involving archetypes within the context of
-  /// the type.
-  Contextual,
 };
 
 /// Display a type resolution stage.
@@ -42,4 +38,4 @@ void simple_display(llvm::raw_ostream &out, const TypeResolutionStage &value);
 
 } // end namespace swift
 
-#endif /* SWIFT_AST_TYPE_RESOLUTION_STAGE_H */
+#endif // SWIFT_AST_TYPE_RESOLUTION_STAGE_H

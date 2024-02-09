@@ -19,12 +19,22 @@
 
 #include "swift/Basic/SourceLoc.h"
 #include "swift/Basic/LLVM.h"
-#include "swift/Syntax/TokenKinds.h"
+#include "swift/Parse/Token.h"
 #include "swift/Config.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
 
 namespace swift {
+
+enum class tok : uint8_t {
+#define TOKEN(X) X,
+#include "swift/AST/TokenKinds.def"
+
+  NUM_TOKENS
+};
+
+/// If a token kind has determined text, return the text; otherwise assert.
+StringRef getTokenText(tok kind);
 
 /// Token - This structure provides full information about a lexed token.
 /// It is not intended to be space efficient, it is intended to return as much
@@ -98,7 +108,38 @@ public:
   bool isBinaryOperator() const {
     return Kind == tok::oper_binary_spaced || Kind == tok::oper_binary_unspaced;
   }
-  
+
+  /// Checks whether the token is either a binary operator, or is a token that
+  /// acts like a binary operator (e.g infix '=', '?', '->').
+  bool isBinaryOperatorLike() const {
+    if (isBinaryOperator())
+      return true;
+
+    switch (Kind) {
+    case tok::equal:
+    case tok::arrow:
+    case tok::question_infix:
+      return true;
+    default:
+      return false;
+    }
+    llvm_unreachable("Unhandled case in switch!");
+  }
+
+  /// Checks whether the token is either a postfix operator, or is a token that
+  /// acts like a postfix operator (e.g postfix '!' and '?').
+  bool isPostfixOperatorLike() const {
+    switch (Kind) {
+    case tok::oper_postfix:
+    case tok::exclaim_postfix:
+    case tok::question_postfix:
+      return true;
+    default:
+      return false;
+    }
+    llvm_unreachable("Unhandled case in switch!");
+  }
+
   bool isAnyOperator() const {
     return isBinaryOperator() || Kind == tok::oper_postfix ||
            Kind == tok::oper_prefix;
@@ -112,6 +153,10 @@ public:
   }
   bool isNotEllipsis() const {
     return !isEllipsis();
+  }
+
+  bool isTilde() const {
+    return isAnyOperator() && Text == "~";
   }
 
   /// Determine whether this token occurred at the start of a line.
@@ -130,8 +175,8 @@ public:
   }
   
   bool isContextualKeyword(StringRef ContextKW) const {
-    return is(tok::identifier) && !isEscapedIdentifier() &&
-           Text == ContextKW;
+    return isAny(tok::identifier, tok::contextual_keyword) &&
+           !isEscapedIdentifier() && Text == ContextKW;
   }
   
   /// Return true if this is a contextual keyword that could be the start of a
@@ -145,8 +190,9 @@ public:
 #define CONTEXTUAL_DECL_ATTR(KW, ...) CONTEXTUAL_CASE(KW)
 #define CONTEXTUAL_DECL_ATTR_ALIAS(KW, ...) CONTEXTUAL_CASE(KW)
 #define CONTEXTUAL_SIMPLE_DECL_ATTR(KW, ...) CONTEXTUAL_CASE(KW)
-#include "swift/AST/Attr.def"
+#include "swift/AST/DeclAttr.def"
 #undef CONTEXTUAL_CASE
+      .Case("macro", true)
       .Default(false);
   }
 
@@ -161,16 +207,11 @@ public:
   bool canBeArgumentLabel() const {
     // Identifiers, escaped identifiers, and '_' can be argument labels.
     if (is(tok::identifier) || isEscapedIdentifier() || is(tok::kw__)) {
-      // ... except for '__shared' and '__owned'.
-      if (getRawText().equals("__shared") ||
-          getRawText().equals("__owned"))
-        return false;
-
       return true;
     }
 
-    // 'let', 'var', and 'inout' cannot be argument labels.
-    if (isAny(tok::kw_let, tok::kw_var, tok::kw_inout))
+    // inout cannot be used as an argument label.
+    if (is(tok::kw_inout))
       return false;
 
     // All other keywords can be argument labels.
@@ -196,7 +237,7 @@ public:
   bool isKeyword() const {
     switch (Kind) {
 #define KEYWORD(X) case tok::kw_##X: return true;
-#include "swift/Syntax/TokenKinds.def"
+#include "swift/AST/TokenKinds.def"
     default: return false;
     }
   }
@@ -216,7 +257,7 @@ public:
   bool isPunctuation() const {
     switch (Kind) {
 #define PUNCTUATOR(Name, Str) case tok::Name: return true;
-#include "swift/Syntax/TokenKinds.def"
+#include "swift/AST/TokenKinds.def"
     default: return false;
     }
   }
@@ -225,6 +266,12 @@ public:
   bool isMultilineString() const {
     return MultilineString;
   }
+
+  bool isLifetimeDependenceToken() const {
+    return isContextualKeyword("_copy") || isContextualKeyword("_consume") ||
+           isContextualKeyword("_borrow") || isContextualKeyword("_mutate");
+  }
+
   /// Count of extending escaping '#'.
   unsigned getCustomDelimiterLen() const {
     return CustomDelimiterLen;
@@ -246,17 +293,6 @@ public:
 
   CharSourceRange getRange() const {
     return CharSourceRange(getLoc(), getLength());
-  }
-
-  CharSourceRange getRangeWithoutBackticks() const {
-    SourceLoc TokLoc = getLoc();
-    unsigned TokLength = getLength();
-    if (isEscapedIdentifier()) {
-      // Adjust to account for the backticks.
-      TokLoc = TokLoc.getAdvancedLoc(1);
-      TokLength -= 2;
-    }
-    return CharSourceRange(TokLoc, TokLength);
   }
 
   bool hasComment() const {

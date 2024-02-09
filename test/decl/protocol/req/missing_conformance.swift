@@ -4,8 +4,8 @@
 // in various ways.
 
 protocol LikeSetAlgebra {
-    func onion(_ other: Self) -> Self // expected-note {{protocol requires function 'onion' with type '(X) -> X'; do you want to add a stub?}}
-    func indifference(_ other: Self) -> Self // expected-note {{protocol requires function 'indifference' with type '(X) -> X'; do you want to add a stub?}}
+    func onion(_ other: Self) -> Self // expected-note {{protocol requires function 'onion' with type '(X) -> X'; add a stub for conformance}}
+    func indifference(_ other: Self) -> Self // expected-note {{protocol requires function 'indifference' with type '(X) -> X'; add a stub for conformance}}
 
 }
 protocol LikeOptionSet : LikeSetAlgebra, RawRepresentable {}
@@ -31,8 +31,8 @@ struct Y : LikeSequence {} // expected-error {{type 'Y' does not conform to prot
 
 protocol P1 {
     associatedtype Result
-    func get() -> Result // expected-note {{protocol requires function 'get()' with type '() -> Result'; do you want to add a stub?}}
-    func got() // expected-note {{protocol requires function 'got()' with type '() -> ()'; do you want to add a stub?}}
+    func get() -> Result // expected-note {{protocol requires function 'get()' with type '() -> Result'; add a stub for conformance}}
+    func got() // expected-note {{protocol requires function 'got()' with type '() -> ()'; add a stub for conformance}}
 }
 protocol P2 {
     static var singularThing: Self { get }
@@ -48,7 +48,7 @@ extension P1 where Self : P3 {
 struct Z<T1, T2, T3, Result, T4> : P1 {} // expected-error {{type 'Z<T1, T2, T3, Result, T4>' does not conform to protocol 'P1'}}
 
 protocol P4 {
-    func this() // expected-note 2 {{protocol requires function 'this()' with type '() -> ()'; do you want to add a stub?}}
+    func this() // expected-note 2 {{protocol requires function 'this()' with type '() -> ()'; add a stub for conformance}}
 }
 protocol P5 {}
 extension P4 where Self : P5 {
@@ -82,7 +82,7 @@ struct B : P8 { // expected-error {{type 'B' does not conform to protocol 'P8'}}
 }
 
 protocol P9 {
-    func foo() // expected-note {{protocol requires function 'foo()' with type '() -> ()'; do you want to add a stub?}}
+    func foo() // expected-note {{protocol requires function 'foo()' with type '() -> ()'; add a stub for conformance}}
 }
 class C2 {}
 extension P9 where Self : C2 {
@@ -92,7 +92,7 @@ class C3 : P9 {} // expected-error {{type 'C3' does not conform to protocol 'P9'
 
 protocol P10 {
     associatedtype A
-    func bar() // expected-note {{protocol requires function 'bar()' with type '() -> ()'; do you want to add a stub?}}
+    func bar() // expected-note {{protocol requires function 'bar()' with type '() -> ()'; add a stub for conformance}}
 }
 extension P10 where A == Int {
     func bar() {} // expected-note {{candidate would match if 'A' was the same type as 'Int'}}
@@ -107,6 +107,55 @@ protocol P12 {
 extension Int : P11 {}
 struct S3 : P12 { // expected-error {{type 'S3' does not conform to protocol 'P12'}}
     func bar() -> P11 { return 0 }
-    // expected-note@-1 {{candidate can not infer 'A' = 'P11' because 'P11' is not a nominal type and so can't conform to 'P11'}}
+    // expected-note@-1 {{cannot infer 'A' = 'any P11' because 'any P11' as a type cannot conform to protocols; did you mean to use an opaque result type?}}{{19-19=some }}
 }
+
+protocol P13 {
+  associatedtype A : P11 // expected-note {{unable to infer associated type 'A' for protocol 'P13'}}
+  var bar: A { get }
+}
+struct S4: P13 { // expected-error {{type 'S4' does not conform to protocol 'P13'}}
+  var bar: P11 { return 0 }
+  // expected-note@-1 {{cannot infer 'A' = 'any P11' because 'any P11' as a type cannot conform to protocols; did you mean to use an opaque result type?}}{{12-12=some }}
+}
+
+protocol P14 {
+  associatedtype A : P11 // expected-note {{unable to infer associated type 'A' for protocol 'P14'}}
+  subscript(i: Int) -> A { get }
+}
+struct S5: P14 { // expected-error {{type 'S5' does not conform to protocol 'P14'}}
+  subscript(i: Int) -> P11 { return i }
+  // expected-note@-1 {{cannot infer 'A' = 'any P11' because 'any P11' as a type cannot conform to protocols; did you mean to use an opaque result type?}}{{24-24=some }}
+}
+
+// https://github.com/apple/swift/issues/55204
+
+// Note: the conformance to collection should succeed
+struct CountSteps1<T> : Collection {
+  init(count: Int) { self.count = count }
+  var count: Int
+
+  var startIndex: Int { 0 }
+  var endIndex: Int { count }
+  func index(after i: Int) -> Int {
+    totalSteps += 1 // expected-error {{cannot find 'totalSteps' in scope}}
+    return i + 1
+  }
+  subscript(i: Int) -> Int { return i }
+}
+
+extension CountSteps1 // expected-error {{type 'CountSteps1<T>' does not conform to protocol 'RandomAccessCollection'}}
+  // expected-error@-1 {{conditional conformance of type 'CountSteps1<T>' to protocol 'RandomAccessCollection' does not imply conformance to inherited protocol 'BidirectionalCollection'}}
+  // expected-note@-2 {{did you mean to explicitly state the conformance like 'extension CountSteps1: BidirectionalCollection where ...'?}}
+  // expected-error@-3 {{type 'CountSteps1<T>' does not conform to protocol 'BidirectionalCollection'}}
+  : RandomAccessCollection
+     where T : Equatable
+{
+  typealias Index = Int
+
+  func index(_ i: Index, offsetBy d: Int) -> Index {
+    return i + d
+  }
+}
+
 

@@ -147,7 +147,7 @@ struct S {
   override func f() { } // expected-error{{'override' can only be specified on class members}} {{3-12=}}
 }
 extension S {
-  override func ef() {} // expected-error{{method does not override any method from its superclass}}
+  override func ef() {} // expected-error{{'override' can only be specified on class members}} {{3-12=}}
 }
 
 enum E {
@@ -155,7 +155,7 @@ enum E {
 }
 
 protocol P {
-  override func f() // FIXME wording: expected-error{{method does not override any method from its superclass}}
+  override func f() // expected-error{{method does not override any method from its parent protocol}}
 }
 
 override func f() { } // expected-error{{'override' can only be specified on class members}} {{1-10=}}
@@ -324,7 +324,7 @@ class MismatchOptional : MismatchOptionalBase {
 
   override func functionParam(x: @escaping (Int) -> Int) {} // expected-error {{cannot override instance method parameter of type '((Int) -> Int)?' with non-optional type '(Int) -> Int'}} {{34-34=(}} {{56-56=)?}}
   override func tupleParam(x: (Int, Int)) {} // expected-error {{cannot override instance method parameter of type '(Int, Int)?' with non-optional type '(Int, Int)'}} {{41-41=?}}
-  override func compositionParam(x: P1 & P2) {} // expected-error {{cannot override instance method parameter of type '(P1 & P2)?' with non-optional type 'P1 & P2'}} {{37-37=(}} {{44-44=)?}}
+  override func compositionParam(x: P1 & P2) {} // expected-error {{cannot override instance method parameter of type '(any P1 & P2)?' with non-optional type 'any P1 & P2'}} {{37-37=(}} {{44-44=)?}}
 
   override func nameAndTypeMismatch(_: Int) {}
   // expected-error@-1 {{argument labels for method 'nameAndTypeMismatch' do not match those of overridden method 'nameAndTypeMismatch(label:)'}} {{37-37=label }}

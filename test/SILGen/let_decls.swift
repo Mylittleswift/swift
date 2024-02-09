@@ -41,7 +41,7 @@ func test2() {
 // The closure just returns its value, which it captured directly.
 
 // CHECK: sil private [ossa] @$s9let_decls5test2yyFSiyXEfU_ : $@convention(thin) (Int) -> Int
-// CHECK: bb0(%0 : $Int):
+// CHECK: bb0(%0 : @closureCapture $Int):
 // CHECK:  return %0 : $Int
 
 // Verify that we can close over let decls of tuple type.
@@ -68,15 +68,16 @@ func test3() {
   // CHECK-NEXT: [[STR:%[0-9]+]] = apply [[GETFN]]()
   let o = getAString()
 
+  // CHECK-NEXT: [[STR_MOV:%.*]] = move_value [var_decl] [[STR]]
   // CHECK-NEXT: debug_value
   // CHECK-NOT: destroy_value
 
-  // CHECK-NEXT: [[STR_BORROW:%.*]] = begin_borrow [[STR]]
+  // CHECK: [[STR_BORROW:%.*]] = begin_borrow [[STR_MOV]]
   // CHECK: [[USEFN:%[0-9]+]] = function_ref{{.*}}useAString
   // CHECK-NEXT: [[USE:%[0-9]+]] = apply [[USEFN]]([[STR_BORROW]])
   useAString(o)
   
-  // CHECK: destroy_value [[STR]]
+  // CHECK: destroy_value [[STR_MOV]]
 }
 // CHECK: } // end sil function '{{.*}}test3{{.*}}'
 
@@ -112,7 +113,7 @@ func testAddressOnlyStructElt<T>(_ a : T) -> T {
   // CHECK: [[PRODFN:%[0-9]+]] = function_ref @{{.*}}produceAddressOnlyStruct
   // CHECK: apply [[PRODFN]]<T>([[TMPSTRUCT]], [[ARG1]])
   // CHECK-NEXT: [[ELTADDR:%[0-9]+]] = struct_element_addr [[TMPSTRUCT]] : $*AddressOnlyStruct<T>, #AddressOnlyStruct.elt
-  // CHECK-NEXT: copy_addr [[ELTADDR]] to [initialization] %0 : $*T
+  // CHECK-NEXT: copy_addr [[ELTADDR]] to [init] %0 : $*T
   // CHECK-NEXT: destroy_addr [[TMPSTRUCT]]
 }
 
@@ -233,7 +234,8 @@ struct WeirdPropertyTest {
 func test_weird_property(_ v : WeirdPropertyTest, i : Int) -> Int {
   var v = v
   // CHECK: [[VBOX:%[0-9]+]] = alloc_box ${ var WeirdPropertyTest }
-  // CHECK: [[PB:%.*]] = project_box [[VBOX]]
+  // CHECK: [[VLIFETIME:%.*]] = begin_borrow [var_decl] [[VBOX]]
+  // CHECK: [[PB:%.*]] = project_box [[VLIFETIME]]
   // CHECK: store %0 to [trivial] [[PB]]
 
   // The setter isn't mutating, so we need to load the box.
@@ -254,8 +256,8 @@ func test_weird_property(_ v : WeirdPropertyTest, i : Int) -> Int {
 
 // CHECK-LABEL: sil hidden [ossa] @{{.*}}generic_identity
 // CHECK: bb0(%0 : $*T, %1 : $*T):
-// CHECK-NEXT: debug_value_addr %1 : $*T
-// CHECK-NEXT: copy_addr %1 to [initialization] %0 : $*T
+// CHECK-NEXT: debug_value %1 : $*T, {{.*}} expr op_deref
+// CHECK-NEXT: copy_addr %1 to [init] %0 : $*T
 // CHECK-NOT: destroy_addr %1
 // CHECK: } // end sil function '{{.*}}generic_identity{{.*}}'
 func generic_identity<T>(_ a : T) -> T {
@@ -284,9 +286,9 @@ protocol SimpleProtocol {
 // methods on protocol and archetypes calls.
 
 // CHECK-LABEL: sil hidden [ossa] @{{.*}}testLetProtocolBases
-// CHECK: bb0(%0 : $*SimpleProtocol):
+// CHECK: bb0(%0 : $*any SimpleProtocol):
 func testLetProtocolBases(_ p : SimpleProtocol) {
-  // CHECK-NEXT: debug_value_addr
+  // CHECK-NEXT: debug_value {{.*}} expr op_deref
   // CHECK-NEXT: open_existential_addr
   // CHECK-NEXT: witness_method
   // CHECK-NEXT: apply
@@ -305,7 +307,7 @@ func testLetProtocolBases(_ p : SimpleProtocol) {
 // CHECK-LABEL: sil hidden [ossa] @{{.*}}testLetArchetypeBases
 // CHECK: bb0(%0 : $*T):
 func testLetArchetypeBases<T : SimpleProtocol>(_ p : T) {
-  // CHECK-NEXT: debug_value_addr
+  // CHECK-NEXT: debug_value {{.*}} expr op_deref
   // CHECK-NEXT: witness_method $T
   // CHECK-NEXT: apply
   p.doSomethingGreat()
@@ -319,9 +321,9 @@ func testLetArchetypeBases<T : SimpleProtocol>(_ p : T) {
 }
 
 // CHECK-LABEL: sil hidden [ossa] @{{.*}}testDebugValue
-// CHECK: bb0(%0 : $Int, %1 : $*SimpleProtocol):
+// CHECK: bb0(%0 : $Int, %1 : $*any SimpleProtocol):
 // CHECK-NEXT: debug_value %0 : $Int, let, name "a"
-// CHECK-NEXT: debug_value_addr %1 : $*SimpleProtocol, let, name "b"
+// CHECK-NEXT: debug_value %1 : $*any SimpleProtocol, let, name "b", {{.*}} expr op_deref
 func testDebugValue(_ a : Int, b : SimpleProtocol) -> Int {
 
   // CHECK-NEXT: debug_value %0 : $Int, let, name "x"
@@ -339,14 +341,14 @@ func testDebugValue(_ a : Int, b : SimpleProtocol) -> Int {
 
 // CHECK-LABEL: sil hidden [ossa] @{{.*}}testAddressOnlyTupleArgument
 func testAddressOnlyTupleArgument(_ bounds: (start: SimpleProtocol, pastEnd: Int)) {
-// CHECK:       bb0(%0 : $*SimpleProtocol, %1 : $Int):
-// CHECK-NEXT:    %2 = alloc_stack $(start: SimpleProtocol, pastEnd: Int), let, name "bounds", argno 1
-// CHECK-NEXT:    %3 = tuple_element_addr %2 : $*(start: SimpleProtocol, pastEnd: Int), 0
-// CHECK-NEXT:    copy_addr %0 to [initialization] %3 : $*SimpleProtocol
-// CHECK-NEXT:    %5 = tuple_element_addr %2 : $*(start: SimpleProtocol, pastEnd: Int), 1
+// CHECK:       bb0(%0 : $*any SimpleProtocol, %1 : $Int):
+// CHECK-NEXT:    %2 = alloc_stack [lexical] $(start: any SimpleProtocol, pastEnd: Int), let, name "bounds", argno 1
+// CHECK-NEXT:    %3 = tuple_element_addr %2 : $*(start: any SimpleProtocol, pastEnd: Int), 0
+// CHECK-NEXT:    copy_addr %0 to [init] %3 : $*any SimpleProtocol
+// CHECK-NEXT:    %5 = tuple_element_addr %2 : $*(start: any SimpleProtocol, pastEnd: Int), 1
 // CHECK-NEXT:    store %1 to [trivial] %5 : $*Int
-// CHECK-NEXT:    destroy_addr %2 : $*(start: SimpleProtocol, pastEnd: Int)
-// CHECK-NEXT:    dealloc_stack %2 : $*(start: SimpleProtocol, pastEnd: Int)
+// CHECK-NEXT:    destroy_addr %2 : $*(start: any SimpleProtocol, pastEnd: Int)
+// CHECK-NEXT:    dealloc_stack %2 : $*(start: any SimpleProtocol, pastEnd: Int)
 }
 
 
@@ -367,8 +369,10 @@ func member_ref_abstraction_change(_ x: GenericFunctionStruct<Int, Int>) -> (Int
 }
 
 // CHECK-LABEL: sil hidden [ossa] @{{.*}}call_auto_closure
-// CHECK: bb0([[CLOSURE:%.*]] : $@noescape @callee_guaranteed () -> Bool):
-// CHECK:   apply [[CLOSURE]]() : $@noescape @callee_guaranteed () -> Bool
+// CHECK: bb0([[CLOSURE:%.*]] : @guaranteed $@noescape @callee_guaranteed () -> Bool):
+// CHECK:   [[CLOSUREC:%.*]] = copy_value [[CLOSURE]]
+// CHECK:   [[CLOSUREB:%.*]] = begin_borrow [[CLOSUREC]]
+// CHECK:   apply [[CLOSUREB]]() : $@noescape @callee_guaranteed () -> Bool
 // CHECK: } // end sil function '{{.*}}call_auto_closure{{.*}}'
 func call_auto_closure(x: @autoclosure () -> Bool) -> Bool {
   return x()  // Calls of autoclosures should be marked transparent.
@@ -398,7 +402,6 @@ struct StructMemberTest {
   // CHECK:  debug_value [[ARG]] : $StructMemberTest, let, name "self"
   // CHECK:  [[TRIVIAL_VALUE:%.*]] = struct_extract [[ARG]] : $StructMemberTest, #StructMemberTest.i
   // CHECK-NOT:  destroy_value [[ARG]] : $StructMemberTest
-  // CHECK-NOT:  destroy_value [[BORROWED_ARG]] : $StructMemberTest
   // CHECK:  return [[TRIVIAL_VALUE]] : $Int
 
   // Accessing the int member in s should not copy_value the whole struct.
@@ -439,9 +442,9 @@ struct GenericStruct<T> {
   }
   // CHECK-LABEL: sil hidden [ossa] @{{.*}}GenericStructV4getA{{.*}} : $@convention(method) <T> (@in_guaranteed GenericStruct<T>) -> @out T
   // CHECK: bb0(%0 : $*T, %1 : $*GenericStruct<T>):
-  // CHECK-NEXT: debug_value_addr %1 : $*GenericStruct<T>, let, name "self"
+  // CHECK-NEXT: debug_value %1 : $*GenericStruct<T>, let, name "self", {{.*}} expr op_deref
   // CHECK-NEXT: %3 = struct_element_addr %1 : $*GenericStruct<T>, #GenericStruct.a
-  // CHECK-NEXT: copy_addr %3 to [initialization] %0 : $*T
+  // CHECK-NEXT: copy_addr %3 to [init] %0 : $*T
   // CHECK-NEXT: %5 = tuple ()
   // CHECK-NEXT: return %5 : $()
 
@@ -451,10 +454,9 @@ struct GenericStruct<T> {
   
   // CHECK-LABEL: sil hidden [ossa] @{{.*}}GenericStructV4getB{{.*}} : $@convention(method) <T> (@in_guaranteed GenericStruct<T>) -> Int
   // CHECK: bb0([[SELF_ADDR:%.*]] : $*GenericStruct<T>):
-  // CHECK-NEXT: debug_value_addr [[SELF_ADDR]] : $*GenericStruct<T>, let, name "self"
+  // CHECK-NEXT: debug_value [[SELF_ADDR]] : $*GenericStruct<T>, let, name "self", {{.*}} expr op_deref
   // CHECK-NEXT: [[PROJ_ADDR:%.*]] = struct_element_addr [[SELF_ADDR]] : $*GenericStruct<T>, #GenericStruct.b
   // CHECK-NEXT: [[PROJ_VAL:%.*]] = load [trivial] [[PROJ_ADDR]] : $*Int
-  // CHECK-NOT: destroy_addr [[SELF]] : $*GenericStruct<T>
   // CHECK-NEXT: return [[PROJ_VAL]] : $Int
 }
 
@@ -467,7 +469,8 @@ struct LetPropertyStruct {
 // CHECK-LABEL: sil hidden [ossa] @{{.*}}testLetPropertyAccessOnLValueBase
 // CHECK: bb0(%0 : $LetPropertyStruct):
 // CHECK:  [[ABOX:%[0-9]+]] = alloc_box ${ var LetPropertyStruct }
-// CHECK:  [[A:%[0-9]+]] = project_box [[ABOX]]
+// CHECK:  [[ALIFETIME:%[0-9]+]] = begin_borrow [var_decl] [[ABOX]]
+// CHECK:  [[A:%[0-9]+]] = project_box [[ALIFETIME]]
 // CHECK:   store %0 to [trivial] [[A]] : $*LetPropertyStruct
 // CHECK:   [[READ:%.*]] = begin_access [read] [unknown] [[A]]
 // CHECK:   [[STRUCT:%[0-9]+]] = load [trivial] [[READ]] : $*LetPropertyStruct
@@ -483,10 +486,10 @@ func testLetPropertyAccessOnLValueBase(_ a : LetPropertyStruct) -> Int {
 var addressOnlyGetOnlyGlobalProperty : SimpleProtocol { get {} }
 
 // CHECK-LABEL: sil hidden [ossa] @$s9let_decls018testAddressOnlyGetE14GlobalPropertyAA14SimpleProtocol_pyF
-// CHECK: bb0(%0 : $*SimpleProtocol):
+// CHECK: bb0(%0 : $*any SimpleProtocol):
 // CHECK-NEXT:   // function_ref
 // CHECK-NEXT:  %1 = function_ref @$s9let_decls014addressOnlyGetD14GlobalPropertyAA14SimpleProtocol_pvg
-// CHECK-NEXT:  %2 = apply %1(%0) : $@convention(thin) () -> @out SimpleProtocol
+// CHECK-NEXT:  %2 = apply %1(%0) : $@convention(thin) () -> @out any SimpleProtocol
 // CHECK-NEXT:  %3 = tuple ()
 // CHECK-NEXT:  return %3 : $()
 // CHECK-NEXT: }

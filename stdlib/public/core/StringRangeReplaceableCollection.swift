@@ -31,10 +31,10 @@ extension String: RangeReplaceableCollection {
     self.init(repeating: repeatedValue._str, count: count)
   }
 
-  // This initializer disambiguates between the following intitializers, now
+  // This initializer disambiguates between the following initializers, now
   // that String conforms to Collection:
-  // - init<T>(_ value: T) where T : LosslessStringConvertible
-  // - init<S>(_ characters: S) where S : Sequence, S.Element == Character
+  // - init<T>(_ value: T) where T: LosslessStringConvertible
+  // - init<S>(_ characters: S) where S: Sequence, S.Element == Character
 
   /// Creates a new string containing the characters in the given sequence.
   ///
@@ -53,7 +53,7 @@ extension String: RangeReplaceableCollection {
   ///   characters.
   @_specialize(where S == String)
   @_specialize(where S == Substring)
-  public init<S : Sequence & LosslessStringConvertible>(_ other: S)
+  public init<S: Sequence & LosslessStringConvertible>(_ other: S)
   where S.Element == Character {
     if let str = other as? String {
       self = str
@@ -80,7 +80,7 @@ extension String: RangeReplaceableCollection {
   @_specialize(where S == String)
   @_specialize(where S == Substring)
   @_specialize(where S == Array<Character>)
-  public init<S : Sequence>(_ characters: S)
+  public init<S: Sequence>(_ characters: S)
   where S.Iterator.Element == Character {
     if let str = characters as? String {
       self = str
@@ -125,6 +125,7 @@ extension String: RangeReplaceableCollection {
   ///     // Prints "Hello, friend"
   ///
   /// - Parameter other: Another string.
+  @_semantics("string.append")
   public mutating func append(_ other: String) {
     if self.isEmpty && !_guts.hasNativeStorage {
       self = other
@@ -161,7 +162,7 @@ extension String: RangeReplaceableCollection {
   @_specialize(where S == String)
   @_specialize(where S == Substring)
   @_specialize(where S == Array<Character>)
-  public mutating func append<S : Sequence>(contentsOf newElements: S)
+  public mutating func append<S: Sequence>(contentsOf newElements: S)
   where S.Iterator.Element == Character {
     if let str = newElements as? String {
       self.append(str)
@@ -194,10 +195,14 @@ extension String: RangeReplaceableCollection {
   @_specialize(where C == Substring)
   @_specialize(where C == Array<Character>)
   public mutating func replaceSubrange<C>(
-    _ bounds: Range<Index>,
+    _ subrange: Range<Index>,
     with newElements: C
-  ) where C : Collection, C.Iterator.Element == Character {
-    _guts.replaceSubrange(bounds, with: newElements)
+  ) where C: Collection, C.Iterator.Element == Character {
+    // Note: SE-0180 requires us to use `subrange` bounds even if they aren't
+    // `Character` aligned. (We still have to round things down to the nearest
+    // scalar boundary, though, or we may generate ill-formed encodings.)
+    let subrange = _guts.validateScalarRange(subrange)
+    _guts.replaceSubrange(subrange, with: newElements)
   }
 
   /// Inserts a new character at the specified position.
@@ -212,7 +217,9 @@ extension String: RangeReplaceableCollection {
   ///
   /// - Complexity: O(*n*), where *n* is the length of the string.
   public mutating func insert(_ newElement: Character, at i: Index) {
-    self.replaceSubrange(i..<i, with: newElement._str)
+    let i = _guts.validateInclusiveScalarIndex(i)
+    let range = Range(_uncheckedBounds: (i, i))
+    _guts.replaceSubrange(range, with: newElement._str)
   }
 
   /// Inserts a collection of characters at the specified position.
@@ -232,10 +239,12 @@ extension String: RangeReplaceableCollection {
   @_specialize(where S == String)
   @_specialize(where S == Substring)
   @_specialize(where S == Array<Character>)
-  public mutating func insert<S : Collection>(
+  public mutating func insert<S: Collection>(
     contentsOf newElements: S, at i: Index
   ) where S.Element == Character {
-    self.replaceSubrange(i..<i, with: newElements)
+    let i = _guts.validateInclusiveScalarIndex(i)
+    let range = Range(_uncheckedBounds: (i, i))
+    _guts.replaceSubrange(range, with: newElements)
   }
 
   /// Removes and returns the character at the specified position.
@@ -258,8 +267,13 @@ extension String: RangeReplaceableCollection {
   /// - Returns: The character that was removed.
   @discardableResult
   public mutating func remove(at i: Index) -> Character {
-    let result = self[i]
-    _guts.remove(from: i, to: self.index(after: i))
+    let i = _guts.validateScalarIndex(i)
+    let stride = _characterStride(startingAt: i)
+    let j = Index(_encodedOffset: i._encodedOffset &+ stride)._scalarAligned
+
+    let result = _guts.errorCorrectedCharacter(
+      startingAt: i._encodedOffset, endingAt: j._encodedOffset)
+    _guts.remove(from: i, to: j)
     return result
   }
 
@@ -274,6 +288,7 @@ extension String: RangeReplaceableCollection {
   /// - Parameter bounds: The range of the elements to remove. The upper and
   ///   lower bounds of `bounds` must be valid indices of the string.
   public mutating func removeSubrange(_ bounds: Range<Index>) {
+    let bounds = _guts.validateScalarRange(bounds)
     _guts.remove(from: bounds.lowerBound, to: bounds.upperBound)
   }
 
@@ -296,41 +311,45 @@ extension String: RangeReplaceableCollection {
 }
 
 extension String {
-  @inlinable @inline(__always)
+  @available(*, deprecated,
+    message: "Use one of the _StringGuts.validateScalarIndex methods")
+  @usableFromInline // Used to be inlinable before 5.7
   internal func _boundsCheck(_ index: Index) {
-    _precondition(index._encodedOffset >= 0 && index._encodedOffset < _guts.count,
+    _precondition(index._encodedOffset < _guts.count,
       "String index is out of bounds")
   }
 
-  @inlinable @inline(__always)
+  @available(*, deprecated,
+    message: "Use one of the _StringGuts.validateScalarIndexRange methods")
+  @usableFromInline // Used to be inlinable before 5.7
   internal func _boundsCheck(_ range: Range<Index>) {
     _precondition(
-      range.lowerBound._encodedOffset >= 0 &&
       range.upperBound._encodedOffset <= _guts.count,
       "String index range is out of bounds")
   }
 
-  @inlinable @inline(__always)
+  @available(*, deprecated,
+    message: "Use one of the _StringGuts.validateScalarIndex methods")
+  @usableFromInline // Used to be inlinable before 5.7
   internal func _boundsCheck(_ range: ClosedRange<Index>) {
     _precondition(
-      range.lowerBound._encodedOffset >= 0 &&
       range.upperBound._encodedOffset < _guts.count,
       "String index range is out of bounds")
   }
 }
 
 extension String {
-  // This is needed because of the issue described in SR-4660 which causes
-  // source compatibility issues when String becomes a collection
+  // FIXME: This is needed because of https://github.com/apple/swift/issues/47237,
+  // which causes source compatibility issues when String becomes a collection.
   @_transparent
-  public func max<T : Comparable>(_ x: T, _ y: T) -> T {
+  public func max<T: Comparable>(_ x: T, _ y: T) -> T {
     return Swift.max(x,y)
   }
 
-  // This is needed because of the issue described in SR-4660 which causes
-  // source compatibility issues when String becomes a collection
+  // FIXME: This is needed because of https://github.com/apple/swift/issues/47237,
+  // which causes source compatibility issues when String becomes a collection.
   @_transparent
-  public func min<T : Comparable>(_ x: T, _ y: T) -> T {
+  public func min<T: Comparable>(_ x: T, _ y: T) -> T {
     return Swift.min(x,y)
   }
 }

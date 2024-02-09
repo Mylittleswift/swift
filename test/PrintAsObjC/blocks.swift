@@ -1,8 +1,8 @@
 // Please keep this file in alphabetical order!
 
 // RUN: %empty-directory(%t)
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -verify-sil-ownership -emit-module -o %t %s -disable-objc-attr-requires-foundation-module
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -verify-sil-ownership -parse-as-library %t/blocks.swiftmodule -typecheck -emit-objc-header-path %t/blocks.h -import-objc-header %S/../Inputs/empty.h -disable-objc-attr-requires-foundation-module
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -emit-module -o %t %s -disable-objc-attr-requires-foundation-module
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -parse-as-library %t/blocks.swiftmodule -typecheck -emit-objc-header-path %t/blocks.h -import-objc-header %S/../Inputs/empty.h -disable-objc-attr-requires-foundation-module
 // RUN: %FileCheck %s < %t/blocks.h
 // RUN: %check-in-clang %t/blocks.h
 
@@ -101,7 +101,7 @@ typealias MyBlockWithNoescapeParam = (() -> ()) -> Int
   ) {
   }
   
-  // CHECK-NEXT: - (void (* _Nonnull)(SWIFT_NOESCAPE NSInteger (* _Nonnull)(NSInteger, NSInteger)))returnsFunctionPointerThatTakesFunctionPointer SWIFT_WARN_UNUSED_RESULT;
+  // CHECK-NEXT: - (void (* _Nonnull)(NSInteger (* _Nonnull)(NSInteger, NSInteger)))returnsFunctionPointerThatTakesFunctionPointer SWIFT_WARN_UNUSED_RESULT;
   @objc func returnsFunctionPointerThatTakesFunctionPointer() ->
     @convention(c) (_ comparator: @convention(c) (_ x: Int, _ y: Int) -> Int) -> Void {
     fatalError()
@@ -112,6 +112,9 @@ typealias MyBlockWithNoescapeParam = (() -> ()) -> Int
       -> @convention(c) (_ result: Int) -> Int {
     return input
   }
+
+  // CHECK-NEXT: - (void)blockWithConsumingArgument:(void (^ _Nonnull)(SWIFT_RELEASES_ARGUMENT NSObject * _Nonnull))block;
+  @objc func blockWithConsumingArgument(_ block: @escaping (__owned NSObject) -> ()) {}
 
   // CHECK-NEXT: @property (nonatomic, copy) NSInteger (^ _Nullable savedBlock)(NSInteger);
   @objc var savedBlock: ((Int) -> Int)?

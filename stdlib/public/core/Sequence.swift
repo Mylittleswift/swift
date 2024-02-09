@@ -98,7 +98,7 @@
 ///         }
 ///     }
 ///     print(longestAnimal)
-///     // Prints "Butterfly"
+///     // Prints Optional("Butterfly")
 ///
 /// Using Multiple Iterators
 /// ========================
@@ -174,7 +174,7 @@
 ///     // Prints "3..."
 ///     // Prints "2..."
 ///     // Prints "1..."
-public protocol IteratorProtocol {
+public protocol IteratorProtocol<Element> {
   /// The type of element traversed by the iterator.
   associatedtype Element
 
@@ -322,16 +322,22 @@ public protocol IteratorProtocol {
 /// makes no other requirements about element access, so routines that
 /// traverse a sequence should be considered O(*n*) unless documented
 /// otherwise.
-public protocol Sequence {
+public protocol Sequence<Element> {
   /// A type representing the sequence's elements.
   associatedtype Element
 
   /// A type that provides the sequence's iteration interface and
   /// encapsulates its iteration state.
-  associatedtype Iterator : IteratorProtocol where Iterator.Element == Element
+  associatedtype Iterator: IteratorProtocol where Iterator.Element == Element
+
+  // FIXME: <rdar://problem/34142121>
+  // This typealias should be removed as it predates the source compatibility
+  // guarantees of Swift 3, but it cannot due to a bug.
+  @available(*, unavailable, renamed: "Iterator")
+  typealias Generator = Iterator
 
   /// A type that represents a subsequence of some of the sequence's elements.
-  // associatedtype SubSequence : Sequence = AnySequence<Element>
+  // associatedtype SubSequence: Sequence = AnySequence<Element>
   //   where Element == SubSequence.Element,
   //         SubSequence.SubSequence == SubSequence
   // typealias SubSequence = AnySequence<Element>
@@ -349,6 +355,33 @@ public protocol Sequence {
   ///   In this case, see the documentation of `Collection.underestimatedCount`.
   var underestimatedCount: Int { get }
 
+  /// Sequences whose `Element` is `Equatable` and that are able to quickly
+  /// check if they contain a particular value can implement this requirement
+  /// to speed up the standard `contains` method.
+  ///
+  /// The default implementation returns nil, indicating that `contains` should
+  /// fall back to the standard linear search algorithm.
+  ///
+  /// `Sequence` and `Collection` algorithms other than `contains` itself may
+  /// adapt their behavior based on whether or not this function returns nil.
+  /// For example, a generic algorithm that needs to do containment checks for
+  /// many different values may decide not to copy items into a temporary `Set`
+  /// if it sees that the sequence implements this method. Therefore, sequences
+  /// should only implement this method if they can do it in better than linear
+  /// time.
+  ///
+  /// For sequences that are destructively consumed by iteration, calling this
+  /// method must not consume any elements. (Such sequences usually leave this
+  /// method with its default, `nil`-returning implementation, which trivially
+  /// satisfies this requirement.)
+  ///
+  /// - Returns: `nil` if containment cannot be verified in better than linear
+  ///    time; otherwise, the method returns a boolean value indicating whether
+  ///    or not the item is an element of this sequence.
+  ///
+  /// - Complexity: If this function returns `nil`, it must do so in constant
+  ///    (O(1)) time. If this returns non-`nil`, then it must have better than linear
+  ///    (O(*n*)) complexity.
   func _customContainsEquatableElement(
     _ element: Element
   ) -> Bool?
@@ -357,15 +390,64 @@ public protocol Sequence {
   /// in the same order.
   __consuming func _copyToContiguousArray() -> ContiguousArray<Element>
 
-  /// Copy `self` into an unsafe buffer, returning a partially-consumed
-  /// iterator with any elements that didn't fit remaining.
+  /// Copy `self` into an unsafe buffer, initializing its memory.
+  ///
+  /// The default implementation simply iterates over the elements of the
+  /// sequence, initializing the buffer one item at a time.
+  ///
+  /// For sequences whose elements are stored in contiguous chunks of memory,
+  /// it may be more efficient to copy them in bulk, using the
+  /// `UnsafeMutablePointer.initialize(from:count:)` method.
+  ///
+  /// - Parameter ptr: An unsafe buffer addressing uninitialized memory. The
+  ///    buffer must be of sufficient size to accommodate
+  ///    `source.underestimatedCount` elements. (Some implementations trap
+  ///    if given a buffer that's smaller than this.)
+  ///
+  /// - Returns: `(it, c)`, where `c` is the number of elements copied into the
+  ///    buffer, and `it` is a partially consumed iterator that can be used to
+  ///    retrieve elements that did not fit into the buffer (if any). (This can
+  ///    only happen if `underestimatedCount` turned out to be an actual
+  ///    underestimate, and the buffer did not contain enough space to hold the
+  ///    entire sequence.)
+  ///
+  ///    On return, the memory region in `buffer[0 ..< c]` is initialized to
+  ///    the first `c` elements in the sequence.
   __consuming func _copyContents(
     initializing ptr: UnsafeMutableBufferPointer<Element>
   ) -> (Iterator,UnsafeMutableBufferPointer<Element>.Index)
-  
+
+  /// Executes a closure on the sequence’s contiguous storage.
+  ///
+  /// This method calls `body(buffer)`, where `buffer` is a pointer to the
+  /// collection’s contiguous storage. If the contiguous storage doesn't exist,
+  /// the collection creates it. If the collection doesn’t support an internal
+  /// representation in a form of contiguous storage, the method doesn’t call
+  /// `body` --- it immediately returns `nil`.
+  ///
+  /// The optimizer can often eliminate bounds- and uniqueness-checking
+  /// within an algorithm. When that fails, however, invoking the same
+  /// algorithm on the `buffer` argument may let you trade safety for speed.
+  ///
+  /// Successive calls to this method may provide a different pointer on each
+  /// call. Don't store `buffer` outside of this method.
+  ///
+  /// A `Collection` that provides its own implementation of this method
+  /// must provide contiguous storage to its elements in the same order
+  /// as they appear in the collection. This guarantees that it's possible to
+  /// generate contiguous mutable storage to any of its subsequences by slicing
+  /// `buffer` with a range formed from the distances to the subsequence's
+  /// `startIndex` and `endIndex`, respectively.
+  ///
+  /// - Parameters:
+  ///   - body: A closure that receives an `UnsafeBufferPointer` to the
+  ///     sequence's contiguous storage.
+  /// - Returns: The value returned from `body`, unless the sequence doesn't
+  ///   support contiguous storage, in which case the method ignores `body` and
+  ///   returns `nil`.
   func withContiguousStorageIfAvailable<R>(
-    _ body: (UnsafeBufferPointer<Element>) throws -> R
-  ) rethrows -> R?  
+    _ body: (_ buffer: UnsafeBufferPointer<Element>) throws -> R
+  ) rethrows -> R?
 }
 
 // Provides a default associated type witness for Iterator when the
@@ -389,7 +471,7 @@ extension Sequence where Self.Iterator == Self {
 /// `Base` iterator before possibly returning the first available element.
 ///
 /// The underlying iterator's sequence may be infinite.
-@_fixed_layout
+@frozen
 public struct DropFirstSequence<Base: Sequence> {
   @usableFromInline
   internal let _base: Base
@@ -433,7 +515,7 @@ extension DropFirstSequence: Sequence {
 /// `Base` iterator.
 ///
 /// The underlying iterator's sequence may be infinite.
-@_fixed_layout
+@frozen
 public struct PrefixSequence<Base: Sequence> {
   @usableFromInline
   internal var _base: Base
@@ -449,7 +531,7 @@ public struct PrefixSequence<Base: Sequence> {
 }
 
 extension PrefixSequence {
-  @_fixed_layout
+  @frozen
   public struct Iterator {
     @usableFromInline
     internal var _base: Base.Iterator
@@ -496,7 +578,7 @@ extension PrefixSequence: Sequence {
 /// `Base` iterator before possibly returning the first available element.
 ///
 /// The underlying iterator's sequence may be infinite.
-@_fixed_layout
+@frozen
 public struct DropWhileSequence<Base: Sequence> {
   public typealias Element = Base.Element
   
@@ -522,7 +604,7 @@ public struct DropWhileSequence<Base: Sequence> {
 }
 
 extension DropWhileSequence {
-  @_fixed_layout
+  @frozen
   public struct Iterator {
     @usableFromInline
     internal var _iterator: Base.Iterator
@@ -588,9 +670,10 @@ extension Sequence {
   ///
   /// - Complexity: O(*n*), where *n* is the length of the sequence.
   @inlinable
-  public func map<T>(
-    _ transform: (Element) throws -> T
-  ) rethrows -> [T] {
+  @_alwaysEmitIntoClient
+  public func map<T, E>(
+    _ transform: (Element) throws(E) -> T
+  ) throws(E) -> [T] {
     let initialCapacity = underestimatedCount
     var result = ContiguousArray<T>()
     result.reserveCapacity(initialCapacity)
@@ -606,6 +689,17 @@ extension Sequence {
       result.append(try transform(element))
     }
     return Array(result)
+  }
+
+  // ABI-only entrypoint for the rethrows version of map, which has been
+  // superseded by the typed-throws version. Expressed as "throws", which is
+  // ABI-compatible with "rethrows".
+  @usableFromInline
+  @_silgen_name("$sSTsE3mapySayqd__Gqd__7ElementQzKXEKlF")
+  func __rethrows_map<T>(
+    _ transform: (Element) throws -> T
+  ) throws -> [T] {
+    try map(transform)
   }
 
   /// Returns an array containing, in order, the elements of the sequence
@@ -700,6 +794,7 @@ extension Sequence {
   ///
   /// - Parameter body: A closure that takes an element of the sequence as a
   ///   parameter.
+  @_semantics("sequence.forEach")
   @inlinable
   public func forEach(
     _ body: (Element) throws -> Void
@@ -734,7 +829,7 @@ extension Sequence {
   public func first(
     where predicate: (Element) throws -> Bool
   ) rethrows -> Element? {
-    for element in self  {
+    for element in self {
       if try predicate(element) {
         return element
       }
@@ -743,7 +838,7 @@ extension Sequence {
   }
 }
 
-extension Sequence where Element : Equatable {
+extension Sequence where Element: Equatable {
   /// Returns the longest possible subsequences of the sequence, in order,
   /// around elements equal to the given element.
   ///
@@ -905,7 +1000,10 @@ extension Sequence {
         ringBuffer.append(element)
       } else {
         ringBuffer[i] = element
-        i = (i + 1) % maxLength
+        i += 1
+        if i >= maxLength {
+          i = 0
+        }
       }
     }
 
@@ -984,7 +1082,10 @@ extension Sequence {
       } else {
         result.append(ringBuffer[i])
         ringBuffer[i] = element
-        i = (i + 1) % k
+        i += 1
+        if i >= k {
+          i = 0
+        }
       }
     }
     return Array(result)
@@ -1082,27 +1183,50 @@ extension Sequence {
 }
 
 extension Sequence {
-  /// Copies `self` into the supplied buffer.
+  /// Copy `self` into an unsafe buffer, initializing its memory.
   ///
-  /// - Precondition: The memory in `self` is uninitialized. The buffer must
-  ///   contain sufficient uninitialized memory to accommodate `source.underestimatedCount`.
+  /// The default implementation simply iterates over the elements of the
+  /// sequence, initializing the buffer one item at a time.
   ///
-  /// - Postcondition: The `Pointee`s at `buffer[startIndex..<returned index]` are
-  ///   initialized.
+  /// For sequences whose elements are stored in contiguous chunks of memory,
+  /// it may be more efficient to copy them in bulk, using the
+  /// `UnsafeMutablePointer.initialize(from:count:)` method.
+  ///
+  /// - Parameter ptr: An unsafe buffer addressing uninitialized memory. The
+  ///    buffer must be of sufficient size to accommodate
+  ///    `source.underestimatedCount` elements. (Some implementations trap
+  ///    if given a buffer that's smaller than this.)
+  ///
+  /// - Returns: `(it, c)`, where `c` is the number of elements copied into the
+  ///    buffer, and `it` is a partially consumed iterator that can be used to
+  ///    retrieve elements that did not fit into the buffer (if any). (This can
+  ///    only happen if `underestimatedCount` turned out to be an actual
+  ///    underestimate, and the buffer did not contain enough space to hold the
+  ///    entire sequence.)
+  ///
+  ///    On return, the memory region in `buffer[0 ..< c]` is initialized to
+  ///    the first `c` elements in the sequence.
   @inlinable
   public __consuming func _copyContents(
     initializing buffer: UnsafeMutableBufferPointer<Element>
-  ) -> (Iterator,UnsafeMutableBufferPointer<Element>.Index) {
+  ) -> (Iterator, UnsafeMutableBufferPointer<Element>.Index) {
+    return _copySequenceContents(initializing: buffer)
+  }
+
+  @_alwaysEmitIntoClient
+  internal __consuming func _copySequenceContents(
+    initializing buffer: UnsafeMutableBufferPointer<Element>
+  ) -> (Iterator, UnsafeMutableBufferPointer<Element>.Index) {
     var it = self.makeIterator()
-    guard var ptr = buffer.baseAddress else { return (it,buffer.startIndex) }
-    for idx in buffer.startIndex..<buffer.count {
+    guard var ptr = buffer.baseAddress else { return (it, buffer.startIndex) }
+    for idx in buffer.indices {
       guard let x = it.next() else {
         return (it, idx)
       }
       ptr.initialize(to: x)
       ptr += 1
     }
-    return (it,buffer.endIndex)
+    return (it, buffer.endIndex)
   }
     
   @inlinable
@@ -1122,8 +1246,8 @@ extension Sequence {
 /// given just an iterator `i`:
 ///
 ///     for x in IteratorSequence(i) { ... }
-@_fixed_layout
-public struct IteratorSequence<Base : IteratorProtocol> {
+@frozen
+public struct IteratorSequence<Base: IteratorProtocol> {
   @usableFromInline
   internal var _base: Base
 
@@ -1135,6 +1259,11 @@ public struct IteratorSequence<Base : IteratorProtocol> {
 }
 
 extension IteratorSequence: IteratorProtocol, Sequence {
+
+  #if $NoncopyableGenerics
+    public typealias Element = Base.Element
+  #endif
+
   /// Advances to the next element and returns it, or `nil` if no next element
   /// exists.
   ///
@@ -1148,7 +1277,9 @@ extension IteratorSequence: IteratorProtocol, Sequence {
   }
 }
 
-/* FIXME: ideally for compatability we would declare
+extension IteratorSequence: Sendable where Base: Sendable { }
+
+/* FIXME: ideally for compatibility we would declare
 extension Sequence {
   @available(swift, deprecated: 5, message: "")
   public typealias SubSequence = AnySequence<Element>

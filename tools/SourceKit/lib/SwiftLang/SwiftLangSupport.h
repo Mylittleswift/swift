@@ -14,16 +14,23 @@
 #define LLVM_SOURCEKIT_LIB_SWIFTLANG_SWIFTLANGSUPPORT_H
 
 #include "CodeCompletion.h"
-#include "SwiftInterfaceGenContext.h"
+#include "SourceKit/Core/Context.h"
 #include "SourceKit/Core/LangSupport.h"
 #include "SourceKit/Support/Concurrency.h"
 #include "SourceKit/Support/Statistic.h"
 #include "SourceKit/Support/ThreadSafeRefCntPtr.h"
 #include "SourceKit/Support/Tracing.h"
+#include "SwiftInterfaceGenContext.h"
+#include "swift/AST/DiagnosticConsumer.h"
+#include "swift/AST/PluginRegistry.h"
 #include "swift/Basic/ThreadSafeRefCounted.h"
-#include "swift/IDE/Formatting.h"
-#include "swift/IDE/Refactoring.h"
+#include "swift/Frontend/PrintingDiagnosticConsumer.h"
+#include "swift/IDE/CancellableResult.h"
+#include "swift/IDE/Indenting.h"
+#include "swift/IDETool/CompileInstance.h"
+#include "swift/IDETool/IDEInspectionInstance.h"
 #include "swift/Index/IndexSymbol.h"
+#include "swift/Refactoring/Refactoring.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Mutex.h"
@@ -44,15 +51,13 @@ namespace swift {
   class GenericSignature;
   enum class AccessorKind;
 
-namespace syntax {
-  class SourceFileSyntax;
-}
-
 namespace ide {
   class CodeCompletionCache;
+  class IDEInspectionInstance;
   class OnDiskCodeCompletionCache;
   class SourceEditConsumer;
-  enum class CodeCompletionDeclKind;
+  class SyntacticMacroExpansion;
+  enum class CodeCompletionDeclKind : uint8_t;
   enum class SyntaxNodeKind : uint8_t;
   enum class SyntaxStructureKind : uint8_t;
   enum class SyntaxStructureElementKind : uint8_t;
@@ -67,12 +72,15 @@ namespace ide {
 }
 
 namespace SourceKit {
+  class FileSystemProvider;
   class ImmutableTextSnapshot;
   typedef RefPtr<ImmutableTextSnapshot> ImmutableTextSnapshotRef;
   class SwiftASTManager;
   class SwiftLangSupport;
   class Context;
   class NotificationCenter;
+
+  using TypeContextKind = swift::ide::CodeCompletionContext::TypeContextKind;
 
 class SwiftEditorDocument :
     public ThreadSafeRefCountedBase<SwiftEditorDocument> {
@@ -83,27 +91,28 @@ class SwiftEditorDocument :
 public:
 
   SwiftEditorDocument(StringRef FilePath, SwiftLangSupport &LangSupport,
+       llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> fileSystem,
        swift::ide::CodeFormatOptions Options = swift::ide::CodeFormatOptions());
   ~SwiftEditorDocument();
 
-  ImmutableTextSnapshotRef initializeText(llvm::MemoryBuffer *Buf,
-                                          ArrayRef<const char *> Args,
-                                          bool ProvideSemanticInfo);
+  ImmutableTextSnapshotRef
+  initializeText(llvm::MemoryBuffer *Buf, ArrayRef<const char *> Args,
+                 bool ProvideSemanticInfo,
+                 llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> fileSystem);
   ImmutableTextSnapshotRef replaceText(unsigned Offset, unsigned Length,
                                        llvm::MemoryBuffer *Buf,
                                        bool ProvideSemanticInfo,
                                        std::string &error);
 
-  void updateSemaInfo();
+  void updateSemaInfo(SourceKitCancellationToken CancellationToken);
 
   void removeCachedAST();
 
   ImmutableTextSnapshotRef getLatestSnapshot() const;
 
-  void parse(ImmutableTextSnapshotRef Snapshot, SwiftLangSupport &Lang,
-             bool BuildSyntaxTree,
-             swift::SyntaxParsingCache *SyntaxCache = nullptr);
-  void readSyntaxInfo(EditorConsumer &consumer);
+  void resetSyntaxInfo(ImmutableTextSnapshotRef Snapshot,
+                       SwiftLangSupport &Lang);
+  void readSyntaxInfo(EditorConsumer &consumer, bool ReportDiags);
   void readSemanticInfo(ImmutableTextSnapshotRef Snapshot,
                         EditorConsumer& Consumer);
 
@@ -116,13 +125,10 @@ public:
   static void reportDocumentStructure(swift::SourceFile &SrcFile,
                                       EditorConsumer &Consumer);
 
-  const llvm::Optional<swift::syntax::SourceFileSyntax> &getSyntaxTree() const;
-
   std::string getFilePath() const;
-
-  /// Whether or not the AST stored for this document is up-to-date or just an
-  /// artifact of incremental syntax parsing
-  bool hasUpToDateAST() const;
+      
+  /// Returns the virtual filesystem associated with this document.
+  llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> getFileSystem() const;
 };
 
 typedef IntrusiveRefCntPtr<SwiftEditorDocument> SwiftEditorDocumentRef;
@@ -143,7 +149,10 @@ public:
   /// Looks up the document only by the path name that was given initially.
   SwiftEditorDocumentRef getByUnresolvedName(StringRef FilePath);
   /// Looks up the document by resolving symlinks in the paths.
-  SwiftEditorDocumentRef findByPath(StringRef FilePath);
+  /// If \p IsRealpath is \c true, then \p FilePath must already be
+  /// canonicalized to a realpath.
+  SwiftEditorDocumentRef findByPath(StringRef FilePath,
+                                    bool IsRealpath = false);
   SwiftEditorDocumentRef remove(StringRef FilePath);
 };
 
@@ -159,10 +168,11 @@ namespace CodeCompletion {
 class SessionCache : public ThreadSafeRefCountedBase<SessionCache> {
   std::unique_ptr<llvm::MemoryBuffer> buffer;
   std::vector<std::string> args;
+  llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> fileSystem;
   CompletionSink sink;
   std::vector<Completion *> sortedCompletions;
   CompletionKind completionKind;
-  bool completionHasExpectedTypes;
+  TypeContextKind typeContextKind;
   bool completionMayUseImplicitMemberExpr;
   FilterRules filterRules;
   llvm::sys::Mutex mtx;
@@ -170,21 +180,24 @@ class SessionCache : public ThreadSafeRefCountedBase<SessionCache> {
 public:
   SessionCache(CompletionSink &&sink,
                std::unique_ptr<llvm::MemoryBuffer> &&buffer,
-               std::vector<std::string> &&args, CompletionKind completionKind,
-               bool hasExpectedTypes, bool mayUseImplicitMemberExpr,
+               std::vector<std::string> &&args,
+               llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> fileSystem,
+               CompletionKind completionKind,
+               TypeContextKind typeContextKind, bool mayUseImplicitMemberExpr,
                FilterRules filterRules)
-      : buffer(std::move(buffer)), args(std::move(args)), sink(std::move(sink)),
-        completionKind(completionKind),
-        completionHasExpectedTypes(hasExpectedTypes),
+      : buffer(std::move(buffer)), args(std::move(args)),
+        fileSystem(std::move(fileSystem)), sink(std::move(sink)),
+        completionKind(completionKind), typeContextKind(typeContextKind),
         completionMayUseImplicitMemberExpr(mayUseImplicitMemberExpr),
         filterRules(std::move(filterRules)) {}
   void setSortedCompletions(std::vector<Completion *> &&completions);
   ArrayRef<Completion *> getSortedCompletions();
   llvm::MemoryBuffer *getBuffer();
   ArrayRef<std::string> getCompilerArgs();
+  llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> getFileSystem();
   const FilterRules &getFilterRules();
   CompletionKind getCompletionKind();
-  bool getCompletionHasExpectedTypes();
+  TypeContextKind getCompletionTypeContextKind();
   bool getCompletionMayUseImplicitMemberExpr();
 };
 typedef RefPtr<SessionCache> SessionCacheRef;
@@ -206,6 +219,18 @@ public:
   bool remove(StringRef name, unsigned offset);
 };
 } // end namespace CodeCompletion
+
+namespace TypeContextInfo {
+struct Options {
+  // TypeContextInfo doesn't receive any options at this point.
+};
+} // namespace TypeContextInfo
+
+namespace ConformingMethodList {
+struct Options {
+  // ConformingMethodList doesn't receive any options at this point.
+};
+} // namespace ConformingMethodList
 
 class SwiftInterfaceGenMap {
   llvm::StringMap<SwiftInterfaceGenContextRef> IFaceGens;
@@ -246,29 +271,63 @@ public:
   ~RequestRefactoringEditConsumer();
   void accept(swift::SourceManager &SM, swift::ide::RegionType RegionType,
               ArrayRef<swift::ide::Replacement> Replacements) override;
-  void handleDiagnostic(swift::SourceManager &SM, swift::SourceLoc Loc,
-                        swift::DiagnosticKind Kind,
-                        StringRef FormatString,
-                        ArrayRef<swift::DiagnosticArgument> FormatArgs,
+  void handleDiagnostic(swift::SourceManager &SM,
                         const swift::DiagnosticInfo &Info) override;
 };
 
-class RequestRenameRangeConsumer : public swift::ide::FindRenameRangesConsumer,
-                                   public swift::DiagnosticConsumer {
-  class Implementation;
-  Implementation &Impl;
+namespace compile {
+class Session {
+  swift::ide::CompileInstance Compiler;
 
 public:
-  RequestRenameRangeConsumer(CategorizedRenameRangesReceiver Receiver);
-  ~RequestRenameRangeConsumer();
-  void accept(swift::SourceManager &SM, swift::ide::RegionType RegionType,
-              ArrayRef<swift::ide::RenameRangeDetail> Ranges) override;
-  void handleDiagnostic(swift::SourceManager &SM, swift::SourceLoc Loc,
-                        swift::DiagnosticKind Kind,
-                        StringRef FormatString,
-                        ArrayRef<swift::DiagnosticArgument> FormatArgs,
-                        const swift::DiagnosticInfo &Info) override;
+  Session(const std::string &SwiftExecutablePath,
+          const std::string &RuntimeResourcePath,
+          const std::string &DiagnosticDocumentationPath,
+          std::shared_ptr<swift::PluginRegistry> Plugins)
+      : Compiler(SwiftExecutablePath, RuntimeResourcePath,
+                 DiagnosticDocumentationPath, Plugins) {}
+
+  bool
+  performCompile(llvm::ArrayRef<const char *> Args,
+                 llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> FileSystem,
+                 swift::DiagnosticConsumer *DiagC,
+                 std::shared_ptr<std::atomic<bool>> CancellationFlag) {
+    return Compiler.performCompile(Args, FileSystem, DiagC, CancellationFlag);
+  }
 };
+
+class SessionManager {
+  const std::string &SwiftExecutablePath;
+  const std::string &RuntimeResourcePath;
+  const std::string &DiagnosticDocumentationPath;
+  const std::shared_ptr<swift::PluginRegistry> Plugins;
+
+  llvm::StringMap<std::shared_ptr<Session>> sessions;
+  WorkQueue compileQueue{WorkQueue::Dequeuing::Concurrent,
+                         "sourcekit.swift.Compile"};
+  mutable llvm::sys::Mutex mtx;
+
+public:
+  SessionManager(const std::string &SwiftExecutablePath,
+                 const std::string &RuntimeResourcePath,
+                 const std::string &DiagnosticDocumentationPath,
+                 const std::shared_ptr<swift::PluginRegistry> Plugins)
+      : SwiftExecutablePath(SwiftExecutablePath),
+        RuntimeResourcePath(RuntimeResourcePath),
+        DiagnosticDocumentationPath(DiagnosticDocumentationPath),
+        Plugins(Plugins) {}
+
+  std::shared_ptr<Session> getSession(StringRef name);
+
+  void clearSession(StringRef name);
+
+  void performCompileAsync(
+      StringRef Name, ArrayRef<const char *> Args,
+      llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> fileSystem,
+      std::shared_ptr<std::atomic<bool>> CancellationFlag,
+      std::function<void(const RequestResult<CompilationResult> &)> Receiver);
+};
+} // namespace compile
 
 struct SwiftStatistics {
 #define SWIFT_STATISTIC(VAR, UID, DESC)                                        \
@@ -278,15 +337,24 @@ struct SwiftStatistics {
 
 class SwiftLangSupport : public LangSupport {
   std::shared_ptr<NotificationCenter> NotificationCtr;
+  /// The path of the swift-frontend executable.
+  /// Used to find clang relative to it.
+  std::string SwiftExecutablePath;
   std::string RuntimeResourcePath;
+  std::string DiagnosticDocumentationPath;
   std::shared_ptr<SwiftASTManager> ASTMgr;
   std::shared_ptr<SwiftEditorDocumentFileMap> EditorDocuments;
+  std::shared_ptr<RequestTracker> ReqTracker;
   SwiftInterfaceGenMap IFaceGenContexts;
   ThreadSafeRefCntPtr<SwiftCompletionCache> CCCache;
   ThreadSafeRefCntPtr<SwiftPopularAPI> PopularAPI;
   CodeCompletion::SessionCacheMap CCSessions;
   ThreadSafeRefCntPtr<SwiftCustomCompletions> CustomCompletions;
   std::shared_ptr<SwiftStatistics> Stats;
+  llvm::StringMap<std::unique_ptr<FileSystemProvider>> FileSystemProviders;
+  std::shared_ptr<swift::ide::IDEInspectionInstance> IDEInspectionInst;
+  std::shared_ptr<compile::SessionManager> CompileManager;
+  std::shared_ptr<swift::ide::SyntacticMacroExpansion> SyntacticMacroExpansions;
 
 public:
   explicit SwiftLangSupport(SourceKit::Context &SKCtx);
@@ -297,6 +365,9 @@ public:
   }
 
   StringRef getRuntimeResourcePath() const { return RuntimeResourcePath; }
+  StringRef getDiagnosticDocumentationPath() const {
+    return DiagnosticDocumentationPath;
+  }
 
   std::shared_ptr<SwiftASTManager> getASTManager() { return ASTMgr; }
 
@@ -306,13 +377,41 @@ public:
     return CCCache;
   }
 
-  /// Copy a memory buffer inserting '0' at the position of \c origBuf.
-  // TODO: Share with code completion.
-  static std::unique_ptr<llvm::MemoryBuffer>
-  makeCodeCompletionMemoryBuffer(const llvm::MemoryBuffer *origBuf,
-                                 unsigned &Offset,
-                                 const std::string bufferIdentifier);
+  std::shared_ptr<swift::ide::IDEInspectionInstance>
+  getIDEInspectionInstance() {
+    return IDEInspectionInst;
+  }
 
+  /// Returns the FileSystemProvider registered under Name, or nullptr if not
+  /// found.
+  FileSystemProvider *getFileSystemProvider(StringRef Name);
+
+  /// Registers the given FileSystemProvider under Name. The caller is
+  /// responsible for keeping FileSystemProvider alive at least as long as
+  /// this Context.
+  /// This should only be called during setup because it is not synchronized.
+  /// \param FileSystemProvider must be non-null
+  void setFileSystemProvider(StringRef Name, std::unique_ptr<FileSystemProvider> FileSystemProvider);
+
+  /// Returns the filesystem appropriate to use in a request with the given
+  /// \p vfsOptions and \p primaryFile.
+  ///
+  /// If \p vfsOptions is provided, returns a virtual filesystem created from
+  /// a registered FileSystemProvider, or nullptr if there is an error.
+  ///
+  /// If \p vfsOptions is None and \p primaryFile is provided, returns the
+  /// virtual filesystem associated with that editor document, if any.
+  ///
+  /// Otherwise, returns the real filesystem.
+  ///
+  /// \param vfsOptions Options to select and initialize the VFS, or None to
+  ///                   get the real file system.
+  /// \param error Set to a description of the error, if appropriate.
+  llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem>
+  getFileSystem(const llvm::Optional<VFSOptions> &vfsOptions,
+                llvm::Optional<StringRef> primaryFile, std::string &error);
+
+  static SourceKit::UIdent getUIDForDeclLanguage(const swift::Decl *D);
   static SourceKit::UIdent getUIDForDecl(const swift::Decl *D,
                                          bool IsRef = false);
   static SourceKit::UIdent getUIDForExtensionOfDecl(const swift::Decl *D);
@@ -342,7 +441,10 @@ public:
 
   static SourceKit::UIdent getUIDForRefactoringRangeKind(swift::ide::RefactoringRangeKind Kind);
 
-  static Optional<UIdent> getUIDForDeclAttribute(const swift::DeclAttribute *Attr);
+  static llvm::Optional<UIdent>
+  getUIDForDeclAttribute(const swift::DeclAttribute *Attr);
+
+  static SourceKit::UIdent getUIDForFormalAccessScope(const swift::AccessScope Scope);
 
   static std::vector<UIdent> UIDsFromDeclAttributes(const swift::DeclAttributes &Attrs);
 
@@ -381,14 +483,18 @@ public:
                                              swift::Type BaseTy,
                                              llvm::raw_ostream &OS);
 
+  static void printFullyAnnotatedDeclaration(const swift::ExtensionDecl *VD,
+                                             llvm::raw_ostream &OS);
+
   static void
   printFullyAnnotatedSynthesizedDeclaration(const swift::ValueDecl *VD,
                                             swift::TypeOrExtensionDecl Target,
                                             llvm::raw_ostream &OS);
 
   static void
-  printFullyAnnotatedGenericReq(const swift::GenericSignature *Sig,
-                                llvm::raw_ostream &OS);
+  printFullyAnnotatedSynthesizedDeclaration(const swift::ExtensionDecl *ED,
+                                            swift::TypeOrExtensionDecl Target,
+                                            llvm::raw_ostream &OS);
 
   /// Print 'description' or 'sourcetext' the given \p VD to \p OS. If
   /// \p usePlaceholder is \c true, call argument positions are substituted with
@@ -401,28 +507,76 @@ public:
   /// returns the original path;
   static std::string resolvePathSymlinks(StringRef FilePath);
 
+  /// The result returned from \c performWithParamsToCompletionLikeOperation.
+  struct CompletionLikeOperationParams {
+    swift::CompilerInvocation &Invocation;
+    llvm::MemoryBuffer *completionBuffer;
+    swift::DiagnosticConsumer *DiagC;
+    std::shared_ptr<std::atomic<bool>> CancellationFlag;
+  };
+
+  /// Execute \p PerformOperation synchronously with the parameters necessary to
+  /// invoke a completion-like operation on \c IDEInspectionInstance.
+  /// If \p InsertCodeCompletionToken is \c true, a code completion token will
+  /// be inserted into the source buffer, if \p InsertCodeCompletionToken is \c
+  /// false, the buffer is left as-is.
+  void performWithParamsToCompletionLikeOperation(
+      llvm::MemoryBuffer *UnresolvedInputFile, unsigned Offset,
+      bool InsertCodeCompletionToken, ArrayRef<const char *> Args,
+      llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> FileSystem,
+      SourceKitCancellationToken CancellationToken,
+      llvm::function_ref<
+          void(swift::ide::CancellableResult<CompletionLikeOperationParams>)>
+          PerformOperation);
+
   //==========================================================================//
   // LangSupport Interface
   //==========================================================================//
 
+  void globalConfigurationUpdated(std::shared_ptr<GlobalConfig> Config) override;
+
+  void dependencyUpdated() override;
+
+  void demangleNames(
+      ArrayRef<const char *> MangledNames, bool Simplified,
+      std::function<void(const RequestResult<ArrayRef<std::string>> &)>
+          Receiver) override;
+
+  void mangleSimpleClassNames(
+      ArrayRef<std::pair<StringRef, StringRef>> ModuleClassPairs,
+      std::function<void(const RequestResult<ArrayRef<std::string>> &)>
+          Receiver) override;
+
   void indexSource(StringRef Filename, IndexingConsumer &Consumer,
-                   ArrayRef<const char *> Args, StringRef Hash) override;
+                   ArrayRef<const char *> Args) override;
+
+  void indexToStore(StringRef InputFile,
+                    ArrayRef<const char *> Args,
+                    IndexStoreOptions Opts,
+                    SourceKitCancellationToken CancellationToken,
+                    IndexToStoreReceiver Receiver) override;
 
   void codeComplete(llvm::MemoryBuffer *InputBuf, unsigned Offset,
+                    OptionsDictionary *options,
                     SourceKit::CodeCompletionConsumer &Consumer,
-                    ArrayRef<const char *> Args) override;
+                    ArrayRef<const char *> Args,
+                    llvm::Optional<VFSOptions> vfsOptions,
+                    SourceKitCancellationToken CancellationToken) override;
 
   void codeCompleteOpen(StringRef name, llvm::MemoryBuffer *inputBuf,
                         unsigned offset, OptionsDictionary *options,
                         ArrayRef<FilterRule> rawFilterRules,
                         GroupedCodeCompletionConsumer &consumer,
-                        ArrayRef<const char *> args) override;
+                        ArrayRef<const char *> args,
+                        llvm::Optional<VFSOptions> vfsOptions,
+                        SourceKitCancellationToken CancellationToken) override;
 
   void codeCompleteClose(StringRef name, unsigned offset,
                          GroupedCodeCompletionConsumer &consumer) override;
 
   void codeCompleteUpdate(StringRef name, unsigned offset,
                           OptionsDictionary *options,
+                          SourceKitCancellationToken CancellationToken,
                           GroupedCodeCompletionConsumer &consumer) override;
 
   void codeCompleteCacheOnDisk(StringRef path) override;
@@ -434,16 +588,15 @@ public:
   codeCompleteSetCustom(ArrayRef<CustomCompletionInfo> completions) override;
 
   void editorOpen(StringRef Name, llvm::MemoryBuffer *Buf,
-                  EditorConsumer &Consumer,
-                  ArrayRef<const char *> Args) override;
+                  EditorConsumer &Consumer, ArrayRef<const char *> Args,
+                  llvm::Optional<VFSOptions> vfsOptions) override;
 
-  void editorOpenInterface(EditorConsumer &Consumer,
-                           StringRef Name,
+  void editorOpenInterface(EditorConsumer &Consumer, StringRef Name,
                            StringRef ModuleName,
-                           Optional<StringRef> Group,
+                           llvm::Optional<StringRef> Group,
                            ArrayRef<const char *> Args,
                            bool SynthesizedExtensions,
-                           Optional<StringRef> InterestedUSR) override;
+                           llvm::Optional<StringRef> InterestedUSR) override;
 
   void editorOpenTypeInterface(EditorConsumer &Consumer,
                                ArrayRef<const char *> Args,
@@ -457,10 +610,10 @@ public:
                                  bool SynthesizedExtensions,
                                  StringRef swiftVersion) override;
 
-  void editorOpenSwiftSourceInterface(StringRef Name,
-                                      StringRef SourceName,
-                                      ArrayRef<const char *> Args,
-                                      std::shared_ptr<EditorConsumer> Consumer) override;
+  void editorOpenSwiftSourceInterface(
+      StringRef Name, StringRef SourceName, ArrayRef<const char *> Args,
+      SourceKitCancellationToken CancellationToken,
+      std::shared_ptr<EditorConsumer> Consumer) override;
 
   void editorClose(StringRef Name, bool RemoveCache) override;
 
@@ -483,51 +636,93 @@ public:
   void editorExpandPlaceholder(StringRef Name, unsigned Offset, unsigned Length,
                                EditorConsumer &Consumer) override;
 
-  void getCursorInfo(StringRef Filename, unsigned Offset,
-                     unsigned Length, bool Actionables,
-                     bool CancelOnSubsequentRequest,
+  void getCursorInfo(StringRef PrimaryFilePath, StringRef InputBufferName,
+                     unsigned Offset, unsigned Length, bool Actionables,
+                     bool SymbolGraph, bool CancelOnSubsequentRequest,
                      ArrayRef<const char *> Args,
-                 std::function<void(const CursorInfoData &)> Receiver) override;
+                     llvm::Optional<VFSOptions> vfsOptions,
+                     SourceKitCancellationToken CancellationToken,
+                     std::function<void(const RequestResult<CursorInfoData> &)>
+                         Receiver) override;
 
-  void getNameInfo(StringRef Filename, unsigned Offset,
-                   NameTranslatingInfo &Input,
-                   ArrayRef<const char *> Args,
-                   std::function<void(const NameTranslatingInfo &)> Receiver) override;
+  void
+  getDiagnostics(StringRef PrimaryFilePath, ArrayRef<const char *> Args,
+                 llvm::Optional<VFSOptions> VfsOptions,
+                 SourceKitCancellationToken CancellationToken,
+                 std::function<void(const RequestResult<DiagnosticsResult> &)>
+                     Receiver) override;
 
-  void getRangeInfo(StringRef Filename, unsigned Offset, unsigned Length,
-                    bool CancelOnSubsequentRequest, ArrayRef<const char *> Args,
-                    std::function<void(const RangeInfo&)> Receiver) override;
+  void getSemanticTokens(
+      StringRef PrimaryFilePath, StringRef InputBufferName,
+      ArrayRef<const char *> Args, llvm::Optional<VFSOptions> VfsOptions,
+      SourceKitCancellationToken CancellationToken,
+      std::function<void(const RequestResult<SemanticTokensResult> &)> Receiver)
+      override;
+
+  void getNameInfo(
+      StringRef PrimaryFilePath, StringRef InputBufferName, unsigned Offset,
+      NameTranslatingInfo &Input, ArrayRef<const char *> Args,
+      SourceKitCancellationToken CancellationToken,
+      std::function<void(const RequestResult<NameTranslatingInfo> &)> Receiver)
+      override;
+
+  void getRangeInfo(
+      StringRef PrimaryFilePath, StringRef InputBufferName, unsigned Offset,
+      unsigned Length, bool CancelOnSubsequentRequest,
+      ArrayRef<const char *> Args, SourceKitCancellationToken CancellationToken,
+      std::function<void(const RequestResult<RangeInfo> &)> Receiver) override;
 
   void getCursorInfoFromUSR(
-      StringRef Filename, StringRef USR, bool CancelOnSubsequentRequest,
-      ArrayRef<const char *> Args,
-      std::function<void(const CursorInfoData &)> Receiver) override;
+      StringRef PrimaryFilePath, StringRef InputBufferName, StringRef USR,
+      bool CancelOnSubsequentRequest, ArrayRef<const char *> Args,
+      llvm::Optional<VFSOptions> vfsOptions,
+      SourceKitCancellationToken CancellationToken,
+      std::function<void(const RequestResult<CursorInfoData> &)> Receiver)
+      override;
 
-  void findRelatedIdentifiersInFile(StringRef Filename, unsigned Offset,
-                                    bool CancelOnSubsequentRequest,
-                                    ArrayRef<const char *> Args,
-              std::function<void(const RelatedIdentsInfo &)> Receiver) override;
+  void findRelatedIdentifiersInFile(
+      StringRef PrimaryFilePath, StringRef InputBufferName, unsigned Offset,
+      bool IncludeNonEditableBaseNames, bool CancelOnSubsequentRequest,
+      ArrayRef<const char *> Args, SourceKitCancellationToken CancellationToken,
+      std::function<void(const RequestResult<RelatedIdentsResult> &)> Receiver)
+      override;
 
-  void syntacticRename(llvm::MemoryBuffer *InputBuf,
-                       ArrayRef<RenameLocations> RenameLocations,
-                       ArrayRef<const char*> Args,
-                       CategorizedEditsReceiver Receiver) override;
+  void findActiveRegionsInFile(
+      StringRef PrimaryFilePath, StringRef InputBufferName,
+      ArrayRef<const char *> Args, SourceKitCancellationToken CancellationToken,
+      std::function<void(const RequestResult<ActiveRegionsInfo> &)> Receiver)
+      override;
 
-  void findRenameRanges(llvm::MemoryBuffer *InputBuf,
-                        ArrayRef<RenameLocations> RenameLocations,
-                        ArrayRef<const char *> Args,
-                        CategorizedRenameRangesReceiver Receiver) override;
+  CancellableResult<std::vector<CategorizedRenameRanges>>
+  findRenameRanges(llvm::MemoryBuffer *InputBuf,
+                   ArrayRef<RenameLoc> RenameLocations,
+                   ArrayRef<const char *> Args) override;
 
   void findLocalRenameRanges(StringRef Filename, unsigned Line, unsigned Column,
                              unsigned Length, ArrayRef<const char *> Args,
+                             SourceKitCancellationToken CancellationToken,
                              CategorizedRenameRangesReceiver Receiver) override;
 
-  void collectExpressionTypes(StringRef FileName, ArrayRef<const char *> Args,
-                              ArrayRef<const char *> ExpectedProtocols,
-                              std::function<void(const ExpressionTypesInFile&)> Receiver) override;
+  void collectExpressionTypes(
+      StringRef PrimaryFilePath, StringRef InputBufferName,
+      ArrayRef<const char *> Args, ArrayRef<const char *> ExpectedProtocols,
+      bool FullyQualified, bool CanonicalType,
+      SourceKitCancellationToken CancellationToken,
+      std::function<void(const RequestResult<ExpressionTypesInFile> &)>
+          Receiver) override;
 
-  void semanticRefactoring(StringRef Filename, SemanticRefactoringInfo Info,
-                           ArrayRef<const char*> Args,
+  void collectVariableTypes(
+      StringRef PrimaryFilePath, StringRef InputBufferName,
+      ArrayRef<const char *> Args, llvm::Optional<unsigned> Offset,
+      llvm::Optional<unsigned> Length, bool FullyQualified,
+      SourceKitCancellationToken CancellationToken,
+      std::function<void(const RequestResult<VariableTypesInFile> &)> Receiver)
+      override;
+
+  void semanticRefactoring(StringRef PrimaryFilePath,
+                           SemanticRefactoringInfo Info,
+                           ArrayRef<const char *> Args,
+                           SourceKitCancellationToken CancellationToken,
                            CategorizedEditsReceiver Receiver) override;
 
   void getDocInfo(llvm::MemoryBuffer *InputBuf,
@@ -539,19 +734,39 @@ public:
       findUSRRange(StringRef DocumentName, StringRef USR) override;
 
   void findInterfaceDocument(StringRef ModuleName, ArrayRef<const char *> Args,
-               std::function<void(const InterfaceDocInfo &)> Receiver) override;
+               std::function<void(const RequestResult<InterfaceDocInfo> &)> Receiver) override;
 
   void findModuleGroups(StringRef ModuleName, ArrayRef<const char *> Args,
-               std::function<void(ArrayRef<StringRef>, StringRef Error)> Receiver) override;
+               std::function<void(const RequestResult<ArrayRef<StringRef>> &)> Receiver) override;
 
   void getExpressionContextInfo(llvm::MemoryBuffer *inputBuf, unsigned Offset,
+                                OptionsDictionary *options,
                                 ArrayRef<const char *> Args,
-                                TypeContextInfoConsumer &Consumer) override;
+                                SourceKitCancellationToken CancellationToken,
+                                TypeContextInfoConsumer &Consumer,
+                                llvm::Optional<VFSOptions> vfsOptions) override;
 
   void getConformingMethodList(llvm::MemoryBuffer *inputBuf, unsigned Offset,
+                               OptionsDictionary *options,
                                ArrayRef<const char *> Args,
                                ArrayRef<const char *> ExpectedTypes,
-                               ConformingMethodListConsumer &Consumer) override;
+                               SourceKitCancellationToken CancellationToken,
+                               ConformingMethodListConsumer &Consumer,
+                               llvm::Optional<VFSOptions> vfsOptions) override;
+
+  void expandMacroSyntactically(llvm::MemoryBuffer *inputBuf,
+                                ArrayRef<const char *> args,
+                                ArrayRef<MacroExpansionInfo> expansions,
+                                CategorizedEditsReceiver receiver) override;
+
+  void
+  performCompile(StringRef Name, ArrayRef<const char *> Args,
+                 llvm::Optional<VFSOptions> vfsOptions,
+                 SourceKitCancellationToken CancellationToken,
+                 std::function<void(const RequestResult<CompilationResult> &)>
+                     Receiver) override;
+
+  void closeCompile(StringRef Name) override;
 
   void getStatistics(StatisticsReceiver) override;
 
@@ -585,6 +800,10 @@ public:
 
 /// Disable expensive SIL options which do not affect indexing or diagnostics.
 void disableExpensiveSILOptions(swift::SILOptions &Opts);
+
+swift::SourceFile *retrieveInputFile(StringRef inputBufferName,
+                                     const swift::CompilerInstance &CI,
+                                     bool haveRealPath = false);
 
 } // namespace SourceKit
 

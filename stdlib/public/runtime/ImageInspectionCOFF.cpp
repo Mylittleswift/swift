@@ -13,7 +13,6 @@
 #if !defined(__ELF__) && !defined(__MACH__)
 
 #include "ImageInspection.h"
-#include "ImageInspectionCOFF.h"
 
 #if defined(__CYGWIN__)
 #include <dlfcn.h>
@@ -24,154 +23,67 @@
 #include <DbgHelp.h>
 #endif
 
+#include "swift/Runtime/Win32.h"
+#include "swift/Threading/Mutex.h"
+
 using namespace swift;
 
-namespace {
-static const swift::MetadataSections *registered = nullptr;
+#if defined(_WIN32)
+static LazyMutex mutex;
+static HANDLE dbgHelpHandle = nullptr;
 
-void record(const swift::MetadataSections *sections) {
-  if (registered == nullptr) {
-    registered = sections;
-    sections->next = sections->prev = sections;
-  } else {
-    registered->prev->next = sections;
-    sections->next = registered;
-    sections->prev = registered->prev;
-    registered->prev = sections;
-  }
+void _swift_win32_withDbgHelpLibrary(
+  void (* body)(HANDLE hProcess, void *context), void *context) {
+  mutex.withLock([=] () {
+    // If we have not previously created a handle to use with the library, do so
+    // now. This handle belongs to the Swift runtime and should not be closed by
+    // `body` (or anybody else.)
+    if (!dbgHelpHandle) {
+      // Per the documentation for the Debug Help library, we should not use the
+      // current process handle because other subsystems might also use it and
+      // end up stomping on each other. So we'll try to duplicate that handle to
+      // get a unique one that still fulfills the needs of the library. If that
+      // fails (presumably because the current process doesn't have the
+      // PROCESS_DUP_HANDLE access right) then fall back to using the original
+      // process handle and hope nobody else is using it too.
+      HANDLE currentProcess = GetCurrentProcess();
+      if (!DuplicateHandle(currentProcess, currentProcess, currentProcess,
+                           &dbgHelpHandle, 0, false, DUPLICATE_SAME_ACCESS)) {
+        dbgHelpHandle = currentProcess;
+      }
+    }
+
+    // If we have not previously initialized the Debug Help library, do so now.
+    bool isDbgHelpInitialized = false;
+    if (dbgHelpHandle) {
+      isDbgHelpInitialized = SymInitialize(dbgHelpHandle, nullptr, true);
+    }
+
+    if (isDbgHelpInitialized) {
+      // Set the library's options to what the Swift runtime generally expects.
+      // If the options aren't going to change, we can skip the call and save a
+      // few CPU cycles on the library call.
+      constexpr const DWORD options = SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS;
+      DWORD oldOptions = SymGetOptions();
+      if (oldOptions != options) {
+        SymSetOptions(options);
+      }
+
+      body(dbgHelpHandle, context);
+
+      // Before returning, reset the library's options back to their previous
+      // value. No need to call if the options didn't change because LazyMutex
+      // is not recursive, so there shouldn't be an outer call expecting the
+      // original options, and a subsequent call to this function will set them
+      // to the defaults above.
+      if (oldOptions != options) {
+        SymSetOptions(oldOptions);
+      }
+    } else {
+      body(nullptr, context);
+    }
+  });
 }
-}
-
-void swift::initializeProtocolLookup() {
-  const swift::MetadataSections *sections = registered;
-  while (true) {
-    const swift::MetadataSections::Range &protocols =
-      sections->swift5_protocols;
-    if (protocols.length)
-      addImageProtocolsBlockCallback(reinterpret_cast<void *>(protocols.start),
-                                     protocols.length);
-
-    if (sections->next == registered)
-      break;
-    sections = sections->next;
-  }
-}
-
-void swift::initializeProtocolConformanceLookup() {
-  const swift::MetadataSections *sections = registered;
-  while (true) {
-    const swift::MetadataSections::Range &conformances =
-        sections->swift5_protocol_conformances;
-    if (conformances.length)
-      addImageProtocolConformanceBlockCallback(reinterpret_cast<void *>(conformances.start),
-                                               conformances.length);
-
-    if (sections->next == registered)
-      break;
-    sections = sections->next;
-  }
-}
-
-void swift::initializeTypeMetadataRecordLookup() {
-  const swift::MetadataSections *sections = registered;
-  while (true) {
-    const swift::MetadataSections::Range &type_metadata =
-        sections->swift5_type_metadata;
-    if (type_metadata.length)
-      addImageTypeMetadataRecordBlockCallback(reinterpret_cast<void *>(type_metadata.start),
-                                              type_metadata.length);
-
-    if (sections->next == registered)
-      break;
-    sections = sections->next;
-  }
-}
-
-void swift::initializeDynamicReplacementLookup() {
-}
-
-SWIFT_RUNTIME_EXPORT
-void swift_addNewDSOImage(const void *addr) {
-  const swift::MetadataSections *sections =
-      static_cast<const swift::MetadataSections *>(addr);
-
-  record(sections);
-
-  const auto &protocols_section = sections->swift5_protocols;
-  const void *protocols =
-      reinterpret_cast<void *>(protocols_section.start);
-  if (protocols_section.length)
-    addImageProtocolsBlockCallback(protocols, protocols_section.length);
-
-  const auto &protocol_conformances = sections->swift5_protocol_conformances;
-  const void *conformances =
-      reinterpret_cast<void *>(protocol_conformances.start);
-  if (protocol_conformances.length)
-    addImageProtocolConformanceBlockCallback(conformances,
-                                             protocol_conformances.length);
-
-  const auto &type_metadata = sections->swift5_type_metadata;
-  const void *metadata = reinterpret_cast<void *>(type_metadata.start);
-  if (type_metadata.length)
-    addImageTypeMetadataRecordBlockCallback(metadata, type_metadata.length);
-
-  const auto &dynamic_replacements = sections->swift5_repl;
-  const auto *replacements =
-      reinterpret_cast<void *>(dynamic_replacements.start);
-  if (dynamic_replacements.length)
-    addImageDynamicReplacementBlockCallback(replacements, dynamic_replacements.length);
-
-}
-
-int swift::lookupSymbol(const void *address, SymbolInfo *info) {
-#if defined(__CYGWIN__)
-  Dl_info dlinfo;
-  if (dladdr(address, &dlinfo) == 0) {
-    return 0;
-  }
-
-  info->fileName = dlinfo.dli_fname;
-  info->baseAddress = dlinfo.dli_fbase;
-  info->symbolName = dli_info.dli_sname;
-  info->symbolAddress = dli_saddr;
-  return 1;
-#elif defined(_WIN32)
-  static const constexpr size_t kSymbolMaxNameLen = 1024;
-  static bool bInitialized = false;
-
-  if (bInitialized == false) {
-    if (SymInitialize(GetCurrentProcess(), /*UserSearchPath=*/NULL,
-                      /*fInvadeProcess=*/TRUE) == FALSE)
-      return 0;
-    bInitialized = true;
-  }
-
-  char buffer[sizeof(SYMBOL_INFO) + kSymbolMaxNameLen];
-  PSYMBOL_INFO pSymbol = reinterpret_cast<PSYMBOL_INFO>(buffer);
-  pSymbol->SizeOfStruct = sizeof(SYMBOL_INFO);
-  pSymbol->MaxNameLen = kSymbolMaxNameLen;
-
-  DWORD64 dwDisplacement = 0;
-
-  if (SymFromAddr(GetCurrentProcess(), reinterpret_cast<const DWORD64>(address),
-                  &dwDisplacement, pSymbol) == FALSE)
-    return 0;
-
-  info->fileName = NULL;
-  info->baseAddress = reinterpret_cast<void *>(pSymbol->ModBase);
-  info->symbolName.reset(_strdup(pSymbol->Name));
-  info->symbolAddress = reinterpret_cast<void *>(pSymbol->Address);
-
-  return 1;
-#else
-  return 0;
-#endif // defined(__CYGWIN__) || defined(_WIN32)
-}
-
-// This is only used for backward deployment hooks, which we currently only support for
-// MachO. Add a stub here to make sure it still compiles.
-void *swift::lookupSection(const char *segment, const char *section, size_t *outSize) {
-  return nullptr;
-}
+#endif
 
 #endif // !defined(__ELF__) && !defined(__MACH__)

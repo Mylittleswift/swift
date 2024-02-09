@@ -28,8 +28,8 @@ public func accessIntTwice() {
 // CHECK-LABEL: } // end sil function '$s26access_enforcement_options0A8IntTwiceyyF'
 
 // closure #1 in accessIntTwice()
-// CHECK-LABEL: sil private @$s26access_enforcement_options0A8IntTwiceyyFyycfU_ : $@convention(thin) (@guaranteed { var Int }) -> () {
-// CHECK: bb0(%0 : ${ var Int }):
+// CHECK-LABEL: sil {{.*}}@$s26access_enforcement_options0A8IntTwiceyyFyycfU_ : $@convention(thin) (@guaranteed { var Int }) -> () {
+// CHECK: bb0(%0 : @closureCapture ${ var Int }):
 // CHECK: [[PROJ:%.*]] = project_box %0 : ${ var Int }, 0
 // NONE: [[ACCESS:%.*]] = begin_access [modify] [dynamic] [[PROJ]] : $*Int
 // OPT: [[ACCESS:%.*]] = begin_access [modify] [dynamic] [no_nested_conflict] [[PROJ]] : $*Int

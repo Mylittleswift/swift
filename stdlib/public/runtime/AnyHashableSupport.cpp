@@ -10,15 +10,18 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/Runtime/Config.h"
+#include "Private.h"
+#include "SwiftHashableSupport.h"
+#include "SwiftValue.h"
 #include "swift/Basic/Lazy.h"
+#include "swift/Runtime/Casting.h"
 #include "swift/Runtime/Concurrent.h"
+#include "swift/Runtime/Config.h"
 #include "swift/Runtime/Debug.h"
 #include "swift/Runtime/HeapObject.h"
-#include "swift/Runtime/Casting.h"
-#include "Private.h"
-#include "SwiftValue.h"
-#include "SwiftHashableSupport.h"
+#include "swift/shims/Visibility.h"
+
+#include <new>
 
 using namespace swift;
 using namespace swift::hashable_support;
@@ -28,6 +31,10 @@ struct HashableConformanceKey {
   /// The lookup key, the metadata of a type that is possibly derived
   /// from a type that conforms to `Hashable`.
   const Metadata *derivedType;
+
+  friend llvm::hash_code hash_value(const HashableConformanceKey &key) {
+    return llvm::hash_value(key.derivedType);
+  }
 };
 
 struct HashableConformanceEntry {
@@ -47,12 +54,12 @@ struct HashableConformanceEntry {
       : derivedType(key.derivedType),
         baseTypeThatConformsToHashable(baseTypeThatConformsToHashable) {}
 
-  int compareWithKey(const HashableConformanceKey &key) const {
-    if (key.derivedType != derivedType) {
-      return (uintptr_t(key.derivedType) < uintptr_t(derivedType) ? -1 : 1);
-    } else {
-      return 0;
-    }
+  bool matchesKey(const HashableConformanceKey &key) {
+    return derivedType == key.derivedType;
+  }
+
+  friend llvm::hash_code hash_value(const HashableConformanceEntry &value) {
+    return hash_value(HashableConformanceKey{value.derivedType});
   }
 
   static size_t
@@ -69,31 +76,44 @@ struct HashableConformanceEntry {
 
 // FIXME(performance): consider merging this cache into the regular
 // protocol conformance cache.
-static ConcurrentMap<HashableConformanceEntry, /*Destructor*/ false>
-  HashableConformances;
+static ConcurrentReadableHashMap<HashableConformanceEntry> HashableConformances;
 
-template<bool KnownToConformToHashable>
-LLVM_ATTRIBUTE_ALWAYS_INLINE
-static const Metadata *findHashableBaseTypeImpl(const Metadata *type) {
+template <bool KnownToConformToHashable>
+SWIFT_ALWAYS_INLINE static const Metadata *
+findHashableBaseTypeImpl(const Metadata *type) {
   // Check the cache first.
-  if (HashableConformanceEntry *entry =
-          HashableConformances.find(HashableConformanceKey{type})) {
-    return entry->baseTypeThatConformsToHashable;
+  {
+    auto snapshot = HashableConformances.snapshot();
+    if (const HashableConformanceEntry *entry =
+            snapshot.find(HashableConformanceKey{type})) {
+      return entry->baseTypeThatConformsToHashable;
+    }
   }
 
   auto witnessTable =
-    swift_conformsToProtocol(type, &HashableProtocolDescriptor);
+    swift_conformsToProtocolCommon(type, &HashableProtocolDescriptor);
   if (!KnownToConformToHashable && !witnessTable) {
     // Don't cache the negative response because we don't invalidate
     // this cache when a new conformance is loaded dynamically.
     return nullptr;
   }
   // By this point, `type` is known to conform to `Hashable`.
-  const auto *conformance = witnessTable->Description;
+#if SWIFT_STDLIB_USE_RELATIVE_PROTOCOL_WITNESS_TABLES
+  const auto *conformance = lookThroughOptionalConditionalWitnessTable(
+    reinterpret_cast<const RelativeWitnessTable*>(witnessTable))
+    ->getDescription();
+#else
+  const auto *conformance = witnessTable->getDescription();
+#endif
   const Metadata *baseTypeThatConformsToHashable =
     findConformingSuperclass(type, conformance);
-  HashableConformances.getOrInsert(HashableConformanceKey{type},
-                                   baseTypeThatConformsToHashable);
+  HashableConformanceKey key{type};
+  HashableConformances.getOrInsert(key, [&](HashableConformanceEntry *entry,
+                                            bool created) {
+    if (created)
+      ::new (entry) HashableConformanceEntry(key, baseTypeThatConformsToHashable);
+    return true; // Keep the new entry.
+  });
   return baseTypeThatConformsToHashable;
 }
 
@@ -141,7 +161,8 @@ void _swift_makeAnyHashableUpcastingToHashableBaseType(
   switch (type->getKind()) {
   case MetadataKind::Class:
   case MetadataKind::ObjCClassWrapper:
-  case MetadataKind::ForeignClass: {
+  case MetadataKind::ForeignClass:
+  case MetadataKind::ForeignReferenceType: {
 #if SWIFT_OBJC_INTEROP
     id srcObject;
     memcpy(&srcObject, value, sizeof(id));
@@ -154,7 +175,7 @@ void _swift_makeAnyHashableUpcastingToHashableBaseType(
           getValueFromSwiftValue(srcSwiftValue);
 
       if (auto unboxedHashableWT =
-              swift_conformsToProtocol(unboxedType, &HashableProtocolDescriptor)) {
+              swift_conformsToProtocolCommon(unboxedType, &HashableProtocolDescriptor)) {
         _swift_makeAnyHashableUpcastingToHashableBaseType(
             const_cast<OpaqueValue *>(unboxedValue), anyHashableResultPointer,
             unboxedType, unboxedHashableWT);

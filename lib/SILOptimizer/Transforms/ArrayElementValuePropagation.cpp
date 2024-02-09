@@ -67,7 +67,7 @@ class ArrayAllocation {
   /// A map of Array indices to element values
   llvm::DenseMap<uint64_t, SILValue> ElementValueMap;
 
-  bool mapInitializationStores(SILValue ElementBuffer);
+  bool mapInitializationStores(ArraySemanticsCall arrayUninitCall);
   bool recursivelyCollectUses(ValueBase *Def);
   bool replacementsAreValid();
 
@@ -93,64 +93,16 @@ public:
 };
 
 /// Map the indices of array element initialization stores to their values.
-bool ArrayAllocation::mapInitializationStores(SILValue ElementBuffer) {
-  assert(ElementBuffer &&
-         "Must have identified an array element storage pointer");
-
-  // Match initialization stores.
-  // %83 = struct_extract %element_buffer : $UnsafeMutablePointer<Int>
-  // %84 = pointer_to_address %83 : $Builtin.RawPointer to strict $*Int
-  // store %85 to %84 : $*Int
-  // %87 = integer_literal $Builtin.Word, 1
-  // %88 = index_addr %84 : $*Int, %87 : $Builtin.Word
-  // store %some_value to %88 : $*Int
-
-  auto *UnsafeMutablePointerExtract =
-      dyn_cast_or_null<StructExtractInst>(getSingleNonDebugUser(ElementBuffer));
-  if (!UnsafeMutablePointerExtract)
+bool ArrayAllocation::mapInitializationStores(
+    ArraySemanticsCall arrayUninitCall) {
+  llvm::DenseMap<uint64_t, StoreInst *> elementStoreMap;
+  if (!arrayUninitCall.mapInitializationStores(elementStoreMap))
     return false;
-  auto *PointerToAddress = dyn_cast_or_null<PointerToAddressInst>(
-      getSingleNonDebugUser(UnsafeMutablePointerExtract));
-  if (!PointerToAddress)
-    return false;
-
-  // Match the stores. We can have either a store directly to the address or
-  // to an index_addr projection.
-  for (auto *Op : PointerToAddress->getUses()) {
-    auto *Inst = Op->getUser();
-
-    // Store to the base.
-    auto *SI = dyn_cast<StoreInst>(Inst);
-    if (SI && SI->getDest() == PointerToAddress) {
-      // We have already seen an entry for this index bail.
-      if (ElementValueMap.count(0))
-        return false;
-      ElementValueMap[0] = SI->getSrc();
-      continue;
-    } else if (SI)
-      return false;
-
-    // Store an index_addr projection.
-    auto *IndexAddr = dyn_cast<IndexAddrInst>(Inst);
-    if (!IndexAddr)
-      return false;
-    SI = dyn_cast_or_null<StoreInst>(getSingleNonDebugUser(IndexAddr));
-    if (!SI || SI->getDest() != IndexAddr)
-      return false;
-    auto *Index = dyn_cast<IntegerLiteralInst>(IndexAddr->getIndex());
-    if (!Index)
-      return false;
-    auto IndexVal = Index->getValue();
-    // Let's not blow up our map.
-    if (IndexVal.getActiveBits() > 16)
-      return false;
-    // Already saw an entry.
-    if (ElementValueMap.count(IndexVal.getZExtValue()))
-      return false;
-
-    ElementValueMap[IndexVal.getZExtValue()] = SI->getSrc();
-  }
-  return !ElementValueMap.empty();
+  // Extract the SIL values of the array elements from the stores.
+  ElementValueMap.grow(elementStoreMap.size());
+  for (auto keyValue : elementStoreMap)
+    ElementValueMap[keyValue.getFirst()] = keyValue.getSecond()->getSrc();
+  return true;
 }
 
 bool ArrayAllocation::replacementsAreValid() {
@@ -170,12 +122,27 @@ bool ArrayAllocation::replacementsAreValid() {
 /// Recursively look at all uses of this definition. Abort if the array value
 /// could escape or be changed. Collect all uses that are calls to array.count.
 bool ArrayAllocation::recursivelyCollectUses(ValueBase *Def) {
+  LLVM_DEBUG(llvm::dbgs() << "Collecting uses of:");
+  LLVM_DEBUG(Def->dump());
+
   for (auto *Opd : Def->getUses()) {
     auto *User = Opd->getUser();
     // Ignore reference counting and debug instructions.
-    if (isa<RefCountingInst>(User) ||
-        isa<DebugValueInst>(User))
+    if (isa<RefCountingInst>(User) || isa<DebugValueInst>(User) ||
+        isa<DestroyValueInst>(User) || isa<EndBorrowInst>(User))
       continue;
+
+    if (auto *CVI = dyn_cast<CopyValueInst>(User)) {
+      if (!recursivelyCollectUses(CVI))
+        return false;
+      continue;
+    }
+
+    if (auto *BBI = dyn_cast<BeginBorrowInst>(User)) {
+      if (!recursivelyCollectUses(BBI))
+        return false;
+      continue;
+    }
 
     // Array value projection.
     if (auto *SEI = dyn_cast<StructExtractInst>(User)) {
@@ -184,22 +151,32 @@ bool ArrayAllocation::recursivelyCollectUses(ValueBase *Def) {
       continue;
     }
 
-    // Check array semantic calls.
-    ArraySemanticsCall ArrayOp(User);
-    if (ArrayOp) {
-      if (ArrayOp.getKind() == ArrayCallKind::kAppendContentsOf) {
-        AppendContentsOfCalls.push_back(ArrayOp);
-        continue;
-      } else if (ArrayOp.getKind() == ArrayCallKind::kGetElement) {
-        GetElementCalls.insert(ArrayOp);
-        continue;
-      } else if (ArrayOp.doesNotChangeArray()) {
-        continue;
-      }
+    if (auto *MDI = dyn_cast<MarkDependenceInst>(User)) {
+      if (Def != MDI->getBase())
+        return false;
+      continue;
     }
 
-    // An operation that escapes or modifies the array value.
-    return false;
+    // Check array semantic calls.
+    ArraySemanticsCall ArrayOp(User);
+    switch (ArrayOp.getKind()) {
+      case ArrayCallKind::kNone:
+        return false;
+      case ArrayCallKind::kAppendContentsOf:
+        AppendContentsOfCalls.push_back(ArrayOp);
+        break;
+      case ArrayCallKind::kGetElement:
+        GetElementCalls.insert(ArrayOp);
+        break;
+      case ArrayCallKind::kArrayFinalizeIntrinsic:
+        if (!recursivelyCollectUses(cast<SingleValueInstruction>(User)))
+          return false;
+        break;
+      default:
+        if (ArrayOp.doesNotChangeArray())
+          break;
+        return false;
+    }
   }
   return true;
 }
@@ -213,21 +190,28 @@ bool ArrayAllocation::analyze(ApplyInst *Alloc) {
   if (!Uninitialized)
     return false;
 
+  LLVM_DEBUG(llvm::dbgs() << "Found array allocation: ");
+  LLVM_DEBUG(Alloc->dump());
+
   ArrayValue = Uninitialized.getArrayValue();
-  if (!ArrayValue)
+  if (!ArrayValue) {
+    LLVM_DEBUG(llvm::dbgs() << "Did not find array value\n");
     return false;
+  }
 
-  SILValue ElementBuffer = Uninitialized.getArrayElementStoragePointer();
-  if (!ElementBuffer)
-    return false;
-
+  LLVM_DEBUG(llvm::dbgs() << "ArrayValue: ");
+  LLVM_DEBUG(ArrayValue->dump());
   // Figure out all stores to the array.
-  if (!mapInitializationStores(ElementBuffer))
+  if (!mapInitializationStores(Uninitialized)) {
+    LLVM_DEBUG(llvm::dbgs() << "Could not map initializing stores\n");
     return false;
+  }
 
   // Check if the array value was stored or has escaped.
-  if (!recursivelyCollectUses(ArrayValue))
+  if (!recursivelyCollectUses(ArrayValue)) {
+    LLVM_DEBUG(llvm::dbgs() << "Array value stored or escaped\n");
     return false;
+  }
 
   return true;
 }
@@ -247,10 +231,13 @@ bool ArrayAllocation::replaceGetElements() {
     assert(GetElement.getKind() == ArrayCallKind::kGetElement);
 
     auto ConstantIndex = GetElement.getConstantIndex();
-    if (ConstantIndex == None)
+    if (ConstantIndex == llvm::None)
       continue;
 
-    assert(*ConstantIndex >= 0 && "Must have a positive index");
+    // ElementValueMap keys are unsigned. Avoid implicit signed-unsigned
+    // conversion from an invalid index to a valid index.
+    if (*ConstantIndex < 0)
+      continue;
 
     auto EltValueIt = ElementValueMap.find(*ConstantIndex);
     if (EltValueIt == ElementValueMap.end())
@@ -314,12 +301,14 @@ bool ArrayAllocation::replaceAppendContentOf() {
     return false;
 
   auto Mangled = SILDeclRef(AppendFnDecl, SILDeclRef::Kind::Func).mangle();
-  SILFunction *AppendFn = M.findFunction(Mangled, SILLinkage::PublicExternal);
+  SILFunction *AppendFn = M.loadFunction(Mangled,
+                                         SILModule::LinkingMode::LinkAll);
   if (!AppendFn)
     return false;
 
   Mangled = SILDeclRef(ReserveFnDecl, SILDeclRef::Kind::Func).mangle();
-  SILFunction *ReserveFn = M.findFunction(Mangled, SILLinkage::PublicExternal);
+  SILFunction *ReserveFn = M.loadFunction(Mangled,
+                                          SILModule::LinkingMode::LinkAll);
   if (!ReserveFn)
     return false;
 
@@ -330,19 +319,16 @@ bool ArrayAllocation::replaceAppendContentOf() {
     ArraySemanticsCall AppendContentsOf(AppendContentOfCall);
     assert(AppendContentsOf && "Must be AppendContentsOf call");
 
-    NominalTypeDecl *AppendSelfArray = AppendContentsOf.getSelf()->getType().
-    getASTType()->getAnyNominal();
-
     // In case if it's not an Array, but e.g. an ContiguousArray
-    if (AppendSelfArray != Ctx.getArrayDecl())
+    if (!AppendContentsOf.getSelf()->getType().getASTType()->isArray())
       continue;
 
     SILType ArrayType = ArrayValue->getType();
     auto *NTD = ArrayType.getASTType()->getAnyNominal();
     SubstitutionMap ArraySubMap = ArrayType.getASTType()
-    ->getContextSubstitutionMap(M.getSwiftModule(), NTD);
+      ->getContextSubstitutionMap(M.getSwiftModule(), NTD);
 
-    AppendContentsOf.replaceByAppendingValues(M, AppendFn, ReserveFn,
+    AppendContentsOf.replaceByAppendingValues(AppendFn, ReserveFn,
                                               ElementValueVector,
                                               ArraySubMap);
     Changed = true;
@@ -360,21 +346,18 @@ public:
 
   void run() override {
     auto &Fn = *getFunction();
-
-    // FIXME: Update for ownership.
-    if (Fn.hasOwnership())
-      return;
-
     bool Changed = false;
 
-    for (auto &BB :Fn) {
+    LLVM_DEBUG(llvm::dbgs() << "ArrayElementPropagation looking at function: "
+                            << Fn.getName() << "\n");
+    for (auto &BB : Fn) {
       for (auto &Inst : BB) {
         if (auto *Apply = dyn_cast<ApplyInst>(&Inst)) {
           ArrayAllocation ALit;
           if (!ALit.analyze(Apply))
             continue;
 
-          // First optimization: replace getElemente calls.
+          // First optimization: replace getElement calls.
           if (ALit.replaceGetElements()) {
             Changed = true;
             // Re-do the analysis if the SIL changed.

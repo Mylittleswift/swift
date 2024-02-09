@@ -25,7 +25,21 @@ import objc_generics
 
 // CHECK-LABEL: @protocol B <A>
 // CHECK-NEXT: @end
-@objc protocol B : A {}
+@objc protocol B : A, Sendable {}
+
+// CHECK-LABEL: @protocol CompletionAndAsync
+// CHECK-NEXT: - (void)helloWithCompletion:(void (^ _Nonnull)(BOOL))completion;
+// CHECK-NEXT: @end
+@objc protocol CompletionAndAsync {
+  // We don't want this one printed because it has more limited availability.
+  @available(SwiftStdlib 5.7, *)
+  @objc(helloWithCompletion:)
+  func hello() async -> Bool
+
+  @available(*, renamed: "hello()")
+  @objc(helloWithCompletion:)
+  func hello(completion: @escaping (Bool) -> Void)
+}
 
 // CHECK: @protocol CustomName2;
 // CHECK-LABEL: SWIFT_PROTOCOL_NAMED("CustomName")
@@ -121,6 +135,26 @@ extension NSString : A, ZZZ {}
   func e()
 
   @objc optional func f()
+}
+
+// NESTED-LABEL: @interface ParentClass
+// NESTED-NEXT: @end
+@objc class ParentClass {
+
+  // NESTED-LABEL: @protocol Nested
+  // NESTED-NEXT: @end
+  @objc protocol Nested {}
+
+  // NESTED-LABEL: SWIFT_PROTOCOL_NAMED("Nested2")
+  // NESTED-NEXT: @protocol NestedInParent
+  // NESTED-NEXT: @end
+  @objc(NestedInParent) protocol Nested2 {}
+}
+
+extension ParentClass {
+  // NESTED-LABEL: @protocol NestedInExtensionOfParent
+  // NESTED-NEXT: @end
+  @objc protocol NestedInExtensionOfParent {}
 }
 
 // NEGATIVE-NOT: @protocol PrivateProto

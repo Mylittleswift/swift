@@ -165,7 +165,7 @@ tests.test("array value witnesses") {
   expectEqual(NoisyLifeCount, NoisyDeathCount)
 }
 
-protocol Classy : class {}
+protocol Classy : AnyObject {}
 class A : Classy {}
 class B : A {}
 class C : B {}
@@ -291,6 +291,39 @@ tests.test("_isOptional") {
   expectFalse(_isOptional(Int.self))
   expectFalse(_isOptional(X.self))
   expectFalse(_isOptional(P.self))
+}
+
+tests.test("_isConcrete") {
+  @_transparent
+  func isConcrete_true<T>(_ type: T.Type) -> Bool {
+    return _isConcrete(type)
+  }
+  @inline(never)
+  func isConcrete_false<T>(_ type: T.Type) -> Bool {
+    return _isConcrete(type)
+  }
+  expectTrue(_isConcrete(Int.self))
+  expectTrue(isConcrete_true(Int.self))
+  expectFalse(isConcrete_false(Int.self))
+}
+
+tests.test("_specialize") {
+  func something<T>(with x: some Collection<T>) -> Int {
+    if let y = _specialize(x, for: [Int].self) {
+      return y[0]
+    } else {
+      return 1234567890
+    }
+  }
+
+  let x = [0987654321, 1, 2]
+  expectEqual(something(with: x), 0987654321)
+
+  let y = CollectionOfOne<String>("hello world")
+  expectEqual(something(with: y), 1234567890)
+
+  let z: Any = [0, 1, 2, 3]
+  expectNil(_specialize(z, for: [Int].self))
 }
 
 runAllTests()

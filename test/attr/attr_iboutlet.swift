@@ -4,7 +4,7 @@
 import Foundation
 
 // expected-error@+1 {{@IBOutlet property cannot have non-object type 'Int'}}
-@IBOutlet // expected-error {{only instance properties can be declared @IBOutlet}} {{1-11=}}
+@IBOutlet // expected-error {{only class instance properties can be declared @IBOutlet}} {{1-11=}}
 var iboutlet_global: Int?
 
 @IBOutlet // expected-error {{@IBOutlet may only be used on 'var' declarations}} {{1-11=}}
@@ -22,7 +22,7 @@ class IBOutletWrapperTy {
 
   @IBOutlet
   class var staticValue: IBOutletWrapperTy? = 52  // expected-error {{cannot convert value of type 'Int' to specified type 'IBOutletWrapperTy?'}}
-  // expected-error@-2 {{only instance properties can be declared @IBOutlet}} {{3-12=}}
+  // expected-error@-2 {{only class instance properties can be declared @IBOutlet}} {{3-12=}}
   // expected-error@-2 {{class stored properties not supported}}
 
   @IBOutlet // expected-error {{@IBOutlet may only be used on 'var' declarations}} {{3-13=}}
@@ -162,11 +162,25 @@ class NonObjC {}
   }
 }
 
-// https://bugs.swift.org/browse/SR-9889
+// https://github.com/apple/swift/issues/52295
+
 @objc class NonOptionalWeak {
   // expected-error@+3 {{@IBOutlet property has non-optional type 'OX'}}
   // expected-note @+2 {{add '?' to form the optional type 'OX?'}}
   // expected-note @+1 {{add '!' to form an implicitly unwrapped optional}}
   @IBOutlet weak var something: OX
   init() { }
+}
+
+@propertyWrapper
+struct MyWrapper {
+  var wrappedValue: AnyObject {
+    get { fatalError() }
+    set { }
+  }
+}
+
+@objc class WrappedIBOutlet {
+  // Non-optional types are okay with property wrappers.
+  @IBOutlet @MyWrapper var value: AnyObject
 }

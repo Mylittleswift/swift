@@ -43,11 +43,12 @@ void IRGenModule::emitSILGlobalVariable(SILGlobalVariable *var) {
   // variable directly, don't actually emit it; just return undef.
   if (ti.isKnownEmpty(expansion)) {
     if (DebugInfo && var->getDecl()) {
-      auto DbgTy = DebugTypeInfo::getGlobal(var, Int8Ty, Size(0), Alignment(1));
-      DebugInfo->emitGlobalVariableDeclaration(
-          nullptr, var->getDecl()->getName().str(), "", DbgTy,
-          var->getLinkage() != SILLinkage::Public,
-          IRGenDebugInfo::NotHeapAllocated, SILLocation(var->getDecl()));
+      auto DbgTy = DebugTypeInfo::getGlobal(var, Int8Ty, *this);
+      DebugInfo->emitGlobalVariableDeclaration(nullptr, var->getDecl()->getName().str(),
+                                               "", DbgTy,
+                                               var->getLinkage() != SILLinkage::Public &&
+                                               var->getLinkage() != SILLinkage::Package,
+                                               SILLocation(var->getDecl()));
     }
     return;
   }
@@ -72,6 +73,23 @@ StackAddress FixedTypeInfo::allocateStack(IRGenFunction &IGF, SILType T,
   return { alloca };
 }
 
+StackAddress FixedTypeInfo::allocateVector(IRGenFunction &IGF, SILType T,
+                                           llvm::Value *capacity,
+                                           const Twine &name) const {
+  // If the type is known to be empty, don't actually allocate anything.
+  if (isKnownEmpty(ResilienceExpansion::Maximal)) {
+    auto addr = getUndefAddress();
+    return { addr };
+  }
+
+  StackAddress alloca =
+    IGF.emitDynamicAlloca(getStorageType(), capacity, getFixedAlignment(),
+                          /*allowTaskAlloc*/ true, name);
+  IGF.Builder.CreateLifetimeStart(alloca.getAddress(), getFixedSize());
+
+  return { alloca };
+}
+
 void FixedTypeInfo::destroyStack(IRGenFunction &IGF, StackAddress addr,
                                  SILType T, bool isOutlined) const {
   destroy(IGF, addr.getAddress(), T, isOutlined);
@@ -89,7 +107,7 @@ void TemporarySet::destroyAll(IRGenFunction &IGF) const {
   assert(!hasBeenCleared() && "destroying a set that's been cleared?");
 
   // Deallocate all the temporaries.
-  for (auto &temporary : reversed(Stack)) {
+  for (auto &temporary : llvm::reverse(Stack)) {
     temporary.destroy(IGF);
   }
 }

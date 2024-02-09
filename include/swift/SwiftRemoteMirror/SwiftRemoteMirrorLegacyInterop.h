@@ -30,6 +30,7 @@
 #include <mach-o/getsect.h>
 
 #include <CoreFoundation/CFDictionary.h>
+#include <TargetConditionals.h>
 
 /// The "public" interface follows. All of these functions are the same
 /// as the corresponding swift_reflection_* functions, except for taking
@@ -39,6 +40,15 @@ static inline SwiftReflectionInteropContextRef
 swift_reflection_interop_createReflectionContext(
     void *ReaderContext,
     uint8_t PointerSize,
+    FreeBytesFunction FreeBytes,
+    ReadBytesFunction ReadBytes,
+    GetStringLengthFunction GetStringLength,
+    GetSymbolAddressFunction GetSymbolAddress);
+
+static inline SwiftReflectionInteropContextRef
+swift_reflection_interop_createReflectionContextWithDataLayout(
+    void *ReaderContext,
+    QueryDataLayoutFunction DataLayout,
     FreeBytesFunction FreeBytes,
     ReadBytesFunction ReadBytes,
     GetStringLengthFunction GetStringLength,
@@ -91,6 +101,11 @@ swift_reflection_interop_typeRefForMangledTypeName(
   const char *MangledName,
   uint64_t Length);
 
+static inline char *
+swift_reflection_interop_copyDemangledNameForTypeRef(
+  SwiftReflectionInteropContextRef ContextRef,
+  swift_typeref_interop_t OpaqueTypeRef);
+
 static inline swift_typeinfo_t
 swift_reflection_interop_infoForTypeRef(SwiftReflectionInteropContextRef ContextRef,
                                         swift_typeref_interop_t OpaqueTypeRef);
@@ -133,6 +148,10 @@ swift_reflection_interop_projectExistential(SwiftReflectionInteropContextRef Con
                                             swift_typeref_interop_t ExistentialTypeRef,
                                             swift_typeref_interop_t *OutInstanceTypeRef,
                                             swift_addr_t *OutStartOfInstanceData);
+
+static inline int swift_reflection_interop_projectEnum(
+    SwiftReflectionInteropContextRef ContextRef, swift_addr_t EnumAddress,
+    swift_typeref_interop_t EnumTypeRef, int *CaseIndex);
 
 static inline void
 swift_reflection_interop_dumpTypeRef(SwiftReflectionInteropContextRef ContextRef,
@@ -193,6 +212,15 @@ struct SwiftReflectionFunctions {
     ReadBytesFunction ReadBytes,
     GetStringLengthFunction GetStringLength,
     GetSymbolAddressFunction GetSymbolAddress);
+
+  // Optional creation function that takes a data layout query function.
+  SwiftReflectionContextRef (*createReflectionContextWithDataLayout)(
+    void *ReaderContext,
+    QueryDataLayoutFunction DataLayout,
+    FreeBytesFunction FreeBytes,
+    ReadBytesFunction ReadBytes,
+    GetStringLengthFunction GetStringLength,
+    GetSymbolAddressFunction GetSymbolAddress);
   
   SwiftReflectionContextRef (*createReflectionContextLegacy)(
     void *ReaderContext,
@@ -231,6 +259,9 @@ struct SwiftReflectionFunctions {
                                            const char *MangledName,
                                            uint64_t Length);
 
+  char * (*copyDemangledNameForTypeRef)(
+  SwiftReflectionContextRef ContextRef, swift_typeref_t OpaqueTypeRef);
+
   swift_typeinfo_t (*infoForTypeRef)(SwiftReflectionContextRef ContextRef,
                                       swift_typeref_t OpaqueTypeRef);
 
@@ -261,6 +292,10 @@ struct SwiftReflectionFunctions {
                             swift_typeref_t ExistentialTypeRef,
                             swift_typeref_t *OutInstanceTypeRef,
                             swift_addr_t *OutStartOfInstanceData);
+
+  int (*projectEnumValue)(SwiftReflectionContextRef ContextRef,
+                          swift_addr_t EnumAddress, swift_typeref_t EnumTypeRef,
+                          int *CaseIndex);
 
   void (*dumpTypeRef)(swift_typeref_t OpaqueTypeRef);
 
@@ -298,7 +333,7 @@ struct SwiftReflectionInteropContextLegacyImageRangeList {
 
 struct SwiftReflectionInteropContext {
   void *ReaderContext;
-  uint8_t PointerSize;
+  QueryDataLayoutFunction DataLayout;
   FreeBytesFunction FreeBytes;
   ReadBytesFunction ReadBytes;
   uint64_t (*GetStringLength)(void *reader_context,
@@ -409,11 +444,12 @@ swift_reflection_interop_loadFunctions(struct SwiftReflectionInteropContext *Con
 #ifndef __cplusplus
 #define decltype(x) void *
 #endif
-#define LOAD_NAMED(field, symbol) do { \
+#define LOAD_NAMED(field, symbol, required) do { \
     Functions->field = (decltype(Functions->field))dlsym(Handle, symbol); \
-    if (Functions->field == NULL) return 0; \
+    if (required && Functions->field == NULL) return 0; \
   } while (0)
-#define LOAD(name) LOAD_NAMED(name, "swift_reflection_" #name)
+#define LOAD(name) LOAD_NAMED(name, "swift_reflection_" #name, 1)
+#define LOAD_OPT(name) LOAD_NAMED(name, "swift_reflection_" #name, 0)
   
   Functions->classIsSwiftMaskPtr =
     (unsigned long long *)dlsym(Handle, "swift_reflection_classIsSwiftMask");
@@ -425,8 +461,8 @@ swift_reflection_interop_loadFunctions(struct SwiftReflectionInteropContext *Con
   int IsLegacy = dlsym(Handle, "swift_reflection_addImage") == NULL;
   
   if (IsLegacy) {
-    LOAD_NAMED(createReflectionContextLegacy, "swift_reflection_createReflectionContext");
-    LOAD_NAMED(addReflectionInfoLegacy, "swift_reflection_addReflectionInfo");
+    LOAD_NAMED(createReflectionContextLegacy, "swift_reflection_createReflectionContext", 1);
+    LOAD_NAMED(addReflectionInfoLegacy, "swift_reflection_addReflectionInfo", 1);
   } else {
     LOAD(createReflectionContext);
     LOAD(addReflectionInfo);
@@ -434,6 +470,9 @@ swift_reflection_interop_loadFunctions(struct SwiftReflectionInteropContext *Con
     LOAD(ownsObject);
     LOAD(ownsAddress);
     LOAD(metadataForObject);
+    
+    // Optional creation function.
+    LOAD_OPT(createReflectionContextWithDataLayout);
   }
   
   LOAD(destroyReflectionContext);
@@ -441,6 +480,7 @@ swift_reflection_interop_loadFunctions(struct SwiftReflectionInteropContext *Con
   LOAD(typeRefForMetadata);
   LOAD(typeRefForInstance);
   LOAD(typeRefForMangledTypeName);
+  LOAD_OPT(copyDemangledNameForTypeRef);
   LOAD(infoForTypeRef);
   LOAD(childOfTypeRef);
   LOAD(infoForMetadata);
@@ -450,11 +490,12 @@ swift_reflection_interop_loadFunctions(struct SwiftReflectionInteropContext *Con
   LOAD(genericArgumentCountOfTypeRef);
   LOAD(genericArgumentOfTypeRef);
   LOAD(projectExistential);
+  LOAD_OPT(projectEnumValue);
   LOAD(dumpTypeRef);
   LOAD(dumpInfoForTypeRef);
   
   Library->IsLegacy = IsLegacy;
-  Context->LibraryCount++;
+  ++Context->LibraryCount;
   
   return 1;
   
@@ -508,6 +549,89 @@ swift_reflection_interop_GetSymbolAddressAdapter(
   return Context->GetSymbolAddress(Context->ReaderContext, name, name_length);
 }
 
+static inline int
+swift_reflection_interop_minimalDataLayoutQueryFunction4(
+  void *ReaderContext,
+  DataLayoutQueryType type,
+  void *inBuffer, void *outBuffer) {
+  (void)ReaderContext;
+  (void)inBuffer;
+  switch (type) {
+  case DLQ_GetPointerSize:
+  case DLQ_GetSizeSize: {
+    uint8_t *result = (uint8_t *)outBuffer;
+    *result = 4;
+    return 1;
+  }
+  case DLQ_GetObjCReservedLowBits: {
+    uint8_t *result = (uint8_t *)outBuffer;
+    // Swift assumes this for all 32-bit platforms, including Darwin
+    *result = 0;
+    return 1;
+  }
+  case DLQ_GetLeastValidPointerValue: {
+    uint64_t *result = (uint64_t *)outBuffer;
+    // Swift assumes this for all 32-bit platforms, including Darwin
+    *result = 0x1000;
+    return 1;
+  }
+  default:
+    return 0;
+  }
+}
+
+static inline int
+swift_reflection_interop_minimalDataLayoutQueryFunction8(
+  void *ReaderContext,
+  DataLayoutQueryType type,
+  void *inBuffer, void *outBuffer) {
+  (void)ReaderContext;
+  (void)inBuffer;
+  // Caveat: This assumes the process being examined is
+  // running in the same kind of environment as this host code.
+#if defined(__APPLE__) && __APPLE__
+    int applePlatform = 1;
+#else
+    int applePlatform = 0;
+#endif
+#if defined(__APPLE__) && __APPLE__ && ((defined(TARGET_OS_IOS) && TARGET_OS_IOS) || (defined(TARGET_OS_IOS) && TARGET_OS_WATCH) || (defined(TARGET_OS_TV) && TARGET_OS_TV) || defined(__arm64__))
+    int iosDerivedPlatform = 1;
+#else
+    int iosDerivedPlatform = 0;
+#endif
+
+  switch (type) {
+  case DLQ_GetPointerSize:
+  case DLQ_GetSizeSize: {
+    uint8_t *result = (uint8_t *)outBuffer;
+    *result = 8;
+    return 1;
+  }
+  case DLQ_GetObjCReservedLowBits: {
+    uint8_t *result = (uint8_t *)outBuffer;
+    if (applePlatform && !iosDerivedPlatform) {
+      *result = 1;
+    } else {
+      *result = 0;
+    }
+    return 1;
+  }
+  case DLQ_GetLeastValidPointerValue: {
+    uint64_t *result = (uint64_t *)outBuffer;
+    if (applePlatform) {
+      // On 64-bit Apple platforms, Swift reserves the first 4GiB
+      *result = 0x100000000;
+    } else {
+      // Swift reserves the first 4KiB everywhere else.
+      *result = 0x1000;
+    }
+    return 1;
+  }
+  default:
+    return 0;
+  }
+}
+
 static inline SwiftReflectionInteropContextRef
 swift_reflection_interop_createReflectionContext(
     void *ReaderContext,
@@ -516,12 +640,37 @@ swift_reflection_interop_createReflectionContext(
     ReadBytesFunction ReadBytes,
     GetStringLengthFunction GetStringLength,
     GetSymbolAddressFunction GetSymbolAddress) {
-  
+  QueryDataLayoutFunction DataLayout;
+  if (PointerSize == 4)
+    DataLayout = swift_reflection_interop_minimalDataLayoutQueryFunction4;
+  else if (PointerSize == 8)
+    DataLayout = swift_reflection_interop_minimalDataLayoutQueryFunction8;
+  else
+    abort(); // Can't handle sizes other than 4 and 8.
+
+  return swift_reflection_interop_createReflectionContextWithDataLayout(
+    ReaderContext,
+    DataLayout,
+    FreeBytes,
+    ReadBytes,
+    GetStringLength,
+    GetSymbolAddress);
+}
+
+static inline SwiftReflectionInteropContextRef
+swift_reflection_interop_createReflectionContextWithDataLayout(
+    void *ReaderContext,
+    QueryDataLayoutFunction DataLayout,
+    FreeBytesFunction FreeBytes,
+    ReadBytesFunction ReadBytes,
+    GetStringLengthFunction GetStringLength,
+    GetSymbolAddressFunction GetSymbolAddress) { 
+ 
   SwiftReflectionInteropContextRef ContextRef =
-    (SwiftReflectionInteropContextRef)calloc(sizeof(*ContextRef), 1);
+    (SwiftReflectionInteropContextRef)calloc(1, sizeof(*ContextRef));
   
   ContextRef->ReaderContext = ReaderContext;
-  ContextRef->PointerSize = PointerSize;
+  ContextRef->DataLayout = DataLayout;
   ContextRef->FreeBytes = FreeBytes;
   ContextRef->ReadBytes = ReadBytes;
   ContextRef->GetStringLength = GetStringLength;
@@ -548,10 +697,29 @@ swift_reflection_interop_addLibrary(
         swift_reflection_interop_readBytesAdapter,
         swift_reflection_interop_GetStringLengthAdapter,
         swift_reflection_interop_GetSymbolAddressAdapter);
+    } else if (Library->Functions.createReflectionContextWithDataLayout) {
+      Library->Context =
+        Library->Functions.createReflectionContextWithDataLayout(
+        ContextRef->ReaderContext,
+        ContextRef->DataLayout,
+        ContextRef->FreeBytes,
+        ContextRef->ReadBytes,
+        ContextRef->GetStringLength,
+        ContextRef->GetSymbolAddress);          
     } else {
+      uint8_t PointerSize;
+      int result = ContextRef->DataLayout(
+        ContextRef->ReaderContext, DLQ_GetPointerSize, NULL, &PointerSize);
+      if (!result)
+        abort(); // We need the pointer size, can't proceed without it.
+
       Library->Context = Library->Functions.createReflectionContext(
         ContextRef->ReaderContext,
-      ContextRef->PointerSize, ContextRef->FreeBytes, ContextRef->ReadBytes, ContextRef->GetStringLength, ContextRef->GetSymbolAddress);
+        PointerSize,
+        ContextRef->FreeBytes,
+        ContextRef->ReadBytes,
+        ContextRef->GetStringLength,
+        ContextRef->GetSymbolAddress);
     }
   }
   return Success;
@@ -820,6 +988,17 @@ swift_reflection_interop_typeRefForMangledTypeName(
   return Result;
 }
 
+static inline char *
+swift_reflection_interop_copyDemangledNameForTypeRef(
+  SwiftReflectionInteropContextRef ContextRef,
+  swift_typeref_interop_t OpaqueTypeRef) {
+  DECLARE_LIBRARY(OpaqueTypeRef.Library);
+  if (Library->Functions.copyDemangledNameForTypeRef)
+    return Library->Functions.copyDemangledNameForTypeRef(Library->Context,
+                                                          OpaqueTypeRef.Typeref);
+  return NULL;
+}
+
 static inline swift_typeinfo_t
 swift_reflection_interop_infoForTypeRef(SwiftReflectionInteropContextRef ContextRef,
                                         swift_typeref_interop_t OpaqueTypeRef) {
@@ -941,6 +1120,15 @@ swift_reflection_interop_projectExistential(SwiftReflectionInteropContextRef Con
   
   OutInstanceTypeRef->Library = ExistentialTypeRef.Library;
   return 1;
+}
+
+static inline int swift_reflection_interop_projectEnumValue(
+    SwiftReflectionInteropContextRef ContextRef, swift_addr_t EnumAddress,
+    swift_typeref_interop_t EnumTypeRef, int *CaseIndex) {
+  DECLARE_LIBRARY(EnumTypeRef.Library);
+  return Library->Functions.projectEnumValue &&
+         Library->Functions.projectEnumValue(Library->Context, EnumAddress,
+                                             EnumTypeRef.Typeref, CaseIndex);
 }
 
 static inline void

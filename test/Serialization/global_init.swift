@@ -1,7 +1,7 @@
 // RUN: %empty-directory(%t)
 // RUN: %target-swift-frontend -emit-module -parse-as-library -o %t %s
 // RUN: llvm-bcanalyzer %t/global_init.swiftmodule | %FileCheck %s -check-prefix=BCANALYZER
-// RUN: %target-sil-opt -enable-sil-verify-all -disable-sil-linking %t/global_init.swiftmodule | %FileCheck %s
+// RUN: %target-sil-opt -enable-sil-verify-all %t/global_init.swiftmodule | %FileCheck %s
 
 // BCANALYZER-NOT: UnknownCode
 
@@ -12,8 +12,10 @@
 // The only way to inspect the serialized module is sil-opt. The swift
 // driver will only output the SIL that it deserializes.
 
+func initFunc() -> Int { return 42 }
+
 @usableFromInline
-let MyConst = 42
+let MyConst = initFunc()
 @usableFromInline
 var MyVar = 3
 

@@ -19,6 +19,7 @@
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsFrontend.h"
 #include "swift/Basic/Defer.h"
+#include "swift/Basic/Range.h"
 #include "swift/Basic/SourceManager.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
@@ -28,6 +29,15 @@
 using namespace swift;
 
 DiagnosticConsumer::~DiagnosticConsumer() = default;
+
+DiagnosticInfo::FixIt::FixIt(CharSourceRange R, StringRef Str,
+                             ArrayRef<DiagnosticArgument> Args) : Range(R) {
+  // FIXME: Defer text formatting to later in the pipeline.
+  llvm::raw_string_ostream OS(Text);
+  DiagnosticEngine::formatDiagnosticText(OS, Str, Args,
+                                         DiagnosticFormatOptions::
+                                         formatForFixIts());
+}
 
 llvm::SMLoc DiagnosticConsumer::getRawLoc(SourceLoc loc) {
   return loc.Value;
@@ -61,7 +71,7 @@ FileSpecificDiagnosticConsumer::consolidateSubconsumers(
   if (subconsumers.size() == 1)
     return std::move(subconsumers.front()).consumer;
   // Cannot use return
-  // llvm::make_unique<FileSpecificDiagnosticConsumer>(subconsumers); because
+  // std::make_unique<FileSpecificDiagnosticConsumer>(subconsumers); because
   // the constructor is private.
   return std::unique_ptr<DiagnosticConsumer>(
       new FileSpecificDiagnosticConsumer(subconsumers));
@@ -84,10 +94,10 @@ void FileSpecificDiagnosticConsumer::computeConsumersOrderedByRange(
     if (subconsumer.getInputFileName().empty())
       continue;
 
-    Optional<unsigned> bufferID =
+    llvm::Optional<unsigned> bufferID =
         SM.getIDForBufferIdentifier(subconsumer.getInputFileName());
-    assert(bufferID.hasValue() && "consumer registered for unknown file");
-    CharSourceRange range = SM.getRangeForBuffer(bufferID.getValue());
+    assert(bufferID.has_value() && "consumer registered for unknown file");
+    CharSourceRange range = SM.getRangeForBuffer(bufferID.value());
     ConsumersOrderedByRange.emplace_back(
         ConsumerAndRange(range, subconsumerIndex));
   }
@@ -111,12 +121,18 @@ void FileSpecificDiagnosticConsumer::computeConsumersOrderedByRange(
          "overlapping ranges despite having distinct files");
 }
 
-Optional<FileSpecificDiagnosticConsumer::Subconsumer *>
+llvm::Optional<FileSpecificDiagnosticConsumer::Subconsumer *>
 FileSpecificDiagnosticConsumer::subconsumerForLocation(SourceManager &SM,
                                                        SourceLoc loc) {
   // Diagnostics with invalid locations always go to every consumer.
   if (loc.isInvalid())
-    return None;
+    return llvm::None;
+
+  // What if a there's a FileSpecificDiagnosticConsumer but there are no
+  // subconsumers in it? (This situation occurs for the fix-its
+  // FileSpecificDiagnosticConsumer.) In such a case, bail out now.
+  if (Subconsumers.empty())
+    return llvm::None;
 
   // This map is generated on first use and cached, to allow the
   // FileSpecificDiagnosticConsumer to be set up before the source files are
@@ -131,12 +147,12 @@ FileSpecificDiagnosticConsumer::subconsumerForLocation(SourceManager &SM,
     // can't find buffers for the inputs).
     assert(!Subconsumers.empty());
     if (!SM.getIDForBufferIdentifier(Subconsumers.begin()->getInputFileName())
-             .hasValue()) {
+             .has_value()) {
       assert(llvm::none_of(Subconsumers, [&](const Subconsumer &subconsumer) {
         return SM.getIDForBufferIdentifier(subconsumer.getInputFileName())
-            .hasValue();
+            .has_value();
       }));
-      return None;
+      return llvm::None;
     }
     auto *mutableThis = const_cast<FileSpecificDiagnosticConsumer*>(this);
     mutableThis->computeConsumersOrderedByRange(SM);
@@ -159,35 +175,59 @@ FileSpecificDiagnosticConsumer::subconsumerForLocation(SourceManager &SM,
     return &(*this)[*consumerAndRangeForLocation];
   }
 
-  return None;
+  return llvm::None;
 }
 
 void FileSpecificDiagnosticConsumer::handleDiagnostic(
-    SourceManager &SM, SourceLoc Loc, DiagnosticKind Kind,
-    StringRef FormatString, ArrayRef<DiagnosticArgument> FormatArgs,
-    const DiagnosticInfo &Info) {
+    SourceManager &SM, const DiagnosticInfo &Info) {
 
-  HasAnErrorBeenConsumed |= Kind == DiagnosticKind::Error;
+  HasAnErrorBeenConsumed |= Info.Kind == DiagnosticKind::Error;
 
-  Optional<FileSpecificDiagnosticConsumer::Subconsumer *> subconsumer;
-  switch (Kind) {
-  case DiagnosticKind::Error:
-  case DiagnosticKind::Warning:
-  case DiagnosticKind::Remark:
-    subconsumer = subconsumerForLocation(SM, Loc);
-    SubconsumerForSubsequentNotes = subconsumer;
-    break;
-  case DiagnosticKind::Note:
-    subconsumer = SubconsumerForSubsequentNotes;
-    break;
-  }
-  if (subconsumer.hasValue()) {
-    subconsumer.getValue()->handleDiagnostic(SM, Loc, Kind, FormatString,
-                                             FormatArgs, Info);
+  auto subconsumer = findSubconsumer(SM, Info);
+  if (subconsumer) {
+    subconsumer.value()->handleDiagnostic(SM, Info);
     return;
   }
+  // Last resort: spray it everywhere
   for (auto &subconsumer : Subconsumers)
-    subconsumer.handleDiagnostic(SM, Loc, Kind, FormatString, FormatArgs, Info);
+    subconsumer.handleDiagnostic(SM, Info);
+}
+
+llvm::Optional<FileSpecificDiagnosticConsumer::Subconsumer *>
+FileSpecificDiagnosticConsumer::findSubconsumer(SourceManager &SM,
+                                                const DiagnosticInfo &Info) {
+  // Ensure that a note goes to the same place as the preceding non-note.
+  switch (Info.Kind) {
+  case DiagnosticKind::Error:
+  case DiagnosticKind::Warning:
+  case DiagnosticKind::Remark: {
+    auto subconsumer = findSubconsumerForNonNote(SM, Info);
+    SubconsumerForSubsequentNotes = subconsumer;
+    return subconsumer;
+  }
+  case DiagnosticKind::Note:
+    return SubconsumerForSubsequentNotes;
+  }
+  llvm_unreachable("covered switch");
+}
+
+llvm::Optional<FileSpecificDiagnosticConsumer::Subconsumer *>
+FileSpecificDiagnosticConsumer::findSubconsumerForNonNote(
+    SourceManager &SM, const DiagnosticInfo &Info) {
+  const auto subconsumer = subconsumerForLocation(SM, Info.Loc);
+  if (!subconsumer)
+    return llvm::None; // No place to put it; might be in an imported module
+  if ((*subconsumer)->getConsumer())
+    return subconsumer; // A primary file with a .dia file
+  // Try to put it in the responsible primary input
+  if (Info.BufferIndirectlyCausingDiagnostic.isInvalid())
+    return llvm::None;
+  const auto currentPrimarySubconsumer =
+      subconsumerForLocation(SM, Info.BufferIndirectlyCausingDiagnostic);
+  assert(!currentPrimarySubconsumer ||
+         (*currentPrimarySubconsumer)->getConsumer() &&
+             "current primary must have a .dia file");
+  return currentPrimarySubconsumer;
 }
 
 bool FileSpecificDiagnosticConsumer::finishProcessing() {
@@ -211,14 +251,12 @@ void FileSpecificDiagnosticConsumer::
     (*this)[info].informDriverOfIncompleteBatchModeCompilation();
 }
 
-void NullDiagnosticConsumer::handleDiagnostic(
-    SourceManager &SM, SourceLoc Loc, DiagnosticKind Kind,
-    StringRef FormatString, ArrayRef<DiagnosticArgument> FormatArgs,
-    const DiagnosticInfo &Info) {
+void NullDiagnosticConsumer::handleDiagnostic(SourceManager &SM,
+                                              const DiagnosticInfo &Info) {
   LLVM_DEBUG({
     llvm::dbgs() << "NullDiagnosticConsumer received diagnostic: ";
-    DiagnosticEngine::formatDiagnosticText(llvm::dbgs(), FormatString,
-                                           FormatArgs);
+    DiagnosticEngine::formatDiagnosticText(llvm::dbgs(), Info.FormatString,
+                                           Info.FormatArgs);
     llvm::dbgs() << "\n";
   });
 }
@@ -227,16 +265,14 @@ ForwardingDiagnosticConsumer::ForwardingDiagnosticConsumer(DiagnosticEngine &Tar
   : TargetEngine(Target) {}
 
 void ForwardingDiagnosticConsumer::handleDiagnostic(
-    SourceManager &SM, SourceLoc Loc, DiagnosticKind Kind,
-    StringRef FormatString, ArrayRef<DiagnosticArgument> FormatArgs,
-    const DiagnosticInfo &Info) {
+    SourceManager &SM, const DiagnosticInfo &Info) {
   LLVM_DEBUG({
     llvm::dbgs() << "ForwardingDiagnosticConsumer received diagnostic: ";
-    DiagnosticEngine::formatDiagnosticText(llvm::dbgs(), FormatString,
-                                           FormatArgs);
+    DiagnosticEngine::formatDiagnosticText(llvm::dbgs(), Info.FormatString,
+                                           Info.FormatArgs);
     llvm::dbgs() << "\n";
   });
   for (auto *C : TargetEngine.getConsumers()) {
-    C->handleDiagnostic(SM, Loc, Kind, FormatString, FormatArgs, Info);
+    C->handleDiagnostic(SM, Info);
   }
 }

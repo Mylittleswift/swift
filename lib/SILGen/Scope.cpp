@@ -22,8 +22,7 @@ ManagedValue Scope::popPreservingValue(ManagedValue mv) {
   // stack location that will be destroyed by this scope.
   assert(mv && mv.getType().isObject() &&
          (mv.getType().isTrivial(cleanups.SGF.F) ||
-          mv.getOwnershipKind() == ValueOwnershipKind::Any ||
-          mv.hasCleanup()));
+          mv.getOwnershipKind() == OwnershipKind::None || mv.hasCleanup()));
   CleanupCloner cloner(cleanups.SGF, mv);
   SILValue value = mv.forward(cleanups.SGF);
   pop();
@@ -53,11 +52,19 @@ static void lifetimeExtendAddressOnlyRValueSubValues(
     }
 
     // Otherwise, create the box and move the address only value into the box.
-    assert(v->getType().isAddressOnly(SGF.getModule()) &&
+    assert(v->getType().isAddressOnly(SGF.F) &&
            "RValue invariants imply that all RValue subtypes that are "
            "addresses must be address only.");
     auto boxTy = SILBoxType::get(v->getType().getASTType());
     SILValue box = SGF.B.createAllocBox(loc, boxTy);
+    // TODO: Should these boxes that extend lifetimes for rvalue subobjects ever
+    //       be lexical?
+    if (SGF.getASTContext().SILOpts.supportsLexicalLifetimes(SGF.getModule())) {
+      if (v->getType().getLifetime(SGF.F).isLexical()) {
+        box = SGF.B.createBeginBorrow(loc, box,
+                                      /*isLexical=*/true);
+      }
+    }
     SILValue addr = SGF.B.createProjectBox(loc, box, 0);
     SGF.B.createCopyAddr(loc, v, addr, IsTake, IsInitialization);
 
@@ -70,7 +77,8 @@ static void lifetimeExtendAddressOnlyRValueSubValues(
 
 RValue Scope::popPreservingValue(RValue &&rv) {
   auto &SGF = cleanups.SGF;
-  assert(rv.isPlusOne(SGF) && "Can only push plus one rvalues through a scope");
+  assert(rv.isPlusOneOrTrivial(SGF) &&
+         "Can only push plus one rvalues through a scope");
 
   // Perform a quick check if we have an incontext value. If so, just pop and
   // return rv.
@@ -86,12 +94,14 @@ RValue Scope::popPreservingValue(RValue &&rv) {
   // recreate the RValue in the outer scope.
   CanType type = rv.type;
   unsigned numEltsRemaining = rv.elementsToBeAdded;
-  CleanupCloner cloner(SGF, rv);
-  llvm::SmallVector<SILValue, 4> values;
+  SmallVector<CleanupCloner, 4> cloners;
+  CleanupCloner::getClonersForRValue(SGF, rv, cloners);
+
+  SmallVector<SILValue, 4> values;
   std::move(rv).forwardAll(SGF, values);
 
   // Lifetime any address only values that we may have.
-  llvm::SmallVector<SILValue, 4> lifetimeExtendingBoxes;
+  SmallVector<SILValue, 4> lifetimeExtendingBoxes;
   lifetimeExtendAddressOnlyRValueSubValues(SGF, loc, values,
                                            lifetimeExtendingBoxes);
 
@@ -111,9 +121,9 @@ RValue Scope::popPreservingValue(RValue &&rv) {
   // Reconstruct the managed values from the underlying sil values in the outer
   // scope. Since the RValue wants a std::vector value, we use that instead.
   std::vector<ManagedValue> managedValues;
-  std::transform(
-      values.begin(), values.end(), std::back_inserter(managedValues),
-      [&cloner](SILValue v) -> ManagedValue { return cloner.clone(v); });
+  for (unsigned i : indices(values)) {
+    managedValues.push_back(cloners[i].clone(values[i]));
+  }
 
   // And then assemble the managed values into a rvalue.
   return RValue(SGF, std::move(managedValues), type, numEltsRemaining);

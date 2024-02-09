@@ -6,22 +6,11 @@ Contents
 .. toctree::
    :maxdepth: 1
 
-   IndexInvalidation
-   AccessControl
-   DriverInternals
-   DriverParseableOutput
-   ErrorHandling
-   ErrorHandlingRationale
+   Backtracing
    Generics
-   LogicalObjects
-   ObjectInitialization
-   PatternMatching
    StoredAndComputedVariables
    SIL
-   TypeChecker
-   DebuggingTheCompiler
    OptimizationTips
-   libFuzzerIntegration
    ABI: TypeMetadata <ABI/TypeMetadata>
    ABI: TypeLayout <ABI/TypeLayout>
    ABI: Mangling <ABI/Mangling>

@@ -12,10 +12,12 @@
 
 #include "gtest/gtest.h"
 #include "swift/AST/ASTContext.h"
+#include "swift/Basic/Defer.h"
 #include "swift/Frontend/Frontend.h"
-#include "swift/Frontend/ParseableInterfaceModuleLoader.h"
+#include "swift/Frontend/ModuleInterfaceLoader.h"
 #include "swift/Frontend/PrintingDiagnosticConsumer.h"
 #include "swift/Serialization/Validation.h"
+#include "swift/SymbolGraphGen/SymbolGraphOptions.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/VirtualFileSystem.h"
 
@@ -33,7 +35,7 @@ static bool emitFileWithContents(StringRef path, StringRef contents,
   if (llvm::sys::fs::openFileForWrite(path, fd))
     return true;
   if (pathOut)
-    *pathOut = path;
+    *pathOut = path.str();
   llvm::raw_fd_ostream file(fd, /*shouldClose=*/true);
   file << contents;
   return false;
@@ -64,12 +66,12 @@ public:
   }
 };
 
-class ParseableInterfaceModuleLoaderTest : public testing::Test {
+class ModuleInterfaceLoaderTest : public testing::Test {
 protected:
-  void setupAndLoadParseableModule() {
+  void setupAndLoadModuleInterface() {
     SmallString<256> tempDir;
     ASSERT_FALSE(llvm::sys::fs::createUniqueDirectory(
-        "ParseableModuleBufferTests.emitModuleInMemory", tempDir));
+        "ModuleInterfaceBufferTests.emitModuleInMemory", tempDir));
     SWIFT_DEFER { llvm::sys::fs::remove_directories(tempDir); };
 
     auto cacheDir = createFilename(tempDir, "ModuleCache");
@@ -94,13 +96,25 @@ protected:
     PrintingDiagnosticConsumer printingConsumer;
     DiagnosticEngine diags(sourceMgr);
     diags.addConsumer(printingConsumer);
+    TypeCheckerOptions typecheckOpts;
     LangOptions langOpts;
     langOpts.Target = llvm::Triple(llvm::sys::getDefaultTargetTriple());
     SearchPathOptions searchPathOpts;
-    auto ctx = ASTContext::get(langOpts, searchPathOpts, sourceMgr, diags);
+    ClangImporterOptions clangImpOpts;
+    symbolgraphgen::SymbolGraphOptions symbolGraphOpts;
+    SILOptions silOpts;
+    auto ctx = ASTContext::get(langOpts, typecheckOpts, silOpts, searchPathOpts,
+                               clangImpOpts, symbolGraphOpts, sourceMgr, diags);
 
-    auto loader = ParseableInterfaceModuleLoader::create(
-        *ctx, cacheDir, prebuiltCacheDir,
+    ctx->addModuleInterfaceChecker(
+      std::make_unique<ModuleInterfaceCheckerImpl>(*ctx, cacheDir,
+        prebuiltCacheDir, ModuleInterfaceLoaderOptions(),
+        swift::RequireOSSAModules_t(silOpts),
+        swift::RequireNoncopyableGenerics_t(langOpts)));
+
+    auto loader = ModuleInterfaceLoader::create(
+        *ctx, *static_cast<ModuleInterfaceCheckerImpl*>(
+          ctx->getModuleInterfaceChecker()),
         /*dependencyTracker*/nullptr,
         ModuleLoadingMode::PreferSerialized);
 
@@ -108,11 +122,14 @@ protected:
 
     std::unique_ptr<llvm::MemoryBuffer> moduleBuffer;
     std::unique_ptr<llvm::MemoryBuffer> moduleDocBuffer;
+    std::unique_ptr<llvm::MemoryBuffer> moduleSourceInfoBuffer;
 
     auto error =
-      loader->findModuleFilesInDirectory({moduleName, SourceLoc()}, tempDir,
-        "Library.swiftmodule", "Library.swiftdoc",
-        &moduleBuffer, &moduleDocBuffer);
+      loader->findModuleFilesInDirectory({moduleName, SourceLoc()},
+        SerializedModuleBaseName(tempDir, SerializedModuleBaseName("Library")),
+        /*ModuleInterfacePath=*/nullptr, /*ModuleInterfaceSourcePath=*/nullptr,
+        &moduleBuffer, &moduleDocBuffer, &moduleSourceInfoBuffer,
+        /*skipBuildingInterface*/ false, /*IsFramework*/false);
     ASSERT_FALSE(error);
     ASSERT_FALSE(diags.hadAnyError());
 
@@ -132,14 +149,17 @@ protected:
     ASSERT_TRUE(bufOrErr);
 
     auto bufData = (*bufOrErr)->getBuffer();
-    auto validationInfo = serialization::validateSerializedAST(bufData);
+    auto validationInfo = serialization::validateSerializedAST(
+        bufData, silOpts.EnableOSSAModules,
+        langOpts.hasFeature(Feature::NoncopyableGenerics),
+        /*requiredSDK*/StringRef());
     ASSERT_EQ(serialization::Status::Valid, validationInfo.status);
     ASSERT_EQ(bufData, moduleBuffer->getBuffer());
   }
 };
 
-TEST_F(ParseableInterfaceModuleLoaderTest, LoadModuleFromBuffer) {
-  setupAndLoadParseableModule();
+TEST_F(ModuleInterfaceLoaderTest, LoadModuleFromBuffer) {
+  setupAndLoadModuleInterface();
 }
 
 } // end namespace unittest

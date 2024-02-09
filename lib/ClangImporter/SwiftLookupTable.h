@@ -17,9 +17,11 @@
 #ifndef SWIFT_CLANGIMPORTER_SWIFTLOOKUPTABLE_H
 #define SWIFT_CLANGIMPORTER_SWIFTLOOKUPTABLE_H
 
+#include "swift/Basic/Debug.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/AST/Identifier.h"
 #include "clang/AST/Decl.h"
+#include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/Serialization/ASTBitCodes.h"
 #include "clang/Serialization/ModuleFileExtension.h"
@@ -186,6 +188,12 @@ public:
   EffectiveClangContext(const clang::DeclContext *dc)
       : KindOrBiasedLength(DeclContext) {
     assert(dc != nullptr && "use null constructor instead");
+
+    // Skip over any linkage spec decl contexts
+    while (auto externCDecl = dyn_cast<clang::LinkageSpecDecl>(dc)) {
+      dc = externCDecl->getLexicalDeclContext();
+    }
+
     if (auto tagDecl = dyn_cast<clang::TagDecl>(dc)) {
       DC = tagDecl->getCanonicalDecl();
     } else if (auto oiDecl = dyn_cast<clang::ObjCInterfaceDecl>(dc)) {
@@ -198,6 +206,7 @@ public:
       DC = fDecl->getCanonicalDecl();
     } else {
       assert(isa<clang::TranslationUnitDecl>(dc) ||
+             isa<clang::NamespaceDecl>(dc) ||
              isa<clang::ObjCContainerDecl>(dc) &&
                  "No other kinds of effective Clang contexts");
       DC = dc;
@@ -273,7 +282,8 @@ const uint16_t SWIFT_LOOKUP_TABLE_VERSION_MAJOR = 1;
 /// Lookup table minor version number.
 ///
 /// When the format changes IN ANY WAY, this number should be incremented.
-const uint16_t SWIFT_LOOKUP_TABLE_VERSION_MINOR = 15; // Special names
+const uint16_t SWIFT_LOOKUP_TABLE_VERSION_MINOR = 18; // Unsafe C++ method renaming.
+
 
 /// A lookup table that maps Swift names to the set of Clang
 /// declarations with that particular name.
@@ -307,8 +317,8 @@ public:
   static bool contextRequiresName(ContextKind kind);
 
   /// A single entry referencing either a named declaration or a macro.
-  typedef llvm::PointerUnion3<clang::NamedDecl *, clang::MacroInfo *, 
-                              clang::ModuleMacro *>
+  typedef llvm::PointerUnion<clang::NamedDecl *, clang::MacroInfo *,
+                             clang::ModuleMacro *>
     SingleEntry;
 
   /// A stored version of the context of an entity, which is Clang
@@ -382,10 +392,19 @@ public:
   }
 
 private:
+  using TableType =
+      llvm::DenseMap<SerializedSwiftName, SmallVector<FullTableEntry, 2>>;
+  using CacheCallback = void(SmallVectorImpl<FullTableEntry> &,
+                             SwiftLookupTableReader &,
+                             SerializedSwiftName);
+
   /// A table mapping from the base name of Swift entities to all of
   /// the C entities that have that name, in all contexts.
-  llvm::DenseMap<SerializedSwiftName, SmallVector<FullTableEntry, 2>>
-      LookupTable;
+  TableType LookupTable;
+
+  /// A table mapping the base names of Swift entities to all of the C entities
+  /// that are remapped to that name by the globals-as-members utility, in all contexts.
+  TableType GlobalsAsMembers;
 
   /// The list of Objective-C categories and extensions.
   llvm::SmallVector<clang::ObjCCategoryDecl *, 4> Categories;
@@ -395,7 +414,7 @@ private:
   ///
   /// The values use the same representation as
   /// FullTableEntry::DeclsOrMacros.
-  llvm::DenseMap<StoredContext, SmallVector<uint64_t, 2>> GlobalsAsMembers;
+  llvm::DenseMap<StoredContext, SmallVector<uint64_t, 2>> GlobalsAsMembersIndex;
 
   /// The reader responsible for lazily loading the contents of this table.
   SwiftLookupTableReader *Reader;
@@ -410,7 +429,9 @@ private:
 
   /// Find or create the table entry for the given base name.
   llvm::DenseMap<SerializedSwiftName, SmallVector<FullTableEntry, 2>>::iterator
-  findOrCreate(SerializedSwiftName baseName);
+  findOrCreate(TableType &table,
+               SerializedSwiftName baseName,
+               llvm::function_ref<CacheCallback> create);
 
   /// Add the given entry to the list of entries, if it's not already
   /// present.
@@ -471,8 +492,22 @@ private:
          llvm::Optional<StoredContext> searchContext);
 
   /// Retrieve the set of global declarations that are going to be
-  /// imported as members into the given context.
-  SmallVector<SingleEntry, 4> lookupGlobalsAsMembers(StoredContext context);
+  /// imported as the given Swift name into the given context.
+  ///
+  /// \param baseName The base name to search for. All results will
+  /// have this base name.
+  ///
+  /// \param searchContext The context in which the resulting set of
+  /// entities should reside. This may be None to indicate that
+  /// all results from all contexts should be produced.
+  SmallVector<SingleEntry, 4>
+  lookupGlobalsAsMembersImpl(SerializedSwiftName baseName,
+                             llvm::Optional<StoredContext> searchContext);
+
+  /// Retrieve the set of global declarations that are going to be imported as
+  /// members in the given context.
+  SmallVector<SingleEntry, 4>
+  allGlobalsAsMembersInContext(StoredContext context);
 
 public:
   /// Lookup an unresolved context name and resolve it to a Clang
@@ -485,8 +520,7 @@ public:
   /// have this base name.
   ///
   /// \param searchContext The context in which the resulting set of
-  /// entities should reside. This may be None to indicate that
-  /// all results from all contexts should be produced.
+  /// entities should reside.
   SmallVector<SingleEntry, 4> lookup(SerializedSwiftName baseName,
                                      EffectiveClangContext searchContext);
 
@@ -498,13 +532,27 @@ public:
   SmallVector<clang::NamedDecl *, 4>
   lookupObjCMembers(SerializedSwiftName baseName);
 
+  /// Lookup member operators with the given base name, regardless of context.
+  SmallVector<clang::NamedDecl *, 4>
+  lookupMemberOperators(SerializedSwiftName baseName);
+
   /// Retrieve the set of Objective-C categories and extensions.
   ArrayRef<clang::ObjCCategoryDecl *> categories();
 
   /// Retrieve the set of global declarations that are going to be
   /// imported as members into the given context.
+  ///
+  /// \param baseName The base name to search for. All results will
+  /// have this base name.
+  ///
+  /// \param searchContext The context in which the resulting set of
+  /// entities should reside.
   SmallVector<SingleEntry, 4>
-  lookupGlobalsAsMembers(EffectiveClangContext context);
+  lookupGlobalsAsMembers(SerializedSwiftName baseName,
+                         llvm::Optional<EffectiveClangContext> searchContext);
+
+  SmallVector<SingleEntry, 4>
+  allGlobalsAsMembersInContext(EffectiveClangContext context);
 
   /// Retrieve the set of global declarations that are going to be
   /// imported as members.
@@ -514,10 +562,13 @@ public:
   void deserializeAll();
 
   /// Dump the internal representation of this lookup table.
-  void dump() const;
+  SWIFT_DEBUG_DUMP;
+
+  void dump(llvm::raw_ostream &os) const;
 };
 
 namespace importer {
+class ClangSourceBufferImporter;
 class NameImporter;
 
 /// Add the given named declaration as an entry to the given Swift name
@@ -531,7 +582,8 @@ void addMacrosToLookupTable(SwiftLookupTable &table, NameImporter &);
 
 /// Finalize a lookup table, handling any as-yet-unresolved entries
 /// and emitting diagnostics if necessary.
-void finalizeLookupTable(SwiftLookupTable &table, NameImporter &);
+void finalizeLookupTable(SwiftLookupTable &table, NameImporter &,
+                         ClangSourceBufferImporter &buffersForDiagnostics);
 }
 }
 

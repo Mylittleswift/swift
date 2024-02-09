@@ -14,11 +14,13 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/AST/ASTPrinter.h"
 #include "swift/AST/TypeRepr.h"
 #include "swift/AST/ASTContext.h"
+#include "swift/AST/ASTPrinter.h"
 #include "swift/AST/ASTVisitor.h"
+#include "swift/AST/ASTWalker.h"
 #include "swift/AST/Expr.h"
+#include "swift/AST/GenericParamList.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/Types.h"
 #include "swift/Basic/Defer.h"
@@ -73,17 +75,94 @@ SourceRange TypeRepr::getSourceRange() const {
   llvm_unreachable("unknown kind!");
 }
 
-/// Standard allocator for TypeReprs.
-void *TypeRepr::operator new(size_t Bytes, const ASTContext &C,
-                             unsigned Alignment) {
-  return C.Allocate(Bytes, Alignment);
+bool TypeRepr::findIf(llvm::function_ref<bool(TypeRepr *)> pred) {
+  struct Walker : ASTWalker {
+    llvm::function_ref<bool(TypeRepr *)> Pred;
+    bool FoundIt;
+
+    explicit Walker(llvm::function_ref<bool(TypeRepr *)> pred)
+        : Pred(pred), FoundIt(false) {}
+
+    /// Walk everything in a macro
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::ArgumentsAndExpansion;
+    }
+
+    PreWalkAction walkToTypeReprPre(TypeRepr *ty) override {
+      if (Pred(ty)) {
+        FoundIt = true;
+        return Action::Stop();
+      }
+      return Action::Continue();
+    }
+  };
+
+  Walker walker(pred);
+  walk(walker);
+  return walker.FoundIt;
 }
 
-Identifier ComponentIdentTypeRepr::getIdentifier() const {
-  if (IdOrDecl.is<Identifier>())
-    return IdOrDecl.get<Identifier>();
+// TODO [OPAQUE SUPPORT]: We should probably use something like `Type`'s
+// `RecursiveProperties` to track this instead of computing it.
+bool TypeRepr::hasOpaque() {
+  return isa<NamedOpaqueReturnTypeRepr>(this) ||
+    findIf([](TypeRepr *ty) { return isa<OpaqueReturnTypeRepr>(ty); });
+}
 
-  return IdOrDecl.get<TypeDecl *>()->getName();
+TypeRepr *TypeRepr::getWithoutParens() const {
+  auto *repr = const_cast<TypeRepr *>(this);
+  while (auto *tupleRepr = dyn_cast<TupleTypeRepr>(repr)) {
+    if (!tupleRepr->isParenType())
+      break;
+    repr = tupleRepr->getElementType(0);
+  }
+  return repr;
+}
+
+SourceLoc TypeRepr::findAttrLoc(TypeAttrKind kind) const {
+  auto typeRepr = this;
+  while (auto attrTypeRepr = dyn_cast<AttributedTypeRepr>(typeRepr)) {
+    for (auto attr : attrTypeRepr->getAttrs()) {
+      if (auto typeAttr = attr.dyn_cast<TypeAttribute*>())
+        if (typeAttr->getKind() == kind)
+          return typeAttr->getAttrLoc();
+    }
+
+    typeRepr = attrTypeRepr->getTypeRepr();
+  }
+
+  return SourceLoc();
+}
+
+TypeDecl *DeclRefTypeRepr::getBoundDecl() const {
+  return const_cast<DeclRefTypeRepr *>(this)
+      ->getLastComponent()
+      ->getBoundDecl();
+}
+
+DeclNameRef DeclRefTypeRepr::getNameRef() const {
+  return const_cast<DeclRefTypeRepr *>(this)->getLastComponent()->getNameRef();
+}
+
+TypeRepr *DeclRefTypeRepr::getBaseComponent() {
+  if (auto *ITR = dyn_cast<IdentTypeRepr>(this))
+    return ITR;
+
+  return cast<MemberTypeRepr>(this)->getBaseComponent();
+}
+
+IdentTypeRepr *DeclRefTypeRepr::getLastComponent() {
+  if (auto *ITR = dyn_cast<IdentTypeRepr>(this))
+    return ITR;
+
+  return cast<MemberTypeRepr>(this)->getLastComponent();
+}
+
+DeclNameRef IdentTypeRepr::getNameRef() const {
+  if (IdOrDecl.is<DeclNameRef>())
+    return IdOrDecl.get<DeclNameRef>();
+
+  return IdOrDecl.get<TypeDecl *>()->createNameRef();
 }
 
 static void printTypeRepr(const TypeRepr *TyR, ASTPrinter &Printer,
@@ -116,156 +195,41 @@ void TypeRepr::print(ASTPrinter &Printer, const PrintOptions &Opts) const {
   llvm_unreachable("unknown kind!");
 }
 
-namespace {
-  class CloneVisitor : public TypeReprVisitor<CloneVisitor, TypeRepr *> {
-    const ASTContext &Ctx;
-
-  public:
-    explicit CloneVisitor(const ASTContext &ctx) : Ctx(ctx) { }
-
-#define TYPEREPR(CLASS, PARENT) \
-    TypeRepr *visit##CLASS##TypeRepr(CLASS##TypeRepr* type);
-#include "swift/AST/TypeReprNodes.def"
-  };
-} // end anonymous namespace
-
-TypeRepr *CloneVisitor::visitErrorTypeRepr(ErrorTypeRepr *T) {
-  return new (Ctx) ErrorTypeRepr(T->getSourceRange());
-}
-
-TypeRepr *CloneVisitor::visitAttributedTypeRepr(AttributedTypeRepr *T) {
-  return new (Ctx) AttributedTypeRepr(T->getAttrs(), visit(T->getTypeRepr()));
-}
-
-TypeRepr *CloneVisitor::visitSimpleIdentTypeRepr(SimpleIdentTypeRepr *T) {
-  return new (Ctx) SimpleIdentTypeRepr(T->getIdLoc(), T->getIdentifier());
-}
-
-TypeRepr *CloneVisitor::visitGenericIdentTypeRepr(GenericIdentTypeRepr *T) {
-  // Clone the generic arguments.
-  SmallVector<TypeRepr*, 8> genericArgs;
-  genericArgs.reserve(T->getGenericArgs().size());
-  for (auto &arg : T->getGenericArgs()) {
-    genericArgs.push_back(visit(arg));
-  }
-  return GenericIdentTypeRepr::create(Ctx, T->getIdLoc(), T->getIdentifier(),
-                                        genericArgs, T->getAngleBrackets());
-}
-
-TypeRepr *CloneVisitor::visitCompoundIdentTypeRepr(CompoundIdentTypeRepr *T) {
-  // Clone the components.
-  SmallVector<ComponentIdentTypeRepr*, 8> components;
-  components.reserve(T->getComponents().size());
-  for (auto &component : T->getComponents()) {
-    components.push_back(cast<ComponentIdentTypeRepr>(visit(component)));
-  }
-  return CompoundIdentTypeRepr::create(Ctx, components);
-}
-
-TypeRepr *CloneVisitor::visitFunctionTypeRepr(FunctionTypeRepr *T) {
-  return new (Ctx) FunctionTypeRepr(
-                              /*FIXME: Clone?*/T->getGenericParams(),
-                              cast<TupleTypeRepr>(visit(T->getArgsTypeRepr())),
-                              T->getThrowsLoc(),
-                              T->getArrowLoc(),
-                              visit(T->getResultTypeRepr()));
-}
-
-TypeRepr *CloneVisitor::visitArrayTypeRepr(ArrayTypeRepr *T) {
-  return new (Ctx) ArrayTypeRepr(visit(T->getBase()), T->getBrackets());
-}
-
-TypeRepr *CloneVisitor::visitDictionaryTypeRepr(DictionaryTypeRepr *T) {
-  return new (Ctx) DictionaryTypeRepr(visit(T->getKey()), visit(T->getValue()),
-                                      T->getColonLoc(), T->getBrackets());
-}
-
-TypeRepr *CloneVisitor::visitOptionalTypeRepr(OptionalTypeRepr *T) {
-  return new (Ctx) OptionalTypeRepr(visit(T->getBase()), T->getQuestionLoc());
-}
-
-TypeRepr * CloneVisitor::visitImplicitlyUnwrappedOptionalTypeRepr(
-             ImplicitlyUnwrappedOptionalTypeRepr *T) {
-  return new (Ctx) ImplicitlyUnwrappedOptionalTypeRepr(visit(T->getBase()),
-                                                       T->getExclamationLoc());
-}
-
-TypeRepr *CloneVisitor::visitTupleTypeRepr(TupleTypeRepr *T) {
-  SmallVector<TupleTypeReprElement, 8> elements;
-  elements.reserve(T->getNumElements());
-  for (auto arg : T->getElements()) {
-    arg.Type = visit(arg.Type);
-    elements.push_back(arg);
-  }
-  return TupleTypeRepr::create(Ctx, elements,
-                               T->getParens(),
-                               T->getEllipsisLoc(),
-                               T->getEllipsisIndex());
-}
-
-TypeRepr *CloneVisitor::visitCompositionTypeRepr(CompositionTypeRepr *T) {
-  // Clone the protocols.
-  SmallVector<TypeRepr*, 8> types;
-  types.reserve(T->getTypes().size());
-  for (auto &type : T->getTypes()) {
-    types.push_back(cast<TypeRepr>(visit(type)));
-  }
-
-  return CompositionTypeRepr::create(Ctx, types, T->getStartLoc(),
-                                     T->getCompositionRange());
-}
-
-TypeRepr *CloneVisitor::visitMetatypeTypeRepr(MetatypeTypeRepr *T) {
-  return new (Ctx) MetatypeTypeRepr(visit(T->getBase()), T->getMetaLoc());
-}
-
-TypeRepr *CloneVisitor::visitProtocolTypeRepr(ProtocolTypeRepr *T) {
-  return new (Ctx) ProtocolTypeRepr(visit(T->getBase()), T->getProtocolLoc());
-}
-
-TypeRepr *CloneVisitor::visitInOutTypeRepr(InOutTypeRepr *T) {
-  return new (Ctx) InOutTypeRepr(visit(T->getBase()), T->getSpecifierLoc());
-}
-
-TypeRepr *CloneVisitor::visitSharedTypeRepr(SharedTypeRepr *T) {
-  return new (Ctx) SharedTypeRepr(visit(T->getBase()), T->getSpecifierLoc());
-}
-
-TypeRepr *CloneVisitor::visitOwnedTypeRepr(OwnedTypeRepr *T) {
-  return new (Ctx) OwnedTypeRepr(visit(T->getBase()), T->getSpecifierLoc());
-}
-
-TypeRepr *CloneVisitor::visitFixedTypeRepr(FixedTypeRepr *T) {
-  return new (Ctx) FixedTypeRepr(T->getType(), T->getLoc());
-}
-
-TypeRepr *CloneVisitor::visitSILBoxTypeRepr(SILBoxTypeRepr *type) {
-  SmallVector<SILBoxTypeRepr::Field, 4> cloneFields;
-  SmallVector<TypeRepr *, 4> cloneArgs;
-  
-  for (auto &field : type->getFields())
-    cloneFields.push_back({field.getLoc(), field.isMutable(),
-                           visit(field.getFieldType())});
-  for (auto *arg : type->getGenericArguments())
-    cloneArgs.push_back(visit(arg));
-  
-  return new (Ctx) SILBoxTypeRepr(/*FIXME: Clone?*/type->getGenericParams(),
-                                type->getLBraceLoc(),
-                                Ctx.AllocateCopy(cloneFields),
-                                type->getRBraceLoc(),
-                                type->getArgumentLAngleLoc(),
-                                Ctx.AllocateCopy(cloneArgs),
-                                type->getArgumentRAngleLoc());
-}
-
-TypeRepr *TypeRepr::clone(const ASTContext &ctx) const {
-  CloneVisitor visitor(ctx);
-  return visitor.visit(const_cast<TypeRepr *>(this));
-}
-
 void ErrorTypeRepr::printImpl(ASTPrinter &Printer,
                               const PrintOptions &Opts) const {
   Printer << "<<error type>>";
+}
+
+AttributedTypeRepr *AttributedTypeRepr::create(const ASTContext &C,
+                                               ArrayRef<TypeOrCustomAttr> attrs,
+                                               TypeRepr *ty) {
+  size_t size = totalSizeToAlloc<TypeOrCustomAttr>(attrs.size());
+  void *mem = C.Allocate(size, alignof(AttributedTypeRepr));
+  return new (mem) AttributedTypeRepr(attrs, ty);
+}
+
+TypeAttribute *AttributedTypeRepr::get(TypeAttrKind kind) const {
+  for (auto attr : getAttrs()) {
+    auto typeAttr = attr.dyn_cast<TypeAttribute*>();
+    if (typeAttr && typeAttr->getKind() == kind)
+      return typeAttr;
+  }
+  return nullptr;
+}
+
+ReferenceOwnership AttributedTypeRepr::getSILOwnership() const {
+  for (auto attr : getAttrs()) {
+    auto typeAttr = attr.dyn_cast<TypeAttribute*>();
+    if (!typeAttr) continue;
+    switch (typeAttr->getKind()) {
+#define REF_STORAGE(Name, name, ...)                                           \
+  case TypeAttrKind::SIL##Name:                                                \
+    return ReferenceOwnership::Name;
+#include "swift/AST/ReferenceStorage.def"
+    default: continue;
+    }
+  }
+  return ReferenceOwnership::Strong;
 }
 
 void AttributedTypeRepr::printImpl(ASTPrinter &Printer,
@@ -281,40 +245,20 @@ void AttributedTypeRepr::printAttrs(llvm::raw_ostream &OS) const {
 
 void AttributedTypeRepr::printAttrs(ASTPrinter &Printer,
                                     const PrintOptions &Options) const {
-  const TypeAttributes &Attrs = getAttrs();
-
-  auto hasAttr = [&](TypeAttrKind K) -> bool {
-    if (Options.excludeAttrKind(K))
-      return false;
-    return Attrs.has(K);
-  };
-
-  if (hasAttr(TAK_autoclosure))
-    Printer.printSimpleAttr("@autoclosure") << " ";
-  if (hasAttr(TAK_escaping))
-    Printer.printSimpleAttr("@escaping") << " ";
-
-  if (hasAttr(TAK_thin))
-    Printer.printSimpleAttr("@thin") << " ";
-  if (hasAttr(TAK_thick))
-    Printer.printSimpleAttr("@thick") << " ";
-
-  if (hasAttr(TAK_convention) && Attrs.convention.hasValue()) {
-    Printer.callPrintStructurePre(PrintStructureKind::BuiltinAttribute);
-    Printer.printAttrName("@convention");
-    Printer << "(" << Attrs.convention.getValue() << ")";
-    Printer.printStructurePost(PrintStructureKind::BuiltinAttribute);
+  for (auto attr : getAttrs()) {
+    if (auto customAttr = attr.dyn_cast<CustomAttr*>()) {
+      Printer.callPrintStructurePre(PrintStructureKind::BuiltinAttribute);
+      Printer << "@";
+      customAttr->getTypeRepr()->print(Printer, Options);
+      Printer.printStructurePost(PrintStructureKind::BuiltinAttribute);
+    } else {
+      auto typeAttr = attr.get<TypeAttribute*>();
+      if (Options.excludeAttrKind(typeAttr->getKind()))
+        continue;
+      typeAttr->print(Printer, Options);
+    }
     Printer << " ";
   }
-}
-
-IdentTypeRepr *IdentTypeRepr::create(ASTContext &C,
-                                ArrayRef<ComponentIdentTypeRepr *> Components) {
-  assert(!Components.empty());
-  if (Components.size() == 1)
-    return Components.front();
-
-  return CompoundIdentTypeRepr::create(C, Components);
 }
 
 static void printGenericArgs(ASTPrinter &Printer, const PrintOptions &Opts,
@@ -328,25 +272,25 @@ static void printGenericArgs(ASTPrinter &Printer, const PrintOptions &Opts,
   Printer << ">";
 }
 
-void ComponentIdentTypeRepr::printImpl(ASTPrinter &Printer,
-                                       const PrintOptions &Opts) const {
+void IdentTypeRepr::printImpl(ASTPrinter &Printer,
+                              const PrintOptions &Opts) const {
   if (auto *TD = dyn_cast_or_null<TypeDecl>(getBoundDecl())) {
     if (auto MD = dyn_cast<ModuleDecl>(TD))
-      Printer.printModuleRef(MD, getIdentifier());
+      Printer.printModuleRef(MD, getNameRef().getBaseIdentifier());
     else
-      Printer.printTypeRef(Type(), TD, getIdentifier());
+      Printer.printTypeRef(Type(), TD, getNameRef().getBaseIdentifier());
   } else {
-    Printer.printName(getIdentifier());
+    Printer.printName(getNameRef().getBaseIdentifier());
   }
 
   if (auto GenIdT = dyn_cast<GenericIdentTypeRepr>(this))
     printGenericArgs(Printer, Opts, GenIdT->getGenericArgs());
 }
 
-void CompoundIdentTypeRepr::printImpl(ASTPrinter &Printer,
-                                      const PrintOptions &Opts) const {
-  printTypeRepr(getComponents().front(), Printer, Opts);
-  for (auto C : getComponents().slice(1)) {
+void MemberTypeRepr::printImpl(ASTPrinter &Printer,
+                               const PrintOptions &Opts) const {
+  printTypeRepr(getBaseComponent(), Printer, Opts);
+  for (auto C : getMemberComponents()) {
     Printer << ".";
     printTypeRepr(C, Printer, Opts);
   }
@@ -356,9 +300,20 @@ void FunctionTypeRepr::printImpl(ASTPrinter &Printer,
                                  const PrintOptions &Opts) const {
   Printer.callPrintStructurePre(PrintStructureKind::FunctionType);
   printTypeRepr(ArgsTy, Printer, Opts);
-  if (throws()) {
+  if (isAsync()) {
+    Printer << " ";
+    Printer.printKeyword("async", Opts);
+  }
+  if (isThrowing()) {
     Printer << " ";
     Printer.printKeyword("throws", Opts);
+
+    if (ThrownTy) {
+      // FIXME: Do we need a PrintStructureKind for this?
+      Printer << "(";
+      printTypeRepr(ThrownTy, Printer, Opts);
+      Printer << ")";
+    }
   }
   Printer << " -> ";
   Printer.callPrintStructurePre(PrintStructureKind::FunctionReturnType);
@@ -396,46 +351,31 @@ void ImplicitlyUnwrappedOptionalTypeRepr::printImpl(ASTPrinter &Printer,
 }
 
 TupleTypeRepr::TupleTypeRepr(ArrayRef<TupleTypeReprElement> Elements,
-                             SourceRange Parens,
-                             SourceLoc Ellipsis, unsigned EllipsisIdx)
+                             SourceRange Parens)
     : TypeRepr(TypeReprKind::Tuple), Parens(Parens) {
-  Bits.TupleTypeRepr.HasEllipsis = Ellipsis.isValid();
   Bits.TupleTypeRepr.NumElements = Elements.size();
 
-  // Copy elements.
   std::uninitialized_copy(Elements.begin(), Elements.end(),
                           getTrailingObjects<TupleTypeReprElement>());
-
-  // Set ellipsis location and index.
-  if (Ellipsis.isValid()) {
-    getTrailingObjects<SourceLocAndIdx>()[0] = {Ellipsis, EllipsisIdx};
-  }
 }
 
 TupleTypeRepr *TupleTypeRepr::create(const ASTContext &C,
                                      ArrayRef<TupleTypeReprElement> Elements,
-                                     SourceRange Parens,
-                                     SourceLoc Ellipsis, unsigned EllipsisIdx) {
-  assert(Ellipsis.isValid() ? EllipsisIdx < Elements.size()
-                            : EllipsisIdx == Elements.size());
-
+                                     SourceRange Parens) {
   size_t size =
-    totalSizeToAlloc<TupleTypeReprElement, SourceLocAndIdx>(
-      Elements.size(), Ellipsis.isValid() ? 1 : 0);
+    totalSizeToAlloc<TupleTypeReprElement>(Elements.size());
   void *mem = C.Allocate(size, alignof(TupleTypeRepr));
-  return new (mem) TupleTypeRepr(Elements, Parens,
-                                 Ellipsis, EllipsisIdx);
+  return new (mem) TupleTypeRepr(Elements, Parens);
 }
 
 TupleTypeRepr *TupleTypeRepr::createEmpty(const ASTContext &C,
                                           SourceRange Parens) {
-  return create(C, {}, Parens,
-      /*Ellipsis=*/SourceLoc(), /*EllipsisIdx=*/0);
+  return create(C, {}, Parens);
 }
 
 GenericIdentTypeRepr *GenericIdentTypeRepr::create(const ASTContext &C,
-                                                   SourceLoc Loc,
-                                                   Identifier Id,
+                                                   DeclNameLoc Loc,
+                                                   DeclNameRef Id,
                                                 ArrayRef<TypeRepr*> GenericArgs,
                                                    SourceRange AngleBrackets) {
   auto size = totalSizeToAlloc<TypeRepr*>(GenericArgs.size());
@@ -443,11 +383,38 @@ GenericIdentTypeRepr *GenericIdentTypeRepr::create(const ASTContext &C,
   return new (mem) GenericIdentTypeRepr(Loc, Id, GenericArgs, AngleBrackets);
 }
 
-CompoundIdentTypeRepr *CompoundIdentTypeRepr::create(const ASTContext &C,
-                                 ArrayRef<ComponentIdentTypeRepr*> Components) {
-  auto size = totalSizeToAlloc<ComponentIdentTypeRepr*>(Components.size());
-  auto mem = C.Allocate(size, alignof(CompoundIdentTypeRepr));
-  return new (mem) CompoundIdentTypeRepr(Components);
+TypeRepr *MemberTypeRepr::create(const ASTContext &C, TypeRepr *Base,
+                                 ArrayRef<IdentTypeRepr *> MemberComponents) {
+  if (MemberComponents.empty())
+    return Base;
+
+  auto size = totalSizeToAlloc<IdentTypeRepr *>(MemberComponents.size());
+  auto mem = C.Allocate(size, alignof(MemberTypeRepr));
+  return new (mem) MemberTypeRepr(Base, MemberComponents);
+}
+
+DeclRefTypeRepr *MemberTypeRepr::create(const ASTContext &Ctx,
+                                        ArrayRef<IdentTypeRepr *> Components) {
+  return cast<DeclRefTypeRepr>(
+      create(Ctx, Components.front(), Components.drop_front()));
+}
+
+PackTypeRepr::PackTypeRepr(SourceLoc keywordLoc, SourceRange braceLocs,
+                           ArrayRef<TypeRepr*> elements)
+  : TypeRepr(TypeReprKind::Pack),
+    KeywordLoc(keywordLoc), BraceLocs(braceLocs) {
+  Bits.PackTypeRepr.NumElements = elements.size();
+  memcpy(getTrailingObjects<TypeRepr*>(), elements.data(),
+         elements.size() * sizeof(TypeRepr*));
+}
+
+PackTypeRepr *PackTypeRepr::create(const ASTContext &ctx,
+                                   SourceLoc keywordLoc,
+                                   SourceRange braceLocs,
+                                   ArrayRef<TypeRepr*> elements) {
+  auto size = totalSizeToAlloc<TypeRepr*>(elements.size());
+  auto mem = ctx.Allocate(size, alignof(PackTypeRepr));
+  return new (mem) PackTypeRepr(keywordLoc, braceLocs, elements);
 }
 
 SILBoxTypeRepr *SILBoxTypeRepr::create(ASTContext &C,
@@ -481,6 +448,66 @@ SourceLoc SILBoxTypeRepr::getLocImpl() const {
   return LBraceLoc;
 }
 
+LifetimeDependentReturnTypeRepr *LifetimeDependentReturnTypeRepr::create(
+    ASTContext &C, TypeRepr *base,
+    ArrayRef<LifetimeDependenceSpecifier> specifiers) {
+  auto size = totalSizeToAlloc<LifetimeDependenceSpecifier>(specifiers.size());
+  auto mem = C.Allocate(size, alignof(LifetimeDependenceSpecifier));
+  return new (mem) LifetimeDependentReturnTypeRepr(base, specifiers);
+}
+
+SourceLoc LifetimeDependentReturnTypeRepr::getStartLocImpl() const {
+  return getLifetimeDependencies().front().getLoc();
+}
+
+SourceLoc LifetimeDependentReturnTypeRepr::getEndLocImpl() const {
+  return getLifetimeDependencies().back().getLoc();
+}
+
+SourceLoc LifetimeDependentReturnTypeRepr::getLocImpl() const {
+  return getBase()->getLoc();
+}
+
+void LifetimeDependentReturnTypeRepr::printImpl(
+    ASTPrinter &Printer, const PrintOptions &Opts) const {
+  for (auto &dep : getLifetimeDependencies()) {
+    Printer << dep.getLifetimeDependenceKindString() << "(";
+    Printer << dep.getParamString() << ")";
+  }
+
+  printTypeRepr(getBase(), Printer, Opts);
+}
+
+void VarargTypeRepr::printImpl(ASTPrinter &Printer,
+                               const PrintOptions &Opts) const {
+  printTypeRepr(Element, Printer, Opts);
+  Printer << "...";
+}
+
+void PackTypeRepr::printImpl(ASTPrinter &Printer,
+                             const PrintOptions &Opts) const {
+  Printer.printKeyword("Pack", Opts);
+  Printer << "{";
+  auto elts = getElements();
+  for (size_t i = 0, e = elts.size(); i != e; ++i) {
+    if (i) Printer << ", ";
+    printTypeRepr(elts[i], Printer, Opts);
+  }
+  Printer << "}";
+}
+
+void PackExpansionTypeRepr::printImpl(ASTPrinter &Printer,
+                                      const PrintOptions &Opts) const {
+  Printer.printKeyword("repeat", Opts, /*Suffix=*/" ");
+  printTypeRepr(Pattern, Printer, Opts);
+}
+
+void PackElementTypeRepr::printImpl(ASTPrinter &Printer,
+                                    const PrintOptions &Opts) const {
+  Printer.printKeyword("each", Opts, /*Suffix=*/" ");
+  printTypeRepr(PackType, Printer, Opts);
+}
+
 void TupleTypeRepr::printImpl(ASTPrinter &Printer,
                               const PrintOptions &Opts) const {
   Printer.callPrintStructurePre(PrintStructureKind::TupleType);
@@ -509,9 +536,6 @@ void TupleTypeRepr::printImpl(ASTPrinter &Printer,
     }
     printTypeRepr(getElementType(i), Printer, Opts);
     Printer.printStructurePost(PrintStructureKind::TupleElement);
-
-    if (hasEllipsis() && getEllipsisIndex() == i)
-      Printer << "...";
   }
 
   Printer << ")";
@@ -529,7 +553,7 @@ CompositionTypeRepr *CompositionTypeRepr::create(const ASTContext &C,
 void CompositionTypeRepr::printImpl(ASTPrinter &Printer,
                                     const PrintOptions &Opts) const {
   if (getTypes().empty()) {
-    Printer << "Any";
+    Printer.printKeyword("Any", Opts);
   } else {
     interleave(getTypes(), [&](TypeRepr *T) { printTypeRepr(T, Printer, Opts);},
                [&] { Printer << " & "; });
@@ -548,28 +572,89 @@ void ProtocolTypeRepr::printImpl(ASTPrinter &Printer,
   Printer << ".Protocol";
 }
 
+void OpaqueReturnTypeRepr::printImpl(ASTPrinter &Printer,
+                                     const PrintOptions &Opts) const {
+  Printer.printKeyword("some", Opts, /*Suffix=*/" ");
+  printTypeRepr(Constraint, Printer, Opts);
+}
+
+void ExistentialTypeRepr::printImpl(ASTPrinter &Printer,
+                                    const PrintOptions &Opts) const {
+  Printer.printKeyword("any", Opts, /*Suffix=*/" ");
+  printTypeRepr(Constraint, Printer, Opts);
+}
+
+SourceLoc NamedOpaqueReturnTypeRepr::getStartLocImpl() const {
+  return GenericParams->getLAngleLoc();
+}
+
+SourceLoc NamedOpaqueReturnTypeRepr::getEndLocImpl() const {
+  return Base->getEndLoc();
+}
+
+SourceLoc NamedOpaqueReturnTypeRepr::getLocImpl() const {
+  return Base->getLoc();
+}
+
+void NamedOpaqueReturnTypeRepr::printImpl(ASTPrinter &Printer,
+                                          const PrintOptions &Opts) const {
+  GenericParams->print(Printer, Opts);
+  Printer << ' ';
+  printTypeRepr(Base, Printer, Opts);
+}
+
+void InverseTypeRepr::printImpl(ASTPrinter &Printer,
+                                const PrintOptions &Opts) const {
+  Printer << "~";
+  printTypeRepr(Constraint, Printer, Opts);
+}
 
 void SpecifierTypeRepr::printImpl(ASTPrinter &Printer,
                                   const PrintOptions &Opts) const {
   switch (getKind()) {
-  case TypeReprKind::InOut:
-    Printer.printKeyword("inout", Opts, " ");
+#define TYPEREPR(CLASS, PARENT) case TypeReprKind::CLASS:
+#define SPECIFIER_TYPEREPR(CLASS, PARENT)
+#include "swift/AST/TypeReprNodes.def"
+    llvm_unreachable("invalid repr kind");
     break;
-  case TypeReprKind::Shared:
-    Printer.printKeyword("__shared", Opts, " ");
+  case TypeReprKind::Ownership: {
+    auto ownershipRepr = cast<OwnershipTypeRepr>(this);
+    Printer.printKeyword(ownershipRepr->getSpecifierSpelling(), Opts, " ");
     break;
-  case TypeReprKind::Owned:
-    Printer.printKeyword("__owned", Opts, " ");
+  }
+  case TypeReprKind::Isolated:
+    Printer.printKeyword("isolated", Opts, " ");
     break;
-  default:
-    llvm_unreachable("unknown specifier type repr");
+  case TypeReprKind::CompileTimeConst:
+    Printer.printKeyword("_const", Opts, " ");
+    break;
+  case TypeReprKind::ResultDependsOn:
+    Printer.printKeyword("_resultDependsOn", Opts, " ");
     break;
   }
   printTypeRepr(Base, Printer, Opts);
 }
 
+StringRef OwnershipTypeRepr::getSpecifierSpelling() const {
+  return ParamDecl::getSpecifierSpelling(getSpecifier());
+}
+
+ValueOwnership OwnershipTypeRepr::getValueOwnership() const {
+  return ParamDecl::getValueOwnershipForSpecifier(getSpecifier());
+}
+
+void PlaceholderTypeRepr::printImpl(ASTPrinter &Printer,
+                                    const PrintOptions &Opts) const {
+  Printer.printText("_");
+}
+
 void FixedTypeRepr::printImpl(ASTPrinter &Printer,
                               const PrintOptions &Opts) const {
+  getType().print(Printer, Opts);
+}
+
+void SelfTypeRepr::printImpl(ASTPrinter &Printer,
+                             const PrintOptions &Opts) const {
   getType().print(Printer, Opts);
 }
 
@@ -579,19 +664,28 @@ void SILBoxTypeRepr::printImpl(ASTPrinter &Printer,
   Printer.printKeyword("sil_box", Opts);
 }
 
+void ErrorTypeRepr::dischargeDiagnostic(swift::ASTContext &Context) {
+  if (!DelayedDiag)
+    return;
+
+  // Consume and emit the diagnostic.
+  Context.Diags.diagnose(Range.Start, *DelayedDiag).highlight(Range);
+  DelayedDiag = llvm::None;
+}
+
 // See swift/Basic/Statistic.h for declaration: this enables tracing
 // TypeReprs, is defined here to avoid too much layering violation / circular
 // linkage dependency.
 
 struct TypeReprTraceFormatter : public UnifiedStatsReporter::TraceFormatter {
-  void traceName(const void *Entity, raw_ostream &OS) const {
+  void traceName(const void *Entity, raw_ostream &OS) const override {
     if (!Entity)
       return;
     const TypeRepr *TR = static_cast<const TypeRepr *>(Entity);
     TR->print(OS);
   }
   void traceLoc(const void *Entity, SourceManager *SM,
-                clang::SourceManager *CSM, raw_ostream &OS) const {
+                clang::SourceManager *CSM, raw_ostream &OS) const override {
     if (!Entity)
       return;
     const TypeRepr *TR = static_cast<const TypeRepr *>(Entity);

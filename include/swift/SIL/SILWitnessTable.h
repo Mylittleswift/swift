@@ -28,7 +28,6 @@
 #include "swift/AST/ProtocolConformanceRef.h"
 #include "llvm/ADT/ilist_node.h"
 #include "llvm/ADT/ilist.h"
-#include <string>
 
 namespace swift {
 
@@ -49,7 +48,8 @@ public:
     /// The method required.
     SILDeclRef Requirement;
     /// The witness for the method.
-    /// This can be null in case dead function elimination has removed the method.
+    /// This can be null in case dead function elimination has removed the method
+    /// or if the method was not serialized (for de-serialized witness tables).
     SILFunction *Witness;
   };
   
@@ -90,7 +90,7 @@ public:
     AssociatedType,
     AssociatedTypeProtocol,
     BaseProtocol
-  };
+  } ENUM_EXTENSIBILITY_ATTR(open);
   
   /// A witness table entry.
   class Entry {
@@ -223,6 +223,8 @@ public:
                                  RootProtocolConformance *conformance);
 
   ~SILWitnessTable();
+  
+  SILModule &getModule() const { return Mod; }
 
   /// Return the AST ProtocolConformance this witness table represents.
   RootProtocolConformance *getConformance() const {
@@ -236,12 +238,8 @@ public:
   /// Return the protocol for which this witness table is a conformance.
   ProtocolDecl *getProtocol() const;
 
-  /// Return the formal type which conforms to the protocol.
-  ///
-  /// Note that this will not be a substituted type: it may only be meaningful
-  /// in the abstract context of the conformance rather than the context of any
-  /// particular use of it.
-  CanType getConformingType() const;
+  /// Return the nominal type declaration which conforms to the protocol.
+  NominalTypeDecl *getConformingNominal() const;
 
   /// Return the symbol name of the witness table that will be propagated to the
   /// object file level.
@@ -260,7 +258,6 @@ public:
 
   /// Sets the serialized flag.
   void setSerialized(IsSerialized_t serialized) {
-    assert(serialized != IsSerializable);
     Serialized = (serialized ? 1 : 0);
   }
 

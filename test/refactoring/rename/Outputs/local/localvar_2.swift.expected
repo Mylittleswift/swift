@@ -3,8 +3,8 @@ func test1() {
     let x = 1
     print(x)
   } else {
-    let xRenamed = 2
-    print(xRenamed)
+    let <base>x</base> = 2
+    print(<base>x</base>)
   }
 }
 
@@ -45,5 +45,13 @@ func test4(arg: () throws -> Void) {
 func test5(_ x: Int) {
   let x = x 
   print(x)
+}
+
+func testCaptureVariable() {
+  let capturedVariable = 0
+
+  _ = { [capturedVariable] in
+    print(capturedVariable)
+  }
 }
 

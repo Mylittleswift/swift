@@ -12,6 +12,9 @@
 // RUN: %target-run-simple-swiftgyb
 // REQUIRES: executable_test
 
+// With a non-optimized stdlib the test takes very long.
+// REQUIRES: optimized_stdlib
+
 %{
 
 from gyb_stdlib_support import (
@@ -335,7 +338,7 @@ tests.test("BidirectionalCollection") {
   }
 
   // Can't upgrade a non-random-access collection to random access
-  let s0 = "Hello, Woyld"
+  let s0 = "Hello, World"
   let bc1 = AnyBidirectionalCollection(s0)
   let fc3 = AnyCollection(bc1)
   expectTrue(storesSameUnderlyingCollection(fc3, bc1))

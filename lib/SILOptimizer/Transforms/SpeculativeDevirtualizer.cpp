@@ -81,14 +81,19 @@ static SILBasicBlock *cloneEdge(TermInst *TI, unsigned SuccIndex) {
 }
 
 // A utility function for cloning the apply instruction.
-static FullApplySite CloneApply(FullApplySite AI, SILBuilder &Builder) {
+static FullApplySite CloneApply(FullApplySite AI, SILValue SelfArg,
+                                SILBuilder &Builder) {
   // Clone the Apply.
   Builder.setCurrentDebugScope(AI.getDebugScope());
-  Builder.addOpenedArchetypeOperands(AI.getInstruction());
   auto Args = AI.getArguments();
   SmallVector<SILValue, 8> Ret(Args.size());
-  for (unsigned i = 0, e = Args.size(); i != e; ++i)
-    Ret[i] = Args[i];
+  for (unsigned i = 0, e = Args.size(); i != e; ++i) {
+    if (i == e - 1 && SelfArg) {
+      Ret[i] = SelfArg;
+    } else {
+      Ret[i] = Args[i];
+    }
+  }
 
   FullApplySite NAI;
 
@@ -96,8 +101,7 @@ static FullApplySite CloneApply(FullApplySite AI, SILBuilder &Builder) {
   case SILInstructionKind::ApplyInst:
     NAI = Builder.createApply(AI.getLoc(), AI.getCallee(),
                               AI.getSubstitutionMap(),
-                              Ret,
-                              cast<ApplyInst>(AI)->isNonThrowing());
+                              Ret, AI.getApplyOptions());
     break;
   case SILInstructionKind::TryApplyInst: {
     auto *TryApplyI = cast<TryApplyInst>(AI.getInstruction());
@@ -105,7 +109,8 @@ static FullApplySite CloneApply(FullApplySite AI, SILBuilder &Builder) {
     auto ErrorBB = cloneEdge(TryApplyI, TryApplyInst::ErrorIdx);
     NAI = Builder.createTryApply(AI.getLoc(), AI.getCallee(),
                                  AI.getSubstitutionMap(),
-                                 Ret, NormalBB, ErrorBB);
+                                 Ret, NormalBB, ErrorBB,
+                                 AI.getApplyOptions());
     break;
   }
   default:
@@ -118,15 +123,15 @@ static FullApplySite CloneApply(FullApplySite AI, SILBuilder &Builder) {
 /// Insert monomorphic inline caches for a specific class or metatype
 /// type \p SubClassTy.
 static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
-                                                CanType SubType,
-                                                ClassDecl *CD,
+                                                CanType SubType, ClassDecl *CD,
+                                                CanType ClassType,
                                                 CheckedCastBranchInst *&CCBI) {
   if (SubType->hasDynamicSelfType())
     return FullApplySite();
 
   CCBI = nullptr;
   // Bail if this class_method cannot be devirtualized.
-  if (!canDevirtualizeClassMethod(AI, CD))
+  if (!canDevirtualizeClassMethod(AI, CD, ClassType))
     return FullApplySite();
 
   // Can't speculate begin_apply yet.
@@ -141,13 +146,14 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
   SILFunction *F = AI.getFunction();
   SILBasicBlock *Entry = AI.getParent();
 
+  ClassMethodInst *CMI = cast<ClassMethodInst>(AI.getCallee());
+
   // Iden is the basic block containing the direct call.
   SILBasicBlock *Iden = F->createBasicBlock();
   // Virt is the block containing the slow virtual call.
   SILBasicBlock *Virt = F->createBasicBlock();
-  Iden->createPhiArgument(
-      SILType::getPrimitiveObjectType(SubType),
-      ValueOwnershipKind::Owned);
+  Iden->createPhiArgument(SILType::getPrimitiveObjectType(SubType),
+                          CMI->getOperand()->getOwnershipKind());
 
   SILBasicBlock *Continue = Entry->split(It);
 
@@ -155,13 +161,11 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
   // Create the checked_cast_branch instruction that checks at runtime if the
   // class instance is identical to the SILType.
 
-  ClassMethodInst *CMI = cast<ClassMethodInst>(AI.getCallee());
-
   CCBI = Builder.createCheckedCastBranch(AI.getLoc(), /*exact*/ true,
-                                      CMI->getOperand(),
+                                      CMI->getOperand(), 
+                                      CMI->getOperand()->getType().getASTType(),
                                       SILType::getPrimitiveObjectType(SubType),
-                                      Iden,
-                                      Virt);
+                                      SubType, Iden, Virt);
   It = CCBI->getIterator();
 
   SILBuilderWithScope VirtBuilder(Virt, AI.getInstruction());
@@ -170,8 +174,8 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
   SILValue DownCastedClassInstance = Iden->getArgument(0);
 
   // Copy the two apply instructions into the two blocks.
-  FullApplySite IdenAI = CloneApply(AI, IdenBuilder);
-  FullApplySite VirtAI = CloneApply(AI, VirtBuilder);
+  FullApplySite IdenAI = CloneApply(AI, DownCastedClassInstance, IdenBuilder);
+  FullApplySite VirtAI = CloneApply(AI, SILValue(), VirtBuilder);
 
   // See if Continue has a release on self as the instruction right after the
   // apply. If it exists, move it into position in the diamond.
@@ -190,9 +194,10 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
   // Create a PHInode for returning the return value from both apply
   // instructions.
   SILArgument *Arg =
-      Continue->createPhiArgument(AI.getType(), ValueOwnershipKind::Owned);
+      Continue->createPhiArgument(AI.getType(), OwnershipKind::Owned);
   if (!isa<TryApplyInst>(AI)) {
-    if (AI.getSubstCalleeType()->isNoReturnFunction()) {
+    if (AI.getSubstCalleeType()->isNoReturnFunction(
+            F->getModule(), AI.getFunction()->getTypeExpansionContext())) {
       IdenBuilder.createUnreachable(AI.getLoc());
       VirtBuilder.createUnreachable(AI.getLoc());
     } else {
@@ -220,11 +225,12 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
   }
 
   // Update the stats.
-  NumTargetsPredicted++;
+  ++NumTargetsPredicted;
 
   // Devirtualize the apply instruction on the identical path.
-  auto NewInst =
-    devirtualizeClassMethod(IdenAI, DownCastedClassInstance, CD, nullptr);
+  auto NewInst = devirtualizeClassMethod(IdenAI, DownCastedClassInstance, CD,
+                                         ClassType, nullptr)
+                     .first;
   assert(NewInst && "Expected to be able to devirtualize apply!");
   (void)NewInst;
 
@@ -233,15 +239,23 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
   // Split critical edges resulting from VirtAI.
   if (auto *TAI = dyn_cast<TryApplyInst>(VirtAI)) {
     auto *ErrorBB = TAI->getFunction()->createBasicBlock();
-    ErrorBB->createPhiArgument(TAI->getErrorBB()->getArgument(0)->getType(),
-                               ValueOwnershipKind::Owned);
+    SILArgument *ErrorArg = nullptr;
+    if (TAI->getErrorBB()->getNumArguments() == 1) {
+      ErrorArg = TAI->getErrorBB()->getArgument(0);
+      ErrorBB->createPhiArgument(ErrorArg->getType(), OwnershipKind::Owned);
+    }
     Builder.setInsertionPoint(ErrorBB);
-    Builder.createBranch(TAI->getLoc(), TAI->getErrorBB(),
-                         {ErrorBB->getArgument(0)});
+
+    if (ErrorArg) {
+      Builder.createBranch(TAI->getLoc(), TAI->getErrorBB(),
+                           {ErrorBB->getArgument(0)});
+    } else {
+      Builder.createBranch(TAI->getLoc(), TAI->getErrorBB());
+    }
 
     auto *NormalBB = TAI->getFunction()->createBasicBlock();
     NormalBB->createPhiArgument(TAI->getNormalBB()->getArgument(0)->getType(),
-                                ValueOwnershipKind::Owned);
+                                OwnershipKind::Owned);
     Builder.setInsertionPoint(NormalBB);
     Builder.createBranch(TAI->getLoc(), TAI->getNormalBB(),
                          {NormalBB->getArgument(0)});
@@ -251,9 +265,11 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
     for (auto Arg : VirtAI.getArguments()) {
       Args.push_back(Arg);
     }
-    FullApplySite NewVirtAI = Builder.createTryApply(VirtAI.getLoc(), VirtAI.getCallee(),
+    FullApplySite NewVirtAI = Builder.createTryApply(
+        VirtAI.getLoc(), VirtAI.getCallee(),
         VirtAI.getSubstitutionMap(),
-        Args, NormalBB, ErrorBB);
+        Args, NormalBB, ErrorBB,
+        VirtAI.getApplyOptions());
     VirtAI.getInstruction()->eraseFromParent();
     VirtAI = NewVirtAI;
   }
@@ -275,25 +291,19 @@ static bool isDefaultCaseKnown(ClassHierarchyAnalysis *CHA,
                                ClassDecl *CD,
                                ClassHierarchyAnalysis::ClassList &Subs) {
   ClassMethodInst *CMI = cast<ClassMethodInst>(AI.getCallee());
-  auto *Method = CMI->getMember().getFuncDecl();
-  const DeclContext *DC = AI.getModule().getAssociatedContext();
+  auto *Method = CMI->getMember().getAbstractFunctionDecl();
+  assert(Method && "not a function");
 
   if (CD->isFinal())
     return true;
 
   // If the class has an @objc ancestry it can be dynamically subclassed and we
   // can't therefore statically know the default case.
-  auto Ancestry = CD->checkObjCAncestry();
-  if (Ancestry != ObjCClassKind::NonObjC)
-    return false;
-
-  // Without an associated context we cannot perform any
-  // access-based optimizations.
-  if (!DC)
+  if (CD->checkAncestry(AncestryFlags::ObjC))
     return false;
 
   // Only handle classes defined within the SILModule's associated context.
-  if (!CD->isChildContextOf(DC))
+  if (!CD->isChildContextOf(AI.getModule().getAssociatedContext()))
     return false;
 
   if (!CD->hasAccess())
@@ -304,6 +314,7 @@ static bool isDefaultCaseKnown(ClassHierarchyAnalysis *CHA,
   case AccessLevel::Open:
     return false;
   case AccessLevel::Public:
+  case AccessLevel::Package:
   case AccessLevel::Internal:
     if (!AI.getModule().isWholeModule())
       return false;
@@ -371,17 +382,6 @@ static bool tryToSpeculateTarget(FullApplySite AI, ClassHierarchyAnalysis *CHA,
                                  OptRemark::Emitter &ORE) {
   ClassMethodInst *CMI = cast<ClassMethodInst>(AI.getCallee());
 
-  // Don't devirtualize withUnsafeGuaranteed 'self' as this would prevent
-  // retain/release removal.
-  //   unmanged._withUnsafeGuaranteedRef { $0.method() }
-  if (auto *TupleExtract = dyn_cast<TupleExtractInst>(CMI->getOperand()))
-    if (auto *UnsafeGuaranteedSelf =
-            dyn_cast<BuiltinInst>(TupleExtract->getOperand()))
-      if (UnsafeGuaranteedSelf->getBuiltinKind() ==
-              BuiltinValueKind::UnsafeGuaranteed &&
-          TupleExtract->getFieldNo() == 0)
-        return false;
-
   // Strip any upcasts off of our 'self' value, potentially leaving us
   // with a value whose type is closer (in the class hierarchy) to the
   // actual dynamic type.
@@ -408,7 +408,9 @@ static bool tryToSpeculateTarget(FullApplySite AI, ClassHierarchyAnalysis *CHA,
     // try to devirtualize it completely.
     ClassHierarchyAnalysis::ClassList Subs;
     if (isDefaultCaseKnown(CHA, AI, CD, Subs)) {
-      auto NewInst = tryDevirtualizeClassMethod(AI, SubTypeValue, CD, &ORE);
+      auto NewInst =
+          tryDevirtualizeClassMethod(AI, SubTypeValue, CD, ClassType, &ORE)
+              .first;
       if (NewInst)
         deleteDevirtualizedApply(AI);
       return bool(NewInst);
@@ -416,7 +418,7 @@ static bool tryToSpeculateTarget(FullApplySite AI, ClassHierarchyAnalysis *CHA,
 
     LLVM_DEBUG(llvm::dbgs() << "Inserting monomorphic speculative call for "
                "class " << CD->getName() << "\n");
-    return !!speculateMonomorphicTarget(AI, SubType, CD, LastCCBI);
+    return !!speculateMonomorphicTarget(AI, SubType, CD, ClassType, LastCCBI);
   }
 
   // True if any instructions were changed or generated.
@@ -442,7 +444,7 @@ static bool tryToSpeculateTarget(FullApplySite AI, ClassHierarchyAnalysis *CHA,
 
   // Try to devirtualize the static class of instance
   // if it is possible.
-  if (auto F = getTargetClassMethod(M, CD, CMI)) {
+  if (auto F = getTargetClassMethod(M, CD, ClassType, CMI)) {
     // Do not devirtualize if a method in the base class is marked
     // as non-optimizable. This way it is easy to disable the
     // devirtualization of this method in the base class and
@@ -451,7 +453,8 @@ static bool tryToSpeculateTarget(FullApplySite AI, ClassHierarchyAnalysis *CHA,
       return false;
   }
 
-  auto FirstAI = speculateMonomorphicTarget(AI, SubType, CD, LastCCBI);
+  auto FirstAI =
+      speculateMonomorphicTarget(AI, SubType, CD, ClassType, LastCCBI);
   if (FirstAI) {
     Changed = true;
     AI = FirstAI;
@@ -500,7 +503,7 @@ static bool tryToSpeculateTarget(FullApplySite AI, ClassHierarchyAnalysis *CHA,
 
     // FIXME: Add support for generic subclasses.
     if (S->isGenericContext()) {
-      NotHandledSubsNum++;
+      ++NotHandledSubsNum;
       continue;
     }
 
@@ -513,9 +516,10 @@ static bool tryToSpeculateTarget(FullApplySite AI, ClassHierarchyAnalysis *CHA,
     }
 
     // Pass the metatype of the subclass.
-    auto NewAI = speculateMonomorphicTarget(AI, ClassOrMetatypeType, S, LastCCBI);
+    auto NewAI = speculateMonomorphicTarget(AI, ClassOrMetatypeType, S,
+                                            CanClassType, LastCCBI);
     if (!NewAI) {
-      NotHandledSubsNum++;
+      ++NotHandledSubsNum;
       continue;
     }
     AI = NewAI;
@@ -560,15 +564,17 @@ static bool tryToSpeculateTarget(FullApplySite AI, ClassHierarchyAnalysis *CHA,
   if (LastCCBI && SubTypeValue == LastCCBI->getOperand()) {
     // Remove last checked_cast_br, because it will always succeed.
     SILBuilderWithScope B(LastCCBI);
-    auto CastedValue = B.createUncheckedBitCast(LastCCBI->getLoc(),
-                                                LastCCBI->getOperand(),
-                                                LastCCBI->getCastType());
+    auto CastedValue = B.createUncheckedReinterpretCast(
+        LastCCBI->getLoc(), LastCCBI->getOperand(),
+        LastCCBI->getTargetLoweredType());
     B.createBranch(LastCCBI->getLoc(), LastCCBI->getSuccessBB(), {CastedValue});
     LastCCBI->eraseFromParent();
     ORE.emit(RB);
     return true;
   }
-  auto NewInst = tryDevirtualizeClassMethod(AI, SubTypeValue, CD, nullptr);
+  auto NewInst =
+      tryDevirtualizeClassMethod(AI, SubTypeValue, CD, ClassType, nullptr)
+          .first;
   if (NewInst) {
     ORE.emit(RB);
     deleteDevirtualizedApply(AI);
@@ -590,6 +596,7 @@ namespace {
     void run() override {
 
       auto &CurFn = *getFunction();
+
       // Don't perform speculative devirtualization at -Os.
       if (CurFn.optimizeForSize())
         return;
@@ -612,12 +619,14 @@ namespace {
         }
       }
 
-      OptRemark::Emitter ORE(DEBUG_TYPE, CurFn.getModule());
+      OptRemark::Emitter ORE(DEBUG_TYPE, CurFn);
       // Go over the collected calls and try to insert speculative calls.
       for (auto AI : ToSpecialize)
         Changed |= tryToSpeculateTarget(AI, CHA, ORE);
 
       if (Changed) {
+        CurFn.getModule().linkFunction(&CurFn, SILModule::LinkingMode::LinkAll);
+
         invalidateAnalysis(SILAnalysis::InvalidationKind::FunctionBody);
       }
     }

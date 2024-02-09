@@ -21,6 +21,7 @@
 #include "swift/AST/Identifier.h"
 #include "swift/AST/Availability.h"
 #include "swift/AST/Stmt.h" // for PoundAvailableInfo
+#include "swift/Basic/Debug.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/SourceLoc.h"
 #include "swift/Basic/STLExtras.h"
@@ -45,7 +46,7 @@ namespace swift {
 /// These refinement contexts form a lexical tree parallel to the AST but much
 /// more sparse: we only introduce refinement contexts when there is something
 /// to refine.
-class TypeRefinementContext {
+class TypeRefinementContext : public ASTAllocated<TypeRefinementContext> {
 
 public:
   /// Describes the reason a type refinement context was introduced.
@@ -53,9 +54,19 @@ public:
     /// The root refinement context.
     Root,
 
-    /// The context was introduced by a declaration (e.g., the body of a
-    /// function declaration or the contents of a class declaration).
+    /// The context was introduced by a declaration with an explicit
+    /// availability attribute. The context contains both the signature and the
+    /// body of the declaration.
     Decl,
+
+    /// The context was introduced implicitly by a declaration. The context may
+    /// cover the entire declaration or it may cover a subset of it. For
+    /// example, a public, non-inlinable function declaration in an API module
+    /// will have at least two associated contexts: one for the entire
+    /// declaration at the declared availability of the API and a nested
+    /// implicit context for the body of the function, which will always run at
+    /// the deployment target of the library.
+    DeclImplicit,
 
     /// The context was introduced for the Then branch of an IfStmt.
     IfStmtThenBranch,
@@ -86,6 +97,7 @@ public:
   };
 
 private:
+  friend class ExpandChildTypeRefinementContextsRequest;
 
   /// Represents the AST node that introduced a refinement context.
   class IntroNode {
@@ -101,7 +113,10 @@ private:
 
   public:
     IntroNode(SourceFile *SF) : IntroReason(Reason::Root), SF(SF) {}
-    IntroNode(Decl *D) : IntroReason(Reason::Decl), D(D) {}
+    IntroNode(Decl *D, Reason introReason = Reason::Decl)
+        : IntroReason(introReason), D(D) {
+      (void)getAsDecl();    // check that assertion succeeds
+    }
     IntroNode(IfStmt *IS, bool IsThen) :
     IntroReason(IsThen ? Reason::IfStmtThenBranch : Reason::IfStmtElseBranch),
                 IS(IS) {}
@@ -121,7 +136,8 @@ private:
     }
 
     Decl *getAsDecl() const {
-      assert(IntroReason == Reason::Decl);
+      assert(IntroReason == Reason::Decl ||
+             IntroReason == Reason::DeclImplicit);
       return D;
     }
 
@@ -153,13 +169,26 @@ private:
 
   SourceRange SrcRange;
 
+  /// A canonical availability info for this context, computed top-down from the
+  /// root context.
   AvailabilityContext AvailabilityInfo;
+
+  /// If this context was annotated with an availability attribute, this property captures that.
+  /// It differs from the above `AvailabilityInfo` by being independent of the deployment target,
+  /// and is used for providing availability attribute redundancy warning diagnostics.
+  AvailabilityContext ExplicitAvailabilityInfo;
 
   std::vector<TypeRefinementContext *> Children;
 
+  struct {
+    /// Whether this node has child nodes that have not yet been expanded.
+    unsigned needsExpansion : 1;
+  } LazyInfo = {};
+
   TypeRefinementContext(ASTContext &Ctx, IntroNode Node,
                         TypeRefinementContext *Parent, SourceRange SrcRange,
-                        const AvailabilityContext &Info);
+                        const AvailabilityContext &Info,
+                        const AvailabilityContext &ExplicitInfo);
 
 public:
   
@@ -171,8 +200,14 @@ public:
   static TypeRefinementContext *createForDecl(ASTContext &Ctx, Decl *D,
                                               TypeRefinementContext *Parent,
                                               const AvailabilityContext &Info,
+                                              const AvailabilityContext &ExplicitInfo,
                                               SourceRange SrcRange);
-  
+
+  /// Create a refinement context for the given declaration.
+  static TypeRefinementContext *
+  createForDeclImplicit(ASTContext &Ctx, Decl *D, TypeRefinementContext *Parent,
+                        const AvailabilityContext &Info, SourceRange SrcRange);
+
   /// Create a refinement context for the Then branch of the given IfStmt.
   static TypeRefinementContext *
   createForIfStmtThen(ASTContext &Ctx, IfStmt *S, TypeRefinementContext *Parent,
@@ -211,6 +246,13 @@ public:
                          TypeRefinementContext *Parent,
                          const AvailabilityContext &Info);
 
+  Decl *getDeclOrNull() const {
+    auto IntroReason = getReason();
+    if (IntroReason == Reason::Decl || IntroReason == Reason::DeclImplicit)
+      return getIntroductionNode().getAsDecl();
+    return nullptr;
+  }
+
   /// Returns the reason this context was introduced.
   Reason getReason() const;
   
@@ -244,6 +286,12 @@ public:
     return AvailabilityInfo;
   }
 
+  /// Returns the information on what availability was specified by the programmer
+  /// on this context (if any).
+  const AvailabilityContext &getExplicitAvailabilityInfo() const {
+    return ExplicitAvailabilityInfo;
+  }
+
   /// Adds a child refinement context.
   void addChild(TypeRefinementContext *Child) {
     assert(Child->getSourceRange().isValid());
@@ -253,21 +301,27 @@ public:
   /// Returns the inner-most TypeRefinementContext descendant of this context
   /// for the given source location.
   TypeRefinementContext *findMostRefinedSubContext(SourceLoc Loc,
-                                                   SourceManager &SM);
+                                                   ASTContext &Ctx);
 
-  LLVM_ATTRIBUTE_DEPRECATED(
-      void dump(SourceManager &SrcMgr) const LLVM_ATTRIBUTE_USED,
-      "only for use within the debugger");
+  bool getNeedsExpansion() const { return LazyInfo.needsExpansion; }
+
+  void setNeedsExpansion(bool needsExpansion) {
+    LazyInfo.needsExpansion = needsExpansion;
+  }
+
+  SWIFT_DEBUG_DUMPER(dump(SourceManager &SrcMgr));
   void dump(raw_ostream &OS, SourceManager &SrcMgr) const;
   void print(raw_ostream &OS, SourceManager &SrcMgr, unsigned Indent = 0) const;
   
   static StringRef getReasonName(Reason R);
-  
-  // Only allow allocation of TypeRefinementContext using the allocator in
-  // ASTContext.
-  void *operator new(size_t Bytes, ASTContext &C,
-                     unsigned Alignment = alignof(TypeRefinementContext));
 };
+
+void simple_display(llvm::raw_ostream &out,
+                    const TypeRefinementContext *trc);
+
+inline SourceLoc extractNearestSourceLoc(const TypeRefinementContext *TRC) {
+  return TRC->getIntroductionLoc();
+}
 
 } // end namespace swift
 

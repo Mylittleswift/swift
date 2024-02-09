@@ -1,4 +1,4 @@
-// RUN: %swift -swift-version 4 -typecheck -verify  %s
+// RUN: %target-typecheck-verify-swift -swift-version 4
 
 func flatMapOnSequence<
   S : Sequence
@@ -25,7 +25,7 @@ where C.Elements : BidirectionalCollection {
   _ = xs.flatMap(f) // expected-warning {{'flatMap' is deprecated: Please use compactMap(_:) for the case where closure returns an optional value}} expected-note {{compactMap}}
 }
 
-func flatMapOnCollectinoOfStrings<
+func flatMapOnCollectionOfStrings<
   C : Collection
 >(xs: C, f: (C.Element) -> String?) {
   _ = xs.flatMap(f) // expected-warning {{'flatMap' is deprecated: Please use compactMap(_:) for the case where closure returns an optional value}} expected-note {{compactMap}}

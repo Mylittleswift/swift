@@ -1,3 +1,5 @@
+// REQUIRES: swift_interpreter
+
 // RUN: not %swiftc_driver -emit-silgen -parse-as-library %s -module-name "Swift" 2>&1 | %FileCheck -check-prefix=STDLIB_MODULE %s
 // RUN: %target-swiftc_driver -emit-silgen -parse-as-library %s -module-name "Swift" -parse-stdlib -###
 // STDLIB_MODULE: error: module name "Swift" is reserved for the standard library{{$}}
@@ -25,9 +27,9 @@
 // RUN: not %swiftc_driver -import-objc-header fake.h -import-underlying-module -c %s 2>&1 | %FileCheck -check-prefix=FRAMEWORK_BRIDGING_HEADER %s
 // FRAMEWORK_BRIDGING_HEADER: error: using bridging headers with framework targets is unsupported
 
-// RUN: not %swiftc_driver -import-objc-header fake.h -emit-parseable-module-interface %s 2>&1 | %FileCheck -check-prefix=BRIDGING_HEADER_SWIFTINTERFACE %s
-// RUN: not %swiftc_driver -import-objc-header fake.h -emit-parseable-module-interface-path fake.swiftinterface %s 2>&1 | %FileCheck -check-prefix=BRIDGING_HEADER_SWIFTINTERFACE %s
-// BRIDGING_HEADER_SWIFTINTERFACE: error: using bridging headers with parseable module interfaces is unsupported
+// RUN: not %swiftc_driver -import-objc-header fake.h -emit-module-interface %s 2>&1 | %FileCheck -check-prefix=BRIDGING_HEADER_SWIFTINTERFACE %s
+// RUN: not %swiftc_driver -import-objc-header fake.h -emit-module-interface-path fake.swiftinterface %s 2>&1 | %FileCheck -check-prefix=BRIDGING_HEADER_SWIFTINTERFACE %s
+// BRIDGING_HEADER_SWIFTINTERFACE: error: using bridging headers with module interfaces is unsupported
 
 // RUN: %swift_driver -### | %FileCheck -check-prefix=DEFAULT_REPL %s
 // DEFAULT_REPL: -repl
@@ -78,16 +80,8 @@
 // RUN: %swift_driver -g -### %s 2>&1 | %FileCheck -check-prefix=OPTIONS_BEFORE_FILE %s
 // OPTIONS_BEFORE_FILE: -g
 
-// RUN: not %swift_driver -target abc -### %s 2>&1 | %FileCheck -check-prefix=BAD_TARGET %s
-// BAD_TARGET: error: unknown target 'abc'
-
-// RUN: %swiftc_driver -incremental %s -### 2>&1 | %FileCheck -check-prefix=INCREMENTAL_WITHOUT_OFM %s
-// INCREMENTAL_WITHOUT_OFM: warning: ignoring -incremental (currently requires an output file map)
-// INCREMENTAL_WITHOUT_OFM: swift{{c?(\.EXE)?"?}} -frontend
-
-// RUN: %swiftc_driver -incremental -output-file-map %S/Inputs/empty-ofm.json %s -### 2>&1 | %FileCheck -check-prefix=INCREMENTAL_WITHOUT_OFM_ENTRY %s
-// INCREMENTAL_WITHOUT_OFM_ENTRY: ignoring -incremental; output file map has no master dependencies entry ("swift-dependencies" under "")
-// INCREMENTAL_WITHOUT_OFM_ENTRY: swift{{c?(\.EXE)?"?}} -frontend
+// RUN: not %swiftc_driver_plain -target x86_64-unknown-hurd -### %s 2>&1 | %FileCheck -check-prefix=BAD_TARGET %s
+// BAD_TARGET: error: unknown target 'x86_64-unknown-hurd'
 
 // RUN: %swiftc_driver -driver-print-jobs -enforce-exclusivity=checked %s | %FileCheck -check-prefix=EXCLUSIVITY_CHECKED %s
 // EXCLUSIVITY_CHECKED: swift
@@ -100,10 +94,6 @@
 // RUN: %swiftc_driver -driver-print-jobs -assume-single-threaded %s | %FileCheck -check-prefix=ASSUME_SINGLE_THREADED %s
 // ASSUME_SINGLE_THREADED: swift
 // ASSUME_SINGLE_THREADED: -frontend {{.*}} -assume-single-threaded
-
-// RUN: not %swiftc_driver -incremental -autolink-force-load %s 2>&1 | %FileCheck -check-prefix=AUTOLINK_FORCE_LOAD %s
-// RUN: not %swiftc_driver -autolink-force-load -incremental %s 2>&1 | %FileCheck -check-prefix=AUTOLINK_FORCE_LOAD %s
-// AUTOLINK_FORCE_LOAD: error: '-autolink-force-load' is not supported with '-incremental'
 
 // RUN: %swift_driver -### -g -debug-info-format=codeview %s | %FileCheck -check-prefix DEBUG_INFO_FORMAT_CODEVIEW %s
 // RUN: %swift_driver -### -g -debug-info-format=dwarf %s | %FileCheck -check-prefix DEBUG_INFO_FORMAT_DWARF %s
@@ -118,8 +108,45 @@
 // RUN: not %swiftc_driver -debug-info-format=codeview %s 2>&1 | %FileCheck -check-prefix MISSING_OPTION_G_ERROR %s
 // MISSING_OPTION_G_ERROR: error: option '-debug-info-format={{.*}}' is missing a required argument (-g)
 
+// RUN: %swift_driver -### -g -dwarf-version=3 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_3 %s
+// DWARF_VERSION_4: -dwarf-version=4
+// DWARF_VERSION_3: -dwarf-version=3
+// DWARF_VERSION_2: -dwarf-version=2
+// RUN: not %swift_driver -dwarf-version=1 %s 2>&1 | %FileCheck -check-prefix INVALID_DWARF_VERSION %s
+// RUN: not %swift_driver -dwarf-version=6 %s 2>&1 | %FileCheck -check-prefix INVALID_DWARF_VERSION %s
+// RUN: not %swiftc_driver -dwarf-version=1 %s 2>&1 | %FileCheck -check-prefix INVALID_DWARF_VERSION %s
+// RUN: not %swiftc_driver -dwarf-version=6 %s 2>&1 | %FileCheck -check-prefix INVALID_DWARF_VERSION %s
+// INVALID_DWARF_VERSION: invalid value '{{1|6}}' in '-dwarf-version={{1|6}}'
+
+// RUN: %swift_driver -### -g -target x86_64-apple-macosx10.10 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_2 %s
+// RUN: %swiftc_driver -### -g -target x86_64-apple-macosx10.10 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_2 %s
+// RUN: %swift_driver -### -g -target x86_64-apple-macosx10.11 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_4 %s
+// RUN: %swiftc_driver -### -g -target x86_64-apple-macosx10.11 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_4 %s
+// RUN: %swift_driver -### -g -target x86_64-apple-macos14.0 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_4 %s
+// RUN: %swiftc_driver -### -g -target x86_64-apple-macos14.0 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_4 %s
+// RUN: %swift_driver -### -g -target arm64-apple-ios8.0 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_2 %s
+// RUN: %swiftc_driver -### -g -target arm64-apple-ios8.0 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_2 %s
+// RUN: %swift_driver -### -g -target arm64-apple-ios9.0 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_4 %s
+// RUN: %swiftc_driver -### -g -target arm64-apple-ios9.0 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_4 %s
+// RUN: %swift_driver -### -g -target x86_64-apple-ios17.0-macabi %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_4 %s
+// RUN: %swiftc_driver -### -g -target x86_64-apple-ios17.0-macabi %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_4 %s
+// RUN: %swift_driver -### -g -target arm64-apple-tvos17.0 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_4 %s
+// RUN: %swiftc_driver -### -g -target arm64-apple-tvos17.0 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_4 %s
+// RUN: %swift_driver -### -g -target arm64_32-apple-watchos10.0 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_4 %s
+// RUN: %swiftc_driver -### -g -target arm64_32-apple-watchos10.0 %s 2>&1 | %FileCheck -check-prefix DWARF_VERSION_4 %s
+
 // RUN: not %swift_driver -gline-tables-only -debug-info-format=codeview %s 2>&1 | %FileCheck -check-prefix BAD_DEBUG_LEVEL_ERROR %s
 // RUN: not %swift_driver -gdwarf-types -debug-info-format=codeview %s 2>&1 | %FileCheck -check-prefix BAD_DEBUG_LEVEL_ERROR %s
 // RUN: not %swiftc_driver -gline-tables-only -debug-info-format=codeview %s 2>&1 | %FileCheck -check-prefix BAD_DEBUG_LEVEL_ERROR %s
 // RUN: not %swiftc_driver -gdwarf-types -debug-info-format=codeview %s 2>&1 | %FileCheck -check-prefix BAD_DEBUG_LEVEL_ERROR %s
 // BAD_DEBUG_LEVEL_ERROR: error: argument '-debug-info-format=codeview' is not allowed with '{{.*}}'
+
+// RUN: %swift_driver -F %t/test.framework %s 2>&1 | %FileCheck -check-prefix SEARCH_PATH_INCLUDES_FRAMEWORK_EXTENSION %s
+// RUN: %target-swiftc_driver -F %t/test.framework %s 2>&1 | %FileCheck -check-prefix SEARCH_PATH_INCLUDES_FRAMEWORK_EXTENSION %s
+// RUN: %swift_driver -Fsystem %t/test.framework %s 2>&1 | %FileCheck -check-prefix SEARCH_PATH_INCLUDES_FRAMEWORK_EXTENSION %s
+// RUN: %target-swiftc_driver -Fsystem %t/test.framework %s 2>&1 | %FileCheck -check-prefix SEARCH_PATH_INCLUDES_FRAMEWORK_EXTENSION %s
+// RUN: %swift_driver -F %t/test.framework/ %s 2>&1 | %FileCheck -check-prefix SEARCH_PATH_INCLUDES_FRAMEWORK_EXTENSION %s
+// RUN: %target-swiftc_driver -F %t/test.framework/ %s 2>&1 | %FileCheck -check-prefix SEARCH_PATH_INCLUDES_FRAMEWORK_EXTENSION %s
+// RUN: %swift_driver -Fsystem %t/test.framework/ %s 2>&1 | %FileCheck -check-prefix SEARCH_PATH_INCLUDES_FRAMEWORK_EXTENSION %s
+// RUN: %target-swiftc_driver -Fsystem %t/test.framework/ %s 2>&1 | %FileCheck -check-prefix SEARCH_PATH_INCLUDES_FRAMEWORK_EXTENSION %s
+// SEARCH_PATH_INCLUDES_FRAMEWORK_EXTENSION: warning: framework search path ends in ".framework"

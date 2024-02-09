@@ -1,4 +1,4 @@
-silopt_register_sources(
+target_sources(swiftSILOptimizer PRIVATE
   ARCCodeMotion.cpp
   AccessEnforcementDom.cpp
   AccessEnforcementOpts.cpp
@@ -7,32 +7,34 @@ silopt_register_sources(
   AllocBoxToStack.cpp
   ArrayCountPropagation.cpp
   ArrayElementValuePropagation.cpp
-  AssumeSingleThreaded.cpp
+  COWOpts.cpp
   CSE.cpp
   ConditionForwarding.cpp
   CopyForwarding.cpp
   CopyPropagation.cpp
   DeadCodeElimination.cpp
   DeadObjectElimination.cpp
-  DeadStoreElimination.cpp
+  DestroyHoisting.cpp
   Devirtualizer.cpp
+  DifferentiabilityWitnessDevirtualizer.cpp
+  EagerSpecializer.cpp
   GenericSpecializer.cpp
-  MergeCondFail.cpp
-  MarkUninitializedFixup.cpp
   Outliner.cpp
-  ObjectOutliner.cpp
-  OwnershipModelEliminator.cpp
+  AssemblyVisionRemarkGenerator.cpp
+  PartialApplySimplification.cpp
   PerformanceInliner.cpp
-  RedundantLoadElimination.cpp
+  PhiArgumentOptimizations.cpp
+  PruneVTables.cpp
   RedundantOverflowCheckRemoval.cpp
-  ReleaseDevirtualizer.cpp
   SILCodeMotion.cpp
   SILLowerAggregateInstrs.cpp
   SILMem2Reg.cpp
   SILSROA.cpp
+  DestroyAddrHoisting.cpp
   SimplifyCFG.cpp
   Sink.cpp
   SpeculativeDevirtualizer.cpp
-  StackPromotion.cpp
-  UnsafeGuaranteedPeephole.cpp
-)
+  StringOptimization.cpp
+  TempLValueOpt.cpp
+  TempRValueElimination.cpp
+  VTableSpecializer.cpp)

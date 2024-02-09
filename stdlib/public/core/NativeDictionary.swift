@@ -13,7 +13,7 @@
 /// A wrapper around __RawDictionaryStorage that provides most of the
 /// implementation of Dictionary.
 @usableFromInline
-@_fixed_layout
+@frozen
 internal struct _NativeDictionary<Key: Hashable, Value> {
   @usableFromInline
   internal typealias Element = (key: Key, value: Value)
@@ -161,7 +161,7 @@ extension _NativeDictionary { // Low-level lookup operations
   @inlinable
   @inline(__always)
   internal func find(_ key: Key) -> (bucket: Bucket, found: Bool) {
-    return find(key, hashValue: self.hashValue(for: key))
+    return _storage.find(key)
   }
 
   /// Search for a given element, assuming it has the specified hash value.
@@ -174,58 +174,54 @@ extension _NativeDictionary { // Low-level lookup operations
     _ key: Key,
     hashValue: Int
   ) -> (bucket: Bucket, found: Bool) {
-    let hashTable = self.hashTable
-    var bucket = hashTable.idealBucket(forHashValue: hashValue)
-    while hashTable._isOccupied(bucket) {
-      if uncheckedKey(at: bucket) == key {
-        return (bucket, true)
-      }
-      bucket = hashTable.bucket(wrappedAfter: bucket)
-    }
-    return (bucket, false)
+    return _storage.find(key, hashValue: hashValue)
   }
 }
 
 extension _NativeDictionary { // ensureUnique
-  @inlinable
-  internal mutating func resize(capacity: Int) {
+  @_alwaysEmitIntoClient
+  @inline(never)
+  internal mutating func _copyOrMoveAndResize(
+    capacity: Int,
+    moveElements: Bool
+  ) {
     let capacity = Swift.max(capacity, self.capacity)
     let newStorage = _DictionaryStorage<Key, Value>.resize(
       original: _storage,
       capacity: capacity,
-      move: true)
+      move: moveElements)
     let result = _NativeDictionary(newStorage)
     if count > 0 {
       for bucket in hashTable {
-        let key = (_keys + bucket.offset).move()
-        let value = (_values + bucket.offset).move()
+        let key: Key
+        let value: Value
+        if moveElements {
+          key = (_keys + bucket.offset).move()
+          value = (_values + bucket.offset).move()
+        } else {
+          key = self.uncheckedKey(at: bucket)
+          value = self.uncheckedValue(at: bucket)
+        }
         result._unsafeInsertNew(key: key, value: value)
       }
-      // Clear out old storage, ensuring that its deinit won't overrelease the
-      // elements we've just moved out.
-      _storage._hashTable.clear()
-      _storage._count = 0
+      if moveElements {
+        // Clear out old storage, ensuring that its deinit won't overrelease the
+        // elements we've just moved out.
+        _storage._hashTable.clear()
+        _storage._count = 0
+      }
     }
     _storage = result._storage
   }
 
   @inlinable
-  @_semantics("optimize.sil.specialize.generic.size.never")
+  internal mutating func resize(capacity: Int) {
+    _copyOrMoveAndResize(capacity: capacity, moveElements: true)
+  }
+
+  @inlinable
   internal mutating func copyAndResize(capacity: Int) {
-    let capacity = Swift.max(capacity, self.capacity)
-    let newStorage = _DictionaryStorage<Key, Value>.resize(
-      original: _storage,
-      capacity: capacity,
-      move: false)
-    let result = _NativeDictionary(newStorage)
-    if count > 0 {
-      for bucket in hashTable {
-        result._unsafeInsertNew(
-          key: self.uncheckedKey(at: bucket),
-          value: self.uncheckedValue(at: bucket))
-      }
-    }
-    _storage = result._storage
+    _copyOrMoveAndResize(capacity: capacity, moveElements: false)
   }
 
   @inlinable
@@ -249,7 +245,9 @@ extension _NativeDictionary { // ensureUnique
   }
 
   /// Ensure storage of self is uniquely held and can hold at least `capacity`
-  /// elements. Returns true iff contents were rehashed.
+  /// elements.
+  ///
+  /// -Returns: `true` if contents were rehashed; otherwise, `false`.
   @inlinable
   @_semantics("optimize.sil.specialize.generic.size.never")
   internal mutating func ensureUnique(isUnique: Bool, capacity: Int) -> Bool {
@@ -358,6 +356,10 @@ extension _NativeDictionary: _DictionaryBuffer {
   @inlinable
   @inline(__always)
   func contains(_ key: Key) -> Bool {
+    if count == 0 {
+      // Fast path that avoids computing the hash of the key.
+      return false
+    }
     return find(key).found
   }
 
@@ -408,37 +410,33 @@ extension _NativeDictionary {
     @inline(__always)
     _modify {
       let (bucket, found) = mutatingFind(key, isUnique: isUnique)
-      if found {
-        // Move the old value out of storage, wrapping it into an optional
-        // before yielding it.
-        var value: Value? = (_values + bucket.offset).move()
-        defer {
-          // This is in a defer block because yield might throw, and we need to
-          // preserve Dictionary's storage invariants when that happens.
-          if let value = value {
+      // If found, move the old value out of storage, wrapping it into an
+      // optional before yielding it.
+      var value: Value? = (found ? (_values + bucket.offset).move() : nil)
+      defer {
+        // This is in a defer block because yield might throw, and we need to
+        // preserve Dictionary invariants when that happens.
+        if let value = value {
+          if found {
             // **Mutation.** Initialize storage to new value.
             (_values + bucket.offset).initialize(to: value)
           } else {
-            // **Removal.** We've already deinitialized the value; deinitialize
-            // the key too and register the removal.
-            (_keys + bucket.offset).deinitialize(count: 1)
-            _delete(at: bucket)
-          }
-        }
-        yield &value
-      } else {
-        var value: Value? = nil
-        defer {
-          // This is in a defer block because yield might throw, and we need to
-          // preserve Dictionary invariants when that happens.
-          if let value = value {
             // **Insertion.** Insert the new entry at the correct place.  Note
             // that `mutatingFind` already ensured that we have enough capacity.
             _insert(at: bucket, key: key, value: value)
           }
+        } else {
+          if found {
+            // **Removal.** We've already deinitialized the value; deinitialize
+            // the key too and register the removal.
+            (_keys + bucket.offset).deinitialize(count: 1)
+            _delete(at: bucket)
+          } else {
+            // Noop
+          }
         }
-        yield &value
       }
+      yield &value
     }
   }
 }
@@ -446,6 +444,7 @@ extension _NativeDictionary {
 // This function has a highly visible name to make it stand out in stack traces.
 @usableFromInline
 @inline(never)
+@_unavailableInEmbedded
 internal func KEY_TYPE_OF_DICTIONARY_VIOLATES_HASHABLE_REQUIREMENTS(
   _ keyType: Any.Type
 ) -> Never {
@@ -474,7 +473,11 @@ extension _NativeDictionary { // Insertions
       // because we'll need to compare elements in case of hash collisions.
       let (bucket, found) = find(key, hashValue: hashValue)
       guard !found else {
+        #if !$Embedded
         KEY_TYPE_OF_DICTIONARY_VIOLATES_HASHABLE_REQUIREMENTS(Key.self)
+        #else
+        fatalError("duplicate keys in a Dictionary")
+        #endif
       }
       hashTable.insert(bucket)
       uncheckedInitialize(at: bucket, toKey: key, value: value)
@@ -483,6 +486,28 @@ extension _NativeDictionary { // Insertions
       uncheckedInitialize(at: bucket, toKey: key, value: value)
     }
     _storage._count &+= 1
+  }
+
+  /// Insert a new element into uniquely held storage, replacing an existing
+  /// value (if any).  Storage must be uniquely referenced with adequate
+  /// capacity.
+  @_alwaysEmitIntoClient @inlinable // Introduced in 5.1
+  internal mutating func _unsafeUpdate(
+    key: __owned Key,
+    value: __owned Value
+  ) {
+    let (bucket, found) = find(key)
+    if found {
+      // Note that we also update the key here. This method is used to handle
+      // collisions arising from equality transitions during bridging, and in
+      // that case it is desirable to keep values paired with their original
+      // keys. This is not how `updateValue(_:, forKey:)` works.
+      (_keys + bucket.offset).pointee = key
+      (_values + bucket.offset).pointee = value
+    } else {
+      _precondition(count < capacity)
+      _insert(at: bucket, key: key, value: value)
+    }
   }
 
   /// Insert a new entry into uniquely held storage.
@@ -517,7 +542,11 @@ extension _NativeDictionary { // Insertions
     guard rehashed else { return (bucket, found) }
     let (b, f) = find(key)
     if f != found {
+      #if !$Embedded
       KEY_TYPE_OF_DICTIONARY_VIOLATES_HASHABLE_REQUIREMENTS(Key.self)
+      #else
+      fatalError("duplicate keys in a Dictionary")
+      #endif
     }
     return (b, found)
   }
@@ -578,6 +607,27 @@ extension _NativeDictionary {
     let value = (_values + a.offset).move()
     (_values + a.offset).moveInitialize(from: _values + b.offset, count: 1)
     (_values + b.offset).initialize(to: value)
+  }
+  
+  @_alwaysEmitIntoClient
+  internal func extractDictionary(
+    using bitset: _UnsafeBitset, 
+    count: Int
+  ) -> _NativeDictionary<Key, Value> {
+    var count = count
+    if count == 0 { return _NativeDictionary<Key, Value>() }
+    if count == self.count { return self }
+    let result = _NativeDictionary<Key, Value>(capacity: count)
+    for offset in bitset {
+      let key = self.uncheckedKey(at: Bucket(offset: offset))
+      let value = self.uncheckedValue(at: Bucket(offset: offset))
+      result._unsafeInsertNew(key: key, value: value)
+      // The hash table can have set bits after the end of the bitmap.
+      // Ignore them.
+      count -= 1
+      if count == 0 { break }
+    }
+    return result
   }
 }
 
@@ -726,7 +776,11 @@ extension _NativeDictionary { // High-level operations
           let newValue = try combine(uncheckedValue(at: bucket), value)
           _values[bucket.offset] = newValue
         } catch _MergeError.keyCollision {
+          #if !$Embedded
           fatalError("Duplicate values for key: '\(key)'")
+          #else
+          fatalError("Duplicate values for a key in a Dictionary")
+          #endif
         }
       } else {
         _insert(at: bucket, key: key, value: value)
@@ -751,11 +805,31 @@ extension _NativeDictionary { // High-level operations
       }
     }
   }
+
+  @_alwaysEmitIntoClient
+  internal func filter(
+    _ isIncluded: (Element) throws -> Bool
+  ) rethrows -> _NativeDictionary<Key, Value> {
+    try _UnsafeBitset.withTemporaryBitset(
+      capacity: _storage._bucketCount
+    ) { bitset in
+      var count = 0
+      for bucket in hashTable {
+        if try isIncluded(
+          (uncheckedKey(at: bucket), uncheckedValue(at: bucket))
+        ) {
+          bitset.uncheckedInsert(bucket.offset)
+          count += 1
+        }
+      }
+      return extractDictionary(using: bitset, count: count)
+    }
+  }
 }
 
 extension _NativeDictionary: Sequence {
   @usableFromInline
-  @_fixed_layout
+  @frozen
   internal struct Iterator {
     // The iterator is iterating over a frozen view of the collection state, so
     // it keeps its own reference to the dictionary.

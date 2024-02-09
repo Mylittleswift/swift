@@ -64,6 +64,16 @@ public protocol RandomNumberGenerator {
 }
 
 extension RandomNumberGenerator {
+  
+  // An unavailable default implementation of next() prevents types that do
+  // not implement the RandomNumberGenerator interface from conforming to the
+  // protocol; without this, the default next() method returning a generic
+  // unsigned integer will be used, recursing infinitely and probably blowing
+  // the stack.
+  @available(*, unavailable)
+  @_alwaysEmitIntoClient
+  public mutating func next() -> UInt64 { fatalError() }
+  
   /// Returns a value from a uniform, independent distribution of binary data.
   ///
   /// Use this method when you need random binary data to generate another
@@ -94,15 +104,19 @@ extension RandomNumberGenerator {
     upperBound: T
   ) -> T {
     _precondition(upperBound != 0, "upperBound cannot be zero.")
-    let tmp = (T.max % upperBound) + 1
-    let range = tmp == upperBound ? 0 : tmp
-    var random: T = 0
-
-    repeat {
-      random = next()
-    } while random < range
-
-    return random % upperBound
+    // We use Lemire's "nearly divisionless" method for generating random
+    // integers in an interval. For a detailed explanation, see:
+    // https://arxiv.org/abs/1805.10941
+    var random: T = next()
+    var m = random.multipliedFullWidth(by: upperBound)
+    if m.low < upperBound {
+      let t = (0 &- upperBound) % upperBound
+      while m.low < t {
+        random = next()
+        m = random.multipliedFullWidth(by: upperBound)
+      }
+    }
+    return m.high
   }
 }
 
@@ -131,8 +145,9 @@ extension RandomNumberGenerator {
 /// - Apple platforms use `arc4random_buf(3)`.
 /// - Linux platforms use `getrandom(2)` when available; otherwise, they read
 ///   from `/dev/urandom`.
-@_fixed_layout
-public struct SystemRandomNumberGenerator : RandomNumberGenerator {
+/// - Windows uses `BCryptGenRandom`.
+@frozen
+public struct SystemRandomNumberGenerator: RandomNumberGenerator, Sendable {
   /// Creates a new instance of the system's default random number generator.
   @inlinable
   public init() { }
@@ -143,7 +158,9 @@ public struct SystemRandomNumberGenerator : RandomNumberGenerator {
   @inlinable
   public mutating func next() -> UInt64 {
     var random: UInt64 = 0
-    swift_stdlib_random(&random, MemoryLayout<UInt64>.size)
+    _withUnprotectedUnsafeMutablePointer(to: &random) {
+      swift_stdlib_random($0, MemoryLayout<UInt64>.size)
+    }
     return random
   }
 }

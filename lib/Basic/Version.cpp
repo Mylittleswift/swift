@@ -14,13 +14,13 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Basic/Version.h"
+#include "swift/Basic/LLVM.h"
 #include "clang/Basic/CharInfo.h"
-#include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/None.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
-#include "swift/AST/DiagnosticsParse.h"
-#include "swift/Basic/LLVM.h"
-#include "swift/Basic/Version.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <vector>
 
@@ -45,198 +45,25 @@
 #endif
 
 #include "LLVMRevision.inc"
-#include "ClangRevision.inc"
 #include "SwiftRevision.inc"
 
 namespace swift {
 namespace version {
 
-/// Print a string of the form "LLVM xxxxx, Clang yyyyy, Swift zzzzz",
-/// where each placeholder is the revision for the associated repository.
+/// Print a string of the form "LLVM xxxxx, Swift zzzzz", where each placeholder
+/// is the revision for the associated repository.
 static void printFullRevisionString(raw_ostream &out) {
-  // Arbitrarily truncate to 10 characters. This should be enough to unique
-  // Git hashes for the time being, and certainly enough for SVN revisions,
-  // while keeping the version string from being ridiculously long.
+  // Arbitrarily truncate to 15 characters. This should be enough to unique Git
+  // hashes while keeping the REPL version string from overflowing 80 columns.
 #if defined(LLVM_REVISION)
-  out << "LLVM " << StringRef(LLVM_REVISION).slice(0, 10);
-# if defined(CLANG_REVISION) || defined(SWIFT_REVISION)
-  out << ", ";
-# endif
-#endif
-
-#if defined(CLANG_REVISION)
-  out << "Clang " << StringRef(CLANG_REVISION).slice(0, 10);
+  out << "LLVM " << StringRef(LLVM_REVISION).slice(0, 15);
 # if defined(SWIFT_REVISION)
   out << ", ";
 # endif
 #endif
 
 #if defined(SWIFT_REVISION)
-  out << "Swift " << StringRef(SWIFT_REVISION).slice(0, 10);
-#endif
-}
-
-static void splitVersionComponents(
-  SmallVectorImpl<std::pair<StringRef, SourceRange>> &SplitComponents,
-                            StringRef &VersionString, SourceLoc Loc,
-                            bool skipQuote = false) {
-  SourceLoc Start = (Loc.isValid() && skipQuote) ? Loc.getAdvancedLoc(1) : Loc;
-  SourceLoc End = Start;
-
-  // Split the version string into tokens separated by the '.' character.
-  while (!VersionString.empty()) {
-    StringRef SplitComponent, Rest;
-    std::tie(SplitComponent, Rest) = VersionString.split('.');
-
-    if (Loc.isValid()) {
-      End = End.getAdvancedLoc(SplitComponent.size());
-    }
-    auto Range = Loc.isValid() ? SourceRange(Start, End) : SourceRange();
-    if (Loc.isValid())
-      End = End.getAdvancedLoc(1);
-    Start = End;
-    SplitComponents.push_back({SplitComponent, Range});
-    VersionString = Rest;
-  }
-}
-
-Optional<Version> Version::parseCompilerVersionString(
-  StringRef VersionString, SourceLoc Loc, DiagnosticEngine *Diags) {
-
-  Version CV;
-  SmallString<16> digits;
-  llvm::raw_svector_ostream OS(digits);
-  SmallVector<std::pair<StringRef, SourceRange>, 5> SplitComponents;
-
-  splitVersionComponents(SplitComponents, VersionString, Loc,
-                         /*skipQuote=*/true);
-
-  uint64_t ComponentNumber;
-  bool isValidVersion = true;
-
-  auto checkVersionComponent = [&](unsigned Component, SourceRange Range) {
-    unsigned limit = CV.Components.empty() ? 9223371 : 999;
-
-    if (Component > limit) {
-      if (Diags)
-        Diags->diagnose(Range.Start,
-                        diag::compiler_version_component_out_of_range, limit);
-      isValidVersion = false;
-    }
-  };
-
-  for (size_t i = 0; i < SplitComponents.size(); ++i) {
-    StringRef SplitComponent;
-    SourceRange Range;
-    std::tie(SplitComponent, Range) = SplitComponents[i];
-
-    // Version components can't be empty.
-    if (SplitComponent.empty()) {
-      if (Diags)
-        Diags->diagnose(Range.Start, diag::empty_version_component);
-      isValidVersion = false;
-      continue;
-    }
-
-    // The second version component isn't used for comparison.
-    if (i == 1) {
-      if (!SplitComponent.equals("*")) {
-        if (Diags)
-          Diags->diagnose(Range.Start, diag::unused_compiler_version_component)
-          .fixItReplaceChars(Range.Start, Range.End, "*");
-      }
-
-      CV.Components.push_back(0);
-      continue;
-    }
-
-    // All other version components must be numbers.
-    if (!SplitComponent.getAsInteger(10, ComponentNumber)) {
-      checkVersionComponent(ComponentNumber, Range);
-      CV.Components.push_back(ComponentNumber);
-      continue;
-    } else {
-      if (Diags)
-        Diags->diagnose(Range.Start, diag::version_component_not_number);
-      isValidVersion = false;
-    }
-  }
-
-  if (CV.Components.size() > 5) {
-    if (Diags)
-      Diags->diagnose(Loc, diag::compiler_version_too_many_components);
-    isValidVersion = false;
-  }
-
-  return isValidVersion ? Optional<Version>(CV) : None;
-}
-
-Optional<Version> Version::parseVersionString(StringRef VersionString,
-                                              SourceLoc Loc,
-                                              DiagnosticEngine *Diags) {
-  Version TheVersion;
-  SmallString<16> digits;
-  llvm::raw_svector_ostream OS(digits);
-  SmallVector<std::pair<StringRef, SourceRange>, 5> SplitComponents;
-  // Skip over quote character in string literal.
-
-  if (VersionString.empty()) {
-    if (Diags)
-      Diags->diagnose(Loc, diag::empty_version_string);
-    return None;
-  }
-
-  splitVersionComponents(SplitComponents, VersionString, Loc, Diags);
-
-  uint64_t ComponentNumber;
-  bool isValidVersion = true;
-
-  for (size_t i = 0; i < SplitComponents.size(); ++i) {
-    StringRef SplitComponent;
-    SourceRange Range;
-    std::tie(SplitComponent, Range) = SplitComponents[i];
-
-    // Version components can't be empty.
-    if (SplitComponent.empty()) {
-      if (Diags)
-        Diags->diagnose(Range.Start, diag::empty_version_component);
-
-      isValidVersion = false;
-      continue;
-    }
-
-    // All other version components must be numbers.
-    if (!SplitComponent.getAsInteger(10, ComponentNumber)) {
-      TheVersion.Components.push_back(ComponentNumber);
-      continue;
-    } else {
-      if (Diags)
-        Diags->diagnose(Range.Start,
-                        diag::version_component_not_number);
-      isValidVersion = false;
-    }
-  }
-
-  return isValidVersion ? Optional<Version>(TheVersion) : None;
-}
-
-Version::Version(StringRef VersionString,
-                 SourceLoc Loc,
-                 DiagnosticEngine *Diags)
-  : Version(*parseVersionString(VersionString, Loc, Diags))
-{}
-
-Version Version::getCurrentCompilerVersion() {
-#ifdef SWIFT_COMPILER_VERSION
-  auto currentVersion = Version::parseVersionString(
-    SWIFT_COMPILER_VERSION, SourceLoc(), nullptr);
-  assert(currentVersion.hasValue() &&
-         "Embedded Swift language version couldn't be parsed: '"
-         SWIFT_COMPILER_VERSION
-         "'");
-  return currentVersion.getValue();
-#else
-  return Version();
+  out << "Swift " << StringRef(SWIFT_REVISION).slice(0, 15);
 #endif
 }
 
@@ -273,6 +100,23 @@ Version::preprocessorDefinition(StringRef macroName,
   return define;
 }
 
+Version::Version(const llvm::VersionTuple &version) {
+  if (version.empty())
+    return;
+
+  Components.emplace_back(version.getMajor());
+
+  if (auto minor = version.getMinor()) {
+    Components.emplace_back(*minor);
+    if (auto subminor = version.getSubminor()) {
+      Components.emplace_back(*subminor);
+      if (auto build = version.getBuild()) {
+        Components.emplace_back(*build);
+      }
+    }
+  }
+}
+
 Version::operator llvm::VersionTuple() const
 {
   switch (Components.size()) {
@@ -298,10 +142,10 @@ Version::operator llvm::VersionTuple() const
   }
 }
 
-Optional<Version> Version::getEffectiveLanguageVersion() const {
+llvm::Optional<Version> Version::getEffectiveLanguageVersion() const {
   switch (size()) {
   case 0:
-    return None;
+    return llvm::None;
   case 1:
     break;
   case 2:
@@ -309,12 +153,12 @@ Optional<Version> Version::getEffectiveLanguageVersion() const {
     // component is 4.2.
     if (Components[0] == 4 && Components[1] == 2)
       break;
-    return None;
+    return llvm::None;
   default:
     // We do not want to permit users requesting more precise effective language
     // versions since accepting such an argument promises more than we're able
     // to deliver.
-    return None;
+    return llvm::None;
   }
 
   // FIXME: When we switch to Swift 5 by default, the "4" case should return
@@ -335,8 +179,19 @@ Optional<Version> Version::getEffectiveLanguageVersion() const {
     static_assert(SWIFT_VERSION_MAJOR == 5,
                   "getCurrentLanguageVersion is no longer correct here");
     return Version::getCurrentLanguageVersion();
+  case 6:
+    // Allow version '6' in asserts compilers *only* so that we can start
+    // testing changes slated for Swift 6. Note that it's still not listed in
+    // `Version::getValidEffectiveVersions()`.
+    // FIXME: When Swift 6 becomes real, remove 'REQUIRES: asserts' from tests
+    //        using '-swift-version 6'.
+#ifdef NDEBUG
+    LLVM_FALLTHROUGH;
+#else
+    return Version{6};
+#endif
   default:
-    return None;
+    return llvm::None;
   }
 }
 
@@ -414,7 +269,7 @@ std::string getSwiftFullVersion(Version effectiveVersion) {
   OS << "-dev";
 #endif
 
-  if (!(effectiveVersion == Version::getCurrentLanguageVersion())) {
+  if (effectiveVersion != Version::getCurrentLanguageVersion()) {
     OS << " effective-" << effectiveVersion;
   }
 
@@ -424,8 +279,7 @@ std::string getSwiftFullVersion(Version effectiveVersion) {
   OS << " clang-" CLANG_COMPILER_VERSION;
 #endif
   OS << ")";
-#elif defined(LLVM_REVISION) || defined(CLANG_REVISION) || \
-      defined(SWIFT_REVISION)
+#elif defined(LLVM_REVISION) || defined(SWIFT_REVISION)
   OS << " (";
   printFullRevisionString(OS);
   OS << ")";
@@ -437,12 +291,40 @@ std::string getSwiftFullVersion(Version effectiveVersion) {
   return OS.str();
 }
 
-std::string getSwiftRevision() {
+StringRef getSwiftRevision() {
 #ifdef SWIFT_REVISION
   return SWIFT_REVISION;
 #else
   return "";
 #endif
+}
+
+bool isCurrentCompilerTagged() {
+#ifdef SWIFT_COMPILER_VERSION
+  return true;
+#else
+  return false;
+#endif
+}
+
+StringRef getCurrentCompilerTag() {
+#ifdef SWIFT_COMPILER_VERSION
+  return SWIFT_COMPILER_VERSION;
+#else
+  return StringRef();
+#endif
+}
+
+StringRef getCurrentCompilerSerializationTag() {
+#ifdef SWIFT_COMPILER_VERSION
+  return SWIFT_COMPILER_VERSION;
+#else
+  return StringRef();
+#endif
+}
+
+unsigned getUpcomingCxxInteropCompatVersion() {
+  return SWIFT_VERSION_MAJOR + 1;
 }
 
 } // end namespace version

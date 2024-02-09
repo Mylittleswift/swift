@@ -31,8 +31,8 @@ class ReferenceTypeInfo : public LoadableTypeInfo {
 protected:
   // FIXME: Get spare bits for pointers from a TargetInfo-like structure.
   ReferenceTypeInfo(llvm::Type *type, Size size, SpareBitVector spareBits,
-                    Alignment align, IsPOD_t pod = IsNotPOD)
-    : LoadableTypeInfo(type, size, spareBits, align, pod,
+                    Alignment align, IsTriviallyDestroyable_t pod = IsNotTriviallyDestroyable)
+    : LoadableTypeInfo(type, size, spareBits, align, pod, IsCopyable,
                        IsFixedSize, SpecialTypeInfoKind::Reference)
   {}
 
@@ -44,6 +44,10 @@ public:
   /// Strongly releases a value.
   virtual void strongRelease(IRGenFunction &IGF, Explosion &in,
                              Atomicity atomicity) const = 0;
+
+  virtual ReferenceCounting getReferenceCountingType() const {
+    llvm_unreachable("not supported");
+  }
 
 #define REF_STORAGE_HELPER(Name) \
   virtual const TypeInfo *create##Name##StorageType(TypeConverter &TC, \

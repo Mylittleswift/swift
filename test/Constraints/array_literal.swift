@@ -1,4 +1,4 @@
-// RUN: %target-typecheck-verify-swift
+// RUN: %target-typecheck-verify-swift -disable-availability-checking
 
 struct IntList : ExpressibleByArrayLiteral {
   typealias Element = Int
@@ -50,7 +50,7 @@ useDoubleList([1.0,2,3])
 useDoubleList([1.0,2.0,3.0])
 
 useIntDict(["Niners" => 31, "Ravens" => 34])
-useIntDict(["Niners" => 31, "Ravens" => 34.0]) // expected-error{{cannot convert value of type '(String, Double)' to expected element type '(String, Int)'}}
+useIntDict(["Niners" => 31, "Ravens" => 34.0]) // expected-error{{cannot convert value of type 'Double' to expected element type 'Int'}}
 // <rdar://problem/22333090> QoI: Propagate contextual information in a call to operands
 useDoubleDict(["Niners" => 31, "Ravens" => 34.0])
 useDoubleDict(["Niners" => 31.0, "Ravens" => 34])
@@ -102,13 +102,12 @@ func longArray() {
   var _=["1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1"]
 }
 
-[1,2].map // expected-error {{expression type '((Int) throws -> _) throws -> [_]' is ambiguous without more context}}
+[1,2].map // expected-error {{generic parameter 'T' could not be inferred}}
 
 
 // <rdar://problem/25563498> Type checker crash assigning array literal to type conforming to ArrayProtocol
 func rdar25563498<T : ExpressibleByArrayLiteral>(t: T) {
-  var x: T = [1] // expected-error {{cannot convert value of type '[Int]' to specified type 'T'}}
-  // expected-warning@-1{{variable 'x' was never used; consider replacing with '_' or removing it}}
+  var x: T = [1] // expected-error {{cannot convert value of type 'Int' to expected element type 'T.ArrayLiteralElement'}}
 }
 
 func rdar25563498_ok<T : ExpressibleByArrayLiteral>(t: T) -> T
@@ -127,6 +126,11 @@ func defaultToAny(i: Int, s: String) {
   // expected-error@-1{{heterogeneous collection literal could only be inferred to '[Any]'; add explicit type annotation if this is intentional}}
   let _: Int = a1  // expected-error{{value of type '[Any]'}}
 
+  let _ = ([1, "a"])
+  // expected-error@-1{{heterogeneous collection literal could only be inferred to '[Any]'; add explicit type annotation if this is intentional}}
+  let _ = [1, true, []]
+  // expected-error@-1:11 {{heterogeneous collection literal could only be inferred to '[Any]'; add explicit type annotation if this is intentional}}
+
   let a2: Array = [1, "a", 3.5]
   // expected-error@-1{{heterogeneous collection literal could only be inferred to '[Any]'; add explicit type annotation if this is intentional}}
   let _: Int = a2  // expected-error{{value of type '[Any]'}}
@@ -143,16 +147,38 @@ func defaultToAny(i: Int, s: String) {
   // expected-error@-1{{empty collection literal requires an explicit type}}
   let _: Int = a5 // expected-error{{value of type '[Any]'}}
 
+  let _: [Any] = []
   let _: [Any] = [1, "a", 3.5]
   let _: [Any] = [1, "a", [3.5, 3.7, 3.9]]
   let _: [Any] = [1, "a", [3.5, "b", 3]]
+  let _: [Any] = [1, [2, [3]]]
+
+  func f1() -> [Any] {
+    []
+  }
   
   let _: [Any?] = [1, "a", nil, 3.5]
   let _: [Any?] = [1, "a", nil, [3.5, 3.7, 3.9]]
   let _: [Any?] = [1, "a", nil, [3.5, "b", nil]]
+  let _: [Any?] = [1, [2, [3]]]
+  let _: [Any?] = [1, nil, [2, nil, [3]]]
 
   let a6 = [B(), C()]
   let _: Int = a6 // expected-error{{value of type '[A]'}}
+  
+  let a7: some Collection = [1, "Swift"]
+  let _: (any Sequence)? = [1, "Swift"]
+  let _: any Sequence = [1, nil, "Swift"]
+  let _ = true ? [] : []
+  let _ = (true, ([1, "Swift"]))
+
+  func f2<T>(_: [T]) {}
+
+  func f3<T>() -> [T]? {}
+
+  f2([])
+  f2([1, nil, ""])
+  _ = f3() ?? []
 }
 
 func noInferAny(iob: inout B, ioc: inout C) {
@@ -220,10 +246,10 @@ func joinWithNil<T>(s: String, a: Any, t: T, m: T.Type, p: Proto1 & Proto2, arr:
   let _: Int = a16 // expected-error{{value of type '[T.Type?]'}}
   
   let a17 = [p, nil]
-  let _: Int = a17 // expected-error{{value of type '[(Proto1 & Proto2)?]'}}
+  let _: Int = a17 // expected-error{{value of type '[(any Proto1 & Proto2)?]'}}
   
   let a18 = [nil, p]
-  let _: Int = a18 // expected-error{{value of type '[(Proto1 & Proto2)?]'}}
+  let _: Int = a18 // expected-error{{value of type '[(any Proto1 & Proto2)?]'}}
   
   let a19 = [arr, nil]
   let _: Int = a19 // expected-error{{value of type '[[Int]?]'}}
@@ -316,12 +342,15 @@ let routerFruit = Company(
   ]
 )
 
-// Infer [[Int]] for SR3786aa.
-// FIXME: As noted in SR-3786, this was the behavior in Swift 3, but
-//        it seems like the wrong choice and is less by design than by
-//        accident.
-let SR3786a: [Int] = [1, 2, 3]
-let SR3786aa = [SR3786a.reversed(), SR3786a]
+// https://github.com/apple/swift/issues/46371
+do {
+  let x: [Int] = [1, 2, 3]
+
+  // Infer '[[Int]]'.
+  // FIXME: As noted in the issue, this was the behavior in Swift 3, but
+  // it seems like the wrong choice and is less by design than by accident.
+  let _ = [x.reversed(), x]
+}
 
 // Conditional conformance
 protocol P { }
@@ -343,17 +372,24 @@ func testConditional(i: Int, s: String) {
 }
 
 
-// SR-8385
-enum SR8385: ExpressibleByStringLiteral {
-  case text(String)
-  init(stringLiteral value: String) {
-    self = .text(value)
+// https://github.com/apple/swift/issues/50912
+do {
+  enum Enum: ExpressibleByStringLiteral {
+    case text(String)
+    init(stringLiteral value: String) {
+      self = .text(value)
+    }
   }
+
+  let _: [Enum] = [Enum("hello")]
+  let _: [Enum] = [.text("hello")]
+  let _: [Enum] = ["hello", Enum.text("world")]
+  let _: [Enum] = ["hello", .text("world")]
 }
 
-func testSR8385() {
-  let _: [SR8385] = [SR8385("hello")]
-  let _: [SR8385] = [.text("hello")]
-  let _: [SR8385] = ["hello", SR8385.text("world")]
-  let _: [SR8385] = ["hello", .text("world")]
+struct TestMultipleOverloadedInits {
+  var x: Double
+  func foo() {
+    let _ = [Float(x), Float(x), Float(x), Float(x)]
+  }
 }

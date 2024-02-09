@@ -39,6 +39,11 @@ StringRef getExtension(ID Id);
 /// the invalid type \c TY_INVALID.
 ID lookupTypeForExtension(StringRef Ext);
 
+/// Lookup the type to use for the file name \p Filename.
+/// If the filename is empty or type cannot be recognoized, return
+/// the invalid type \c TY_INVALID.
+ID lookupTypeFromFilename(StringRef Filename);
+
 /// Lookup the type to use for the name \p Name.
 ID lookupTypeForName(StringRef Name);
 
@@ -58,9 +63,20 @@ bool isAfterLLVM(ID Id);
 /// These need to be passed to the Swift frontend
 bool isPartOfSwiftCompilation(ID Id);
 
+/// Returns true of the type of the output is produced from a diagnostic engine.
+bool isProducedFromDiagnostics(ID Id);
+
 static inline void forAllTypes(llvm::function_ref<void(file_types::ID)> fn) {
   for (uint8_t i = 0; i < static_cast<uint8_t>(TY_INVALID); ++i)
     fn(static_cast<ID>(i));
+}
+
+/// Some files are produced by the frontend and read by the driver in order to
+/// support incremental compilation. Invoke the passed-in function for every
+/// such file type.
+static inline void
+forEachIncrementalOutputType(llvm::function_ref<void(file_types::ID)> fn) {
+  fn(file_types::TY_SwiftDeps);
 }
 
 } // end namespace file_types

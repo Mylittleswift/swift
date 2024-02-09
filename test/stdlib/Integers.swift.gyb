@@ -12,16 +12,15 @@
 // RUN: %empty-directory(%t)
 // RUN: %gyb -DWORD_BITS=%target-ptrsize %s -o %t/Integers.swift
 // RUN: %line-directive %t/Integers.swift -- %target-build-swift %t/Integers.swift -swift-version 4 -Onone -o %t/a.out
+// RUN: %line-directive %t/Integers.swift -- %target-codesign %t/a.out
 // RUN: %line-directive %t/Integers.swift -- %target-run %t/a.out
 // REQUIRES: executable_test
 
 // FIXME: this test runs forever on iOS arm64
 // REQUIRES: OS=macosx
 
-// Requires swift-version 4
-// UNSUPPORTED: swift_test_mode_optimize_none_with_implicit_dynamic
 %{
-word_bits = int(WORD_BITS) / 2
+word_bits = int(WORD_BITS) // 2
 from SwiftIntTypes import all_integer_types
 }%
 
@@ -421,7 +420,7 @@ tests.test("CountLeadingZeros") {
   expectEqual(0, Int8.min.leadingZeroBitCount)
 }
 
-tests.test("CountTrainlingZeros") {
+tests.test("CountTrailingZeros") {
   expectEqual(0, UInt8.max.trailingZeroBitCount)
   expectEqual(8, UInt8.min.trailingZeroBitCount)
   expectEqual(0, Int8.max.trailingZeroBitCount)
@@ -777,7 +776,7 @@ tests.test("Remainder/DividingBy0") {
 }
 
 tests.test("RemainderReportingOverflow/DividingByMinusOne") {
-  // Work around SR-5964.
+  // Work around https://github.com/apple/swift/issues/48523.
   func minusOne<T : SignedInteger>() -> T {
     return -1 as T
   }
@@ -845,7 +844,7 @@ tests.test("Strideable") {
   expectEqual(dist(${u}Int.max, ${u}x), -10)
 
   // FIXME: The compiler spuriously flags these as overflowing:
-  // https://bugs.swift.org/browse/SR-5882
+  // https://github.com/apple/swift/issues/48452
   // expectEqual(${u}x.distance(to: ${u}Int.max), 10)
 % end
 
@@ -853,6 +852,9 @@ tests.test("Strideable") {
   expectEqual(dist(UInt8.max, UInt8.min), -255)
   expectEqual(dist(Int8.min, Int8.max), 255)
   expectEqual(dist(Int8.max, Int8.min), -255)
+  
+  expectEqual(Int8.min.advanced(by: Int(Int8.max)+1), 0)
+  expectEqual(UInt.max.advanced(by: Int.min), UInt.max / 2)
 }
 
 tests.test("signum/generic") {

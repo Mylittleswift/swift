@@ -19,50 +19,143 @@
 
 #include "swift/Basic/Compiler.h"
 #include "swift/Basic/Range.h"
-#include "swift/Basic/TransformArrayRef.h"
+#include "swift/Basic/SwiftObjectHeader.h"
 #include "swift/SIL/SILArgumentArrayRef.h"
 #include "swift/SIL/SILInstruction.h"
+#include "swift/SIL/SILArgument.h"
+#include "llvm/ADT/TinyPtrVector.h"
 
 namespace swift {
 
 class SILFunction;
 class SILArgument;
-class SILPhiArgument;
-class SILFunctionArgument;
 class SILPrintContext;
 
+/// Instruction iterator which allows to "delete" instructions while iterating
+/// over the instruction list.
+///
+/// Iteration with this iterator allows to delete the current, the next or any
+/// instruction in the list while iterating.
+/// This works because instruction deletion is deferred (for details see
+/// `SILModule::scheduledForDeletion`) and removing an instruction from the list
+/// keeps the prev/next pointers (see `SILInstructionListBase`).
+template <typename IteratorBase>
+class DeletableInstructionsIterator {
+  using Self = DeletableInstructionsIterator<IteratorBase>;
+
+  IteratorBase base;
+  IteratorBase end;
+
+public:
+  using value_type = typename IteratorBase::value_type;
+  using difference_type = ptrdiff_t;
+  using pointer = value_type *;
+  using iterator_category = std::forward_iterator_tag;
+
+  DeletableInstructionsIterator(IteratorBase base, IteratorBase end)
+  : base(base), end(end) {}
+
+  value_type &operator*() const { return *base; }
+
+  SILInstruction *operator->() const { return base.operator->(); }
+
+  Self &operator++() {
+    // If the current instruction is "deleted" (which means: removed from the
+    // list), it's prev/next pointers still point to the next instruction which
+    // is still in the list - or "deleted", too.
+    ++base;
+    // Skip over all deleted instructions. Eventually we reach an instruction
+    // is still in the list (= not "deleted") or the end iterator.
+    while (base != end && base->isDeleted()) {
+      ++base;
+    }
+    return *this;
+  }
+
+  bool operator==(const Self &rhs) const { return base == rhs.base; }
+  bool operator!=(const Self &rhs) const { return !(*this == rhs); }
+};
+
 class SILBasicBlock :
-public llvm::ilist_node<SILBasicBlock>, public SILAllocated<SILBasicBlock> {
+public llvm::ilist_node<SILBasicBlock>, public SILAllocated<SILBasicBlock>,
+public SwiftObjectHeader {
   friend class SILSuccessor;
   friend class SILFunction;
   friend class SILGlobalVariable;
+  template <typename, unsigned> friend class BasicBlockData;
+  template <class, class> friend class SILBitfield;
+
+  static SwiftMetatype registeredMetatype;
+  
+  using CustomBitsType = uint32_t;
+  
 public:
   using InstListType = llvm::iplist<SILInstruction>;
 private:
   /// A backreference to the containing SILFunction.
   SILFunction *Parent;
 
-  /// PrevList - This is a list of all of the terminator operands that are
+  /// PredList - This is a list of all of the terminator operands that are
   /// branching to this block, forming the predecessor list.  This is
   /// automatically managed by the SILSuccessor class.
-  SILSuccessor *PredList;
+  SILSuccessor *PredList = nullptr;
 
   /// This is the list of basic block arguments for this block.
-  std::vector<SILArgument *> ArgumentList;
+  /// A TinyPtrVector is the right choice, because ~98% of blocks have 0 or 1
+  /// arguments.
+  TinyPtrVector<SILArgument *> ArgumentList;
 
   /// The ordered set of instructions in the SILBasicBlock.
   InstListType InstList;
 
+  /// Used by BasicBlockData to index the Data vector.
+  ///
+  /// A value of -1 means that the index is not initialized yet.
+  int index = -1;
+
+  /// Custom bits managed by BasicBlockBitfield.
+  CustomBitsType customBits = 0;
+  
+  /// The BasicBlockBitfield ID of the last initialized bitfield in customBits.
+  /// Example:
+  ///
+  ///                   Last initialized field:
+  ///           lastInitializedBitfieldID == C.bitfieldID
+  ///                              |
+  ///                              V
+  /// customBits:  <unused> EE DDD C BB AAA
+  ///              31         ...         0
+  ///
+  /// -> AAA, BB and C are initialized,
+  ///    DD and EEE are uninitialized
+  ///
+  /// See also: SILBitfield::bitfieldID, SILFunction::currentBitfieldID.
+  int64_t lastInitializedBitfieldID = 0;
+
+  // Used by `BasicBlockBitfield`.
+  unsigned getCustomBits() const { return customBits; }
+  // Used by `BasicBlockBitfield`.
+  void setCustomBits(unsigned value) { customBits = value; }
+
+  // Used by `BasicBlockBitfield`.
+  enum { numCustomBits = std::numeric_limits<CustomBitsType>::digits };
+
   friend struct llvm::ilist_traits<SILBasicBlock>;
-  SILBasicBlock() : Parent(nullptr) {}
+
+  SILBasicBlock();
+  SILBasicBlock(SILFunction *parent);
+
   void operator=(const SILBasicBlock &) = delete;
-
-  void operator delete(void *Ptr, size_t) SWIFT_DELETE_OPERATOR_DELETED
-
-  SILBasicBlock(SILFunction *F, SILBasicBlock *relativeToBB, bool after);
+  void operator delete(void *Ptr, size_t) = delete;
 
 public:
+  static void registerBridgedMetatype(SwiftMetatype metatype) {
+    registeredMetatype = metatype;
+  }
+
   ~SILBasicBlock();
+
+  bool isMarkedAsDeleted() const { return lastInitializedBitfieldID < 0; }
 
   /// Gets the ID (= index in the function's block list) of the block.
   ///
@@ -71,13 +164,20 @@ public:
   ///          debug output.
   int getDebugID() const;
 
+  void setDebugName(llvm::StringRef name);
+  llvm::Optional<llvm::StringRef> getDebugName() const;
+
   SILFunction *getParent() { return Parent; }
+  SILFunction *getFunction() { return getParent(); }
   const SILFunction *getParent() const { return Parent; }
 
   SILModule &getModule() const;
 
   /// This method unlinks 'self' from the containing SILFunction and deletes it.
   void eraseFromParent();
+
+  /// Remove all instructions of a SILGlobalVariable's static initializer block.
+  void clearStaticInitializerBlock(SILModule &module);
 
   //===--------------------------------------------------------------------===//
   // SILInstruction List Inspection and Manipulation
@@ -95,8 +195,12 @@ public:
 
   void push_back(SILInstruction *I);
   void push_front(SILInstruction *I);
-  void remove(SILInstruction *I);
-  iterator erase(SILInstruction *I);
+  void erase(SILInstruction *I);
+  void erase(SILInstruction *I, SILModule &module);
+  static void moveInstruction(SILInstruction *inst, SILInstruction *beforeInst);
+  void moveInstructionToFront(SILInstruction *inst);
+
+  void eraseAllInstructions(SILModule &module);
 
   SILInstruction &back() { return InstList.back(); }
   const SILInstruction &back() const {
@@ -113,6 +217,10 @@ public:
     InstList.splice(end(), Other->InstList);
   }
 
+  void spliceAtBegin(SILBasicBlock *Other) {
+    InstList.splice(begin(), Other->InstList);
+  }
+
   bool empty() const { return InstList.empty(); }
   iterator begin() { return InstList.begin(); }
   iterator end() { return InstList.end(); }
@@ -122,6 +230,66 @@ public:
   reverse_iterator rend() { return InstList.rend(); }
   const_reverse_iterator rbegin() const { return InstList.rbegin(); }
   const_reverse_iterator rend() const { return InstList.rend(); }
+
+  llvm::iterator_range<iterator> getRangeStartingAtInst(SILInstruction *inst) {
+    assert(inst->getParent() == this);
+    return {inst->getIterator(), end()};
+  }
+
+  llvm::iterator_range<iterator> getRangeEndingAtInst(SILInstruction *inst) {
+    assert(inst->getParent() == this);
+    return {begin(), inst->getIterator()};
+  }
+
+  llvm::iterator_range<reverse_iterator>
+  getReverseRangeStartingAtInst(SILInstruction *inst) {
+    assert(inst->getParent() == this);
+    return {inst->getReverseIterator(), rend()};
+  }
+
+  llvm::iterator_range<reverse_iterator>
+  getReverseRangeEndingAtInst(SILInstruction *inst) {
+    assert(inst->getParent() == this);
+    return {rbegin(), inst->getReverseIterator()};
+  }
+
+  llvm::iterator_range<const_iterator>
+  getRangeStartingAtInst(SILInstruction *inst) const {
+    assert(inst->getParent() == this);
+    return {inst->getIterator(), end()};
+  }
+
+  llvm::iterator_range<const_iterator>
+  getRangeEndingAtInst(SILInstruction *inst) const {
+    assert(inst->getParent() == this);
+    return {begin(), inst->getIterator()};
+  }
+
+  llvm::iterator_range<const_reverse_iterator>
+  getReverseRangeStartingAtInst(SILInstruction *inst) const {
+    assert(inst->getParent() == this);
+    return {inst->getReverseIterator(), rend()};
+  }
+
+  llvm::iterator_range<const_reverse_iterator>
+  getReverseRangeEndingAtInst(SILInstruction *inst) const {
+    assert(inst->getParent() == this);
+    return {rbegin(), inst->getReverseIterator()};
+  }
+
+  /// Allows deleting instructions while iterating over all instructions of the
+  /// block.
+  ///
+  /// For details see `DeletableInstructionsIterator`.
+  llvm::iterator_range<DeletableInstructionsIterator<iterator>>
+  deletableInstructions() { return {{begin(), end()}, {end(), end()}}; }
+
+  /// Allows deleting instructions while iterating over all instructions of the
+  /// block in reverse order.
+  ///
+  /// For details see `DeletableInstructionsIterator`.
+  llvm::iterator_range<DeletableInstructionsIterator<reverse_iterator>>
+  reverseDeletableInstructions() { return {{rbegin(), rend()}, {rend(), rend()}}; }
 
   TermInst *getTerminator() {
     assert(!InstList.empty() && "Can't get successors for malformed block");
@@ -139,12 +307,6 @@ public:
   /// without a terminator.
   SILBasicBlock *split(iterator I);
 
-  /// Move the basic block to after the specified basic block in the IR.
-  ///
-  /// Assumes that the basic blocks must reside in the same function. In asserts
-  /// builds, an assert verifies that this is true.
-  void moveAfter(SILBasicBlock *After);
-
   /// Moves the instruction to the iterator in this basic block.
   void moveTo(SILBasicBlock::iterator To, SILInstruction *I);
 
@@ -152,8 +314,8 @@ public:
   // SILBasicBlock Argument List Inspection and Manipulation
   //===--------------------------------------------------------------------===//
 
-  using arg_iterator = std::vector<SILArgument *>::iterator;
-  using const_arg_iterator = std::vector<SILArgument *>::const_iterator;
+  using arg_iterator = TinyPtrVector<SILArgument *>::iterator;
+  using const_arg_iterator = TinyPtrVector<SILArgument *>::const_iterator;
 
   bool args_empty() const { return ArgumentList.empty(); }
   size_t args_size() const { return ArgumentList.size(); }
@@ -194,14 +356,10 @@ public:
 
   ArrayRef<SILArgument *> getArguments() const { return ArgumentList; }
 
-  /// Returns a transform array ref that performs llvm::cast<SILPhiArgument> on
+  /// Returns a transform array ref that performs llvm::cast<NAME>
   /// each argument and then returns the downcasted value.
-  PhiArgumentArrayRef getPhiArguments() const;
-
-  /// Returns a transform array ref that performs
-  /// llvm::cast<SILFunctionArgument> on each argument and then returns the
-  /// downcasted value.
-  FunctionArgumentArrayRef getFunctionArguments() const;
+#define ARGUMENT(NAME, PARENT) NAME##ArrayRef get##NAME##s() const;
+#include "swift/SIL/SILNodes.def"
 
   unsigned getNumArguments() const { return ArgumentList.size(); }
   const SILArgument *getArgument(unsigned i) const { return ArgumentList[i]; }
@@ -209,21 +367,20 @@ public:
 
   void cloneArgumentList(SILBasicBlock *Other);
 
+  void moveArgumentList(SILBasicBlock *from);
+
   /// Erase a specific argument from the arg list.
   void eraseArgument(int Index);
 
   /// Allocate a new argument of type \p Ty and append it to the argument
   /// list. Optionally you can pass in a value decl parameter.
   SILFunctionArgument *createFunctionArgument(SILType Ty,
-                                              const ValueDecl *D = nullptr);
+                                              const ValueDecl *D = nullptr,
+                                              bool disableEntryBlockVerification = false);
 
-  SILFunctionArgument *insertFunctionArgument(unsigned Index, SILType Ty,
+  SILFunctionArgument *insertFunctionArgument(unsigned AtArgPos, SILType Ty,
                                               ValueOwnershipKind OwnershipKind,
-                                              const ValueDecl *D = nullptr) {
-    arg_iterator Pos = ArgumentList.begin();
-    std::advance(Pos, Index);
-    return insertFunctionArgument(Pos, Ty, OwnershipKind, D);
-  }
+                                              const ValueDecl *D = nullptr);
 
   /// Replace the \p{i}th Function arg with a new Function arg with SILType \p
   /// Ty and ValueDecl \p D.
@@ -232,33 +389,41 @@ public:
                                                const ValueDecl *D = nullptr);
 
   /// Replace the \p{i}th BB arg with a new BBArg with SILType \p Ty and
-  /// ValueDecl
-  /// \p D.
-  SILPhiArgument *replacePhiArgument(unsigned i, SILType Ty,
-                                     ValueOwnershipKind Kind,
-                                     const ValueDecl *D = nullptr);
+  /// ValueDecl \p D.
+  ///
+  /// NOTE: This assumes that the current argument in position \p i has had its
+  /// uses eliminated. To replace/replace all uses with, use
+  /// replacePhiArgumentAndRAUW.
+  SILPhiArgument *replacePhiArgument(unsigned i, SILType type,
+                                     ValueOwnershipKind kind,
+                                     const ValueDecl *decl = nullptr,
+                                     bool isReborrow = false,
+                                     bool isEscaping = false);
+
+  /// Replace phi argument \p i and RAUW all uses.
+  SILPhiArgument *replacePhiArgumentAndReplaceAllUses(
+      unsigned i, SILType type, ValueOwnershipKind kind,
+      const ValueDecl *decl = nullptr, bool isReborrow = false,
+      bool isEscaping = false);
 
   /// Allocate a new argument of type \p Ty and append it to the argument
-  /// list. Optionally you can pass in a value decl parameter.
+  /// list. Optionally you can pass in a value decl parameter, reborrow flag and
+  /// escaping flag.
   SILPhiArgument *createPhiArgument(SILType Ty, ValueOwnershipKind Kind,
-                                    const ValueDecl *D = nullptr);
+                                    const ValueDecl *D = nullptr,
+                                    bool isReborrow = false,
+                                    bool isEscaping = false);
 
   /// Insert a new SILPhiArgument with type \p Ty and \p Decl at position \p
-  /// Pos.
-  SILPhiArgument *insertPhiArgument(arg_iterator Pos, SILType Ty,
+  /// AtArgPos.
+  SILPhiArgument *insertPhiArgument(unsigned AtArgPos, SILType Ty,
                                     ValueOwnershipKind Kind,
-                                    const ValueDecl *D = nullptr);
-
-  SILPhiArgument *insertPhiArgument(unsigned Index, SILType Ty,
-                                    ValueOwnershipKind Kind,
-                                    const ValueDecl *D = nullptr) {
-    arg_iterator Pos = ArgumentList.begin();
-    std::advance(Pos, Index);
-    return insertPhiArgument(Pos, Ty, Kind, D);
-  }
+                                    const ValueDecl *D = nullptr,
+                                    bool isReborrow = false,
+                                    bool isEscaping = false);
 
   /// Remove all block arguments.
-  void dropAllArguments() { ArgumentList.clear(); }
+  void dropAllArguments();
 
   //===--------------------------------------------------------------------===//
   // Successors
@@ -302,6 +467,10 @@ public:
   const_succblock_iterator succblock_end() const {
     return getTerminator()->succblock_end();
   }
+  
+  unsigned getNumSuccessors() const {
+    return getTerminator()->getNumSuccessors();
+  }
 
   SILBasicBlock *getSingleSuccessorBlock() {
     return getTerminator()->getSingleSuccessorBlock();
@@ -309,11 +478,6 @@ public:
 
   const SILBasicBlock *getSingleSuccessorBlock() const {
     return getTerminator()->getSingleSuccessorBlock();
-  }
-
-  /// Returns true if \p BB is a successor of this block.
-  bool isSuccessorBlock(SILBasicBlock *Block) const {
-    return getTerminator()->isSuccessorBlock(Block);
   }
 
   using SuccessorBlockListTy = TermInst::SuccessorBlockListTy;
@@ -341,12 +505,6 @@ public:
 
   iterator_range<pred_iterator> getPredecessorBlocks() const {
     return {pred_begin(), pred_end()};
-  }
-
-  bool isPredecessorBlock(SILBasicBlock *BB) const {
-    return any_of(
-        getPredecessorBlocks(),
-        [&BB](const SILBasicBlock *PredBB) -> bool { return BB == PredBB; });
   }
 
   SILBasicBlock *getSinglePredecessorBlock() {
@@ -383,6 +541,12 @@ public:
   /// the debug scope for newly created instructions.
   const SILDebugScope *getScopeOfFirstNonMetaInstruction();
 
+  /// Whether the block has any phi arguments.
+  ///
+  /// Note that a block could have an argument and still return false.  The
+  /// argument must also satisfy SILPhiArgument::isPhi.
+  bool hasPhi() const;
+
   //===--------------------------------------------------------------------===//
   // Debugging
   //===--------------------------------------------------------------------===//
@@ -393,10 +557,21 @@ public:
   /// Pretty-print the SILBasicBlock with the designated stream.
   void print(llvm::raw_ostream &OS) const;
 
-  /// Pretty-print the SILBasicBlock with the designated stream and context.
-  void print(llvm::raw_ostream &OS, SILPrintContext &Ctx) const;
+  /// Pretty-print the SILBasicBlock with the designated context.
+  void print(SILPrintContext &Ctx) const;
 
   void printAsOperand(raw_ostream &OS, bool PrintType = true);
+
+#ifndef NDEBUG
+  /// Print the ID of the block, bbN.
+  void dumpID(bool newline = true) const;
+
+  /// Print the ID of the block with \p OS, bbN.
+  void printID(llvm::raw_ostream &OS, bool newline = true) const;
+
+  /// Print the ID of the block with \p Ctx, bbN.
+  void printID(SILPrintContext &Ctx, bool newline = true) const;
+#endif
 
   /// getSublistAccess() - returns pointer to member of instruction list
   static InstListType SILBasicBlock::*getSublistAccess() {
@@ -410,8 +585,6 @@ public:
       I.dropAllReferences();
   }
 
-  void eraseInstructions();
-
 private:
   friend class SILArgument;
 
@@ -419,12 +592,6 @@ private:
   void insertArgument(arg_iterator Iter, SILArgument *Arg) {
     ArgumentList.insert(Iter, Arg);
   }
-
-  /// Insert a new SILFunctionArgument with type \p Ty and \p Decl at position
-  /// \p Pos.
-  SILFunctionArgument *insertFunctionArgument(arg_iterator Pos, SILType Ty,
-                                              ValueOwnershipKind OwnershipKind,
-                                              const ValueDecl *D = nullptr);
 };
 
 inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
@@ -464,5 +631,196 @@ private:
 };
 
 } // end llvm namespace
+
+//===----------------------------------------------------------------------===//
+//                           PhiOperand & PhiValue
+//===----------------------------------------------------------------------===//
+
+namespace swift {
+
+/// Represent a phi argument without storing pointers to branches or their
+/// operands which are invalidated by adding new, unrelated phi values. Because
+/// this only stores a block pointer, it remains valid as long as the CFG is
+/// immutable and the index of the phi value does not change.
+///
+/// Note: this should not be confused with SILPhiArgument which should be
+/// renamed to SILPhiValue and only used for actual phis.
+///
+/// Warning: This is invalid for CondBranchInst arguments. Clients assume that
+/// any instructions inserted at the phi argument is post-dominated by that phi
+/// argument. This warning can be removed once the SILVerifier fully prohibits
+/// CondBranchInst arguments at all SIL stages.
+struct PhiOperand {
+  SILBasicBlock *predBlock = nullptr;
+  unsigned argIndex = 0;
+
+  PhiOperand() = default;
+
+  // This if \p operand is a CondBrInst operand, then this constructs and
+  // invalid PhiOperand. The abstraction only works for non-trivial OSSA values.
+  PhiOperand(Operand *operand) {
+    auto *branch = dyn_cast<BranchInst>(operand->getUser());
+    if (!branch)
+      return;
+
+    predBlock = branch->getParent();
+    argIndex = operand->getOperandNumber();
+  }
+
+  explicit operator bool() const { return predBlock != nullptr; }
+
+  bool operator==(PhiOperand other) const {
+    return predBlock == other.predBlock && argIndex == other.argIndex;
+  }
+
+  bool operator!=(PhiOperand other) const { return !(*this == other); }
+
+  BranchInst *getBranch() const {
+    return cast<BranchInst>(predBlock->getTerminator());
+  }
+
+  Operand *getOperand() const {
+    return &getBranch()->getAllOperands()[argIndex];
+  }
+
+  SILPhiArgument *getValue() const {
+    return
+      cast<SILPhiArgument>(getBranch()->getDestBB()->getArgument(argIndex));
+  }
+
+  SILValue getSource() const {
+    return getOperand()->get();
+  }
+
+  operator Operand *() const { return getOperand(); }
+  Operand *operator*() const { return getOperand(); }
+  Operand *operator->() const { return getOperand(); }
+};
+
+/// Represent a phi value without referencing the SILValue, which is invalidated
+/// by adding new, unrelated phi values. Because this only stores a block
+/// pointer, it remains valid as long as the CFG is immutable and the index of
+/// the phi value does not change.
+struct PhiValue {
+  SILBasicBlock *phiBlock = nullptr;
+  unsigned argIndex = 0;
+
+  PhiValue() = default;
+
+  PhiValue(SILValue value) {
+    if (auto *blockArg = SILArgument::asPhi(value)) {
+      phiBlock = blockArg->getParent();
+      argIndex = blockArg->getIndex();
+    }
+  }
+
+  explicit operator bool() const { return phiBlock != nullptr; }
+
+  bool operator==(PhiValue other) const {
+    return phiBlock == other.phiBlock && argIndex == other.argIndex;
+  }
+
+  bool operator!=(PhiValue other) const { return !(*this == other); }
+
+  SILPhiArgument *getValue() const {
+    return cast<SILPhiArgument>(phiBlock->getArgument(argIndex));
+  }
+
+  Operand *getOperand(SILBasicBlock *predecessor) {
+    auto *term = predecessor->getTerminator();
+    if (auto *branch = dyn_cast<BranchInst>(term)) {
+      return &branch->getAllOperands()[argIndex];
+    }
+    // TODO: Support CondBr for legacy reasons
+    return cast<CondBranchInst>(term)->getOperandForDestBB(phiBlock, argIndex);
+  }
+
+  operator SILValue() const { return getValue(); }
+  SILValue operator*() const { return getValue(); }
+  SILValue operator->() const { return getValue(); }
+};
+
+} // namespace swift
+
+namespace llvm {
+
+template <> struct DenseMapInfo<swift::PhiOperand> {
+  static swift::PhiOperand getEmptyKey() { return swift::PhiOperand(); }
+  static swift::PhiOperand getTombstoneKey() {
+    swift::PhiOperand phiOper;
+    phiOper.predBlock =
+        llvm::DenseMapInfo<swift::SILBasicBlock *>::getTombstoneKey();
+    return phiOper;
+  }
+  static unsigned getHashValue(swift::PhiOperand phiOper) {
+    return llvm::hash_combine(phiOper.predBlock, phiOper.argIndex);
+  }
+  static bool isEqual(swift::PhiOperand lhs, swift::PhiOperand rhs) {
+    return lhs == rhs;
+  }
+};
+
+template <> struct DenseMapInfo<swift::PhiValue> {
+  static swift::PhiValue getEmptyKey() { return swift::PhiValue(); }
+  static swift::PhiValue getTombstoneKey() {
+    swift::PhiValue phiValue;
+    phiValue.phiBlock =
+        llvm::DenseMapInfo<swift::SILBasicBlock *>::getTombstoneKey();
+    return phiValue;
+  }
+  static unsigned getHashValue(swift::PhiValue phiValue) {
+    return llvm::hash_combine(phiValue.phiBlock, phiValue.argIndex);
+  }
+  static bool isEqual(swift::PhiValue lhs, swift::PhiValue rhs) {
+    return lhs == rhs;
+  }
+};
+
+} // end namespace llvm
+
+//===----------------------------------------------------------------------===//
+// Inline SILInstruction implementations
+//===----------------------------------------------------------------------===//
+
+namespace swift {
+
+inline SILFunction *SILInstruction::getFunction() const {
+  return getParent()->getParent();
+}
+
+inline bool SILInstruction::visitPriorInstructions(
+    llvm::function_ref<bool(SILInstruction *)> visitor) {
+  if (auto *previous = getPreviousInstruction()) {
+    return visitor(previous);
+  }
+  for (auto *predecessor : getParent()->getPredecessorBlocks()) {
+    if (!visitor(&predecessor->back()))
+      return false;
+  }
+  return true;
+}
+inline bool SILInstruction::visitSubsequentInstructions(
+    llvm::function_ref<bool(SILInstruction *)> visitor) {
+  if (auto *next = getNextInstruction()) {
+    return visitor(next);
+  }
+  for (auto *successor : getParent()->getSuccessorBlocks()) {
+    if (!visitor(&successor->front()))
+      return false;
+  }
+  return true;
+}
+
+inline SILInstruction *SILInstruction::getPreviousInstruction() {
+  auto pos = getIterator();
+  return pos == getParent()->begin() ? nullptr : &*std::prev(pos);
+}
+
+inline SILInstruction *SILInstruction::getNextInstruction() {
+  auto nextPos = std::next(getIterator());
+  return nextPos == getParent()->end() ? nullptr : &*nextPos;
+}
+
+} // end swift namespace
 
 #endif

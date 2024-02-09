@@ -12,8 +12,11 @@
 
 #include "swift/Basic/FileSystem.h"
 
-#include "swift/Basic/LLVM.h"
 #include "clang/Basic/FileManager.h"
+#include "llvm/ADT/None.h"
+#include "llvm/ADT/Optional.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/FileSystem.h"
@@ -45,7 +48,7 @@ namespace {
 /// If the result is an error, the write won't succeed at all, and the calling
 /// operation should bail out early.
 static llvm::ErrorOr<bool>
-canUseTemporaryForWrite(const StringRef outputPath) {
+canUseTemporaryForWrite(const llvm::StringRef outputPath) {
   namespace fs = llvm::sys::fs;
 
   if (outputPath == "-") {
@@ -83,17 +86,18 @@ canUseTemporaryForWrite(const StringRef outputPath) {
 ///
 /// \returns The path to the temporary file that was opened, or \c None if the
 /// file couldn't be created.
-static Optional<std::string>
-tryToOpenTemporaryFile(Optional<llvm::raw_fd_ostream> &openedStream,
-                       const StringRef outputPath) {
+static llvm::Optional<std::string>
+tryToOpenTemporaryFile(llvm::Optional<llvm::raw_fd_ostream> &openedStream,
+                       const llvm::StringRef outputPath) {
   namespace fs = llvm::sys::fs;
 
   // Create a temporary file path.
   // Insert a placeholder for a random suffix before the extension (if any).
   // Then because some tools glob for build artifacts (such as clang's own
   // GlobalModuleIndex.cpp), also append .tmp.
-  SmallString<128> tempPath;
-  const StringRef outputExtension = llvm::sys::path::extension(outputPath);
+  llvm::SmallString<128> tempPath;
+  const llvm::StringRef outputExtension =
+      llvm::sys::path::extension(outputPath);
   tempPath = outputPath.drop_back(outputExtension.size());
   tempPath += "-%%%%%%%%";
   tempPath += outputExtension;
@@ -101,12 +105,13 @@ tryToOpenTemporaryFile(Optional<llvm::raw_fd_ostream> &openedStream,
 
   int fd;
   const unsigned perms = fs::all_read | fs::all_write;
-  std::error_code EC = fs::createUniqueFile(tempPath, fd, tempPath, perms);
+  std::error_code EC = fs::createUniqueFile(tempPath, fd, tempPath,
+                                            fs::OF_None, perms);
 
   if (EC) {
     // Ignore the specific error; the caller has to fall back to not using a
     // temporary anyway.
-    return None;
+    return llvm::None;
   }
 
   openedStream.emplace(fd, /*shouldClose=*/true);
@@ -116,7 +121,7 @@ tryToOpenTemporaryFile(Optional<llvm::raw_fd_ostream> &openedStream,
 }
 
 std::error_code swift::atomicallyWritingToFile(
-    const StringRef outputPath,
+    const llvm::StringRef outputPath,
     const llvm::function_ref<void(llvm::raw_pwrite_stream &)> action) {
   namespace fs = llvm::sys::fs;
 
@@ -129,47 +134,50 @@ std::error_code swift::atomicallyWritingToFile(
   if (std::error_code error = canUseTemporary.getError())
     return error;
 
-  Optional<std::string> temporaryPath;
+  llvm::Optional<std::string> temporaryPath;
   {
-    Optional<llvm::raw_fd_ostream> OS;
+    llvm::Optional<llvm::raw_fd_ostream> OS;
     if (canUseTemporary.get()) {
       temporaryPath = tryToOpenTemporaryFile(OS, outputPath);
 
       if (!temporaryPath) {
-        assert(!OS.hasValue());
+        assert(!OS.has_value());
         // If we failed to create the temporary, fall back to writing to the
         // file directly. This handles the corner case where we cannot write to
         // the directory, but can write to the file.
       }
     }
 
-    if (!OS.hasValue()) {
+    if (!OS.has_value()) {
       std::error_code error;
-      OS.emplace(outputPath, error, fs::F_None);
-      if (error)
+      OS.emplace(outputPath, error, fs::OF_None);
+      if (error) {
         return error;
+      }
     }
 
-    action(OS.getValue());
+    action(OS.value());
     // In addition to scoping the use of 'OS', ending the scope here also
     // ensures that it's been flushed (by destroying it).
   }
 
-  if (!temporaryPath.hasValue()) {
+  if (!temporaryPath.has_value()) {
     // If we didn't use a temporary, we're done!
     return std::error_code();
   }
 
-  return swift::moveFileIfDifferent(temporaryPath.getValue(), outputPath);
+  return swift::moveFileIfDifferent(temporaryPath.value(), outputPath);
 }
 
-std::error_code swift::moveFileIfDifferent(const llvm::Twine &source,
-                                           const llvm::Twine &destination) {
+llvm::ErrorOr<FileDifference>
+swift::areFilesDifferent(const llvm::Twine &source,
+                         const llvm::Twine &destination,
+                         bool allowDestinationErrors) {
   namespace fs = llvm::sys::fs;
 
-  // First check for a self-move.
-  if (fs::equivalent(source, destination))
-    return std::error_code();
+  if (fs::equivalent(source, destination)) {
+    return FileDifference::IdenticalFile;
+  }
 
   OpenFileRAII sourceFile;
   fs::file_status sourceStatus;
@@ -182,45 +190,87 @@ std::error_code swift::moveFileIfDifferent(const llvm::Twine &source,
     return error;
   }
 
+  /// Converts an error from the destination file into either an error or
+  /// DifferentContents return, depending on `allowDestinationErrors`.
+  auto convertDestinationError = [=](std::error_code error) ->
+      llvm::ErrorOr<FileDifference> {
+    if (allowDestinationErrors){
+      return FileDifference::DifferentContents;
+    }
+    return error;
+  };
+
   OpenFileRAII destFile;
   fs::file_status destStatus;
-  bool couldReadDest = !fs::openFileForRead(destination, destFile.fd);
-  if (couldReadDest)
-    couldReadDest = !fs::status(destFile.fd, destStatus);
-
-  // If we could read the destination file, and it matches the source file in
-  // size, they may be the same. Do an actual comparison of the contents.
-  if (couldReadDest && sourceStatus.getSize() == destStatus.getSize()) {
-    uint64_t size = sourceStatus.getSize();
-    bool same = false;
-    if (size == 0) {
-      same = true;
-    } else {
-      std::error_code sourceRegionErr;
-      fs::mapped_file_region sourceRegion(sourceFile.fd,
-                                          fs::mapped_file_region::readonly,
-                                          size, 0, sourceRegionErr);
-      if (sourceRegionErr)
-        return sourceRegionErr;
-
-      std::error_code destRegionErr;
-      fs::mapped_file_region destRegion(destFile.fd,
-                                        fs::mapped_file_region::readonly,
-                                        size, 0, destRegionErr);
-
-      if (!destRegionErr) {
-        same = (0 == memcmp(sourceRegion.const_data(), destRegion.const_data(),
-                            size));
-      }
-    }
-
-    // If the file contents are the same, we are done. Just delete the source.
-    if (same)
-      return fs::remove(source);
+  if (std::error_code error = fs::openFileForRead(destination, destFile.fd)) {
+    // If we can't open the destination file, fail in the specified fashion.
+    return convertDestinationError(error);
+  }
+  if (std::error_code error = fs::status(destFile.fd, destStatus)) {
+    // If we can't open the destination file, fail in the specified fashion.
+    return convertDestinationError(error);
   }
 
-  // If we get here, we weren't able to prove that the files are the same.
-  return fs::rename(source, destination);
+  uint64_t size = sourceStatus.getSize();
+  if (size != destStatus.getSize()) {
+    // If the files are different sizes, they must be different.
+    return FileDifference::DifferentContents;
+  }
+  if (size == 0) {
+    // If both files are zero size, they must be the same.
+    return FileDifference::SameContents;
+  }
+
+  // The two files match in size, so we have to compare the bytes to determine
+  // if they're the same.
+  std::error_code sourceRegionErr;
+  fs::mapped_file_region sourceRegion(fs::convertFDToNativeFile(sourceFile.fd),
+                                      fs::mapped_file_region::readonly,
+                                      size, 0, sourceRegionErr);
+  if (sourceRegionErr) {
+    return sourceRegionErr;
+  }
+
+  std::error_code destRegionErr;
+  fs::mapped_file_region destRegion(fs::convertFDToNativeFile(destFile.fd),
+                                    fs::mapped_file_region::readonly,
+                                    size, 0, destRegionErr);
+
+  if (destRegionErr) {
+    return convertDestinationError(destRegionErr);
+  }
+
+  if (memcmp(sourceRegion.const_data(), destRegion.const_data(), size) != 0) {
+    return FileDifference::DifferentContents;
+  }
+
+  return FileDifference::SameContents;
+}
+
+std::error_code swift::moveFileIfDifferent(const llvm::Twine &source,
+                                           const llvm::Twine &destination) {
+  namespace fs = llvm::sys::fs;
+
+  auto result = areFilesDifferent(source, destination,
+                                  /*allowDestinationErrors=*/true);
+
+  if (!result)
+    return result.getError();
+
+  switch (*result) {
+  case FileDifference::IdenticalFile:
+    // Do nothing for a self-move.
+    return std::error_code();
+
+  case FileDifference::SameContents:
+    // Files are identical; remove the source file.
+    return fs::remove(source);
+
+  case FileDifference::DifferentContents:
+    // Files are different; overwrite the destination file.
+    return fs::rename(source, destination);
+  }
+  llvm_unreachable("Unhandled FileDifference in switch");
 }
 
 llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>>
@@ -228,12 +278,21 @@ swift::vfs::getFileOrSTDIN(llvm::vfs::FileSystem &FS,
                            const llvm::Twine &Filename,
                            int64_t FileSize,
                            bool RequiresNullTerminator,
-                           bool IsVolatile) {
+                           bool IsVolatile,
+                           unsigned BADFRetry) {
   llvm::SmallString<256> NameBuf;
   llvm::StringRef NameRef = Filename.toStringRef(NameBuf);
 
   if (NameRef == "-")
     return llvm::MemoryBuffer::getSTDIN();
-  return FS.getBufferForFile(Filename, FileSize,
-                             RequiresNullTerminator, IsVolatile);
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> inputFileOrErr = nullptr;
+  for (unsigned I = 0; I != BADFRetry + 1; ++ I) {
+    inputFileOrErr = FS.getBufferForFile(Filename, FileSize,
+                                         RequiresNullTerminator, IsVolatile);
+    if (inputFileOrErr)
+      return inputFileOrErr;
+    if (inputFileOrErr.getError().value() != EBADF)
+      return inputFileOrErr;
+  }
+  return inputFileOrErr;
 }

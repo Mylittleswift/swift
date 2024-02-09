@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -sil-verify-all %s -module-name test -emit-sil -o - -verify | %FileCheck %s
+// RUN: %target-swift-frontend -sil-verify-all %s -module-name test -emit-sil -o - -verify | %FileCheck %s --enable-var-scope
 
 
 // Constructor calls are dispatched dynamically for open classes, even if
@@ -6,7 +6,7 @@
 
 open class OpenClass {
   // CHECK-LABEL: sil @$s4test9OpenClassC1xACSi_tcfC
-  // CHECK: [[M:%[0-9]+]] = class_method %1 : $@thick OpenClass.Type, #OpenClass.init!allocator.1
+  // CHECK: [[M:%[0-9]+]] = class_method %1 : $@thick OpenClass.Type, #OpenClass.init!allocator
   // CHECK: apply [[M]]
   // CHECK: return
   public convenience init(x: Int) {
@@ -42,10 +42,26 @@ public struct Concrete : Thrower {
   public func fail() throws {}
 }
 
-// CHECK-LABEL: sil @$s4test6calleryyAA8ConcreteVKF : $@convention(thin) (Concrete) -> @error Error
+// CHECK-LABEL: sil @$s4test6calleryyAA8ConcreteVKF : $@convention(thin) (Concrete) -> @error any Error
 public func caller(_ c: Concrete) throws {
   // CHECK: [[ARG:%.*]] = struct $Concrete ()
-  // CHECK: [[FN:%.*]] = function_ref @$s4test8ConcreteV4failyyKF : $@convention(method) (Concrete) -> @error Error
-  // CHECK: try_apply [[FN]]([[ARG]]) : $@convention(method) (Concrete) -> @error Error
+  // CHECK: [[FN:%.*]] = function_ref @$s4test8ConcreteV4failyyKF : $@convention(method) (Concrete) -> @error any Error
+  // CHECK: try_apply [[FN]]([[ARG]]) : $@convention(method) (Concrete) -> @error any Error
   try callee(c)
+}
+
+
+public struct File {
+  var alias: FileHandle = FileHandle()
+}
+
+public class FileHandle {
+  @_borrowed var file: File = File()
+}
+
+// CHECK-LABEL: sil @$s4test20access_borrowed_readyAA10FileHandleCADF : $@convention(thin) (@guaranteed FileHandle) -> @owned FileHandle {
+public func access_borrowed_read(_ l: FileHandle) -> FileHandle {
+  // CHECK-NOT: begin_apply
+  // CHECK:     return
+  return l.file.alias
 }

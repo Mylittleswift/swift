@@ -73,5 +73,43 @@ AssociatedTypeDemangleTests.test("generic anonymous contexts") {
   expectEqual("Inner<Int>", String(describing: getP2_A(C3<Int>.self)))
 }
 
+// rdar://problem/47773183
+struct Pair<First, Second> {
+  var first: First
+  var second: Second
+}
+
+protocol PairConvertible {
+  associatedtype First
+  associatedtype Second
+  associatedtype PairType = Pair<First, Second>
+
+  var first: First { get }
+  var second: Second { get }
+}
+
+extension PairConvertible where PairType == Pair<First, Second> {
+  var pair: PairType { Pair(first: first, second: second) }
+}
+
+private struct Parent<Unused> {
+  struct Nested<First, Second>: PairConvertible {
+    var first: First
+    var second: Second
+  }
+}
+
+AssociatedTypeDemangleTests.test("nested private generic types in associated type witnesses") {
+  // Fixed in Swift 5.1+ runtimes.
+  if #available(SwiftStdlib 5.1, *) {}
+  // Bug is still present in Swift 5.0 runtime.
+  else {
+    expectCrashLater(withMessage: "failed to demangle witness for associated type 'Second' in conformance")
+    return
+  }
+
+  _ = Parent<Never>.Nested(first: "String", second: 0).pair
+}
+
 
 runAllTests()

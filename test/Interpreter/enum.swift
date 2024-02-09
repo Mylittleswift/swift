@@ -554,7 +554,8 @@ presentEitherOr(EitherOr<(), String>.Right("foo")) // CHECK-NEXT: Right(foo)
 // CHECK-NEXT: Right(foo)
 presentEitherOrsOf(t: (), u: "foo")
 
-// SR-5148
+// https://github.com/apple/swift/issues/47724
+
 enum Payload {
     case email
 }
@@ -698,3 +699,49 @@ func testCase() {
 
 // CHECK: Container(storage: a.MultiIndirectRef.ind(5))
 testCase()
+
+
+enum BitEnum {
+  case first
+  case second
+}
+protocol Init {
+  init()
+}
+struct TrailingByte : Init {
+  var x = 2
+  var y = BitEnum.first
+  init() {
+    x = 2
+    y = BitEnum.first
+  }
+}
+
+@inline(never)
+func capture<T>(_ t: inout T) {
+  print("captured \(t)")
+}
+
+@inline(never)
+func reproduction<T: Init>(_ x: Int, _ y: Int, _ t: T) {
+  var o : Optional<T> = nil
+
+
+  for i in 0 ..< x {
+     if  i == y {
+        o = T()
+     }
+  }
+
+  capture(&o)
+
+  if var byte = o {
+    print("there is a byte (failure)")
+    print(byte)
+  } else {
+    print("there is no byte")
+  }
+}
+
+// CHECK: there is no byte
+reproduction(2, 3, TrailingByte())

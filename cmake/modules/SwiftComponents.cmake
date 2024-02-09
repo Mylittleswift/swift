@@ -46,6 +46,7 @@
 # The set of "defined" swift components are as follows:
 #
 # * autolink-driver -- the Swift driver support tools
+# * back-deployment -- Swift back-deployment libraries
 # * compiler -- the Swift compiler and (on supported platforms) the REPL.
 # * clang-builtin-headers -- install a copy of Clang builtin headers under
 #   'lib/swift/clang'.  This is useful when Swift compiler is installed in
@@ -61,11 +62,15 @@
 #   Xcode;
 # * tools -- tools (other than the compiler) useful for developers writing
 #   Swift code.
+# * toolchain-tools -- a subset of tools that we will install to the OSS toolchain.
 # * testsuite-tools -- extra tools required to run the Swift testsuite.
+# * static-mirror-lib -- Build the static mirror library used by SwiftStaticMirror.
+# * swift-syntax-lib -- install swift-syntax libraries
 # * toolchain-dev-tools -- install development tools useful in a shared toolchain
+# * llvm-toolchain-dev-tools -- install LLVM development tools useful in a shared toolchain
 # * dev -- headers and libraries required to use Swift compiler as a library.
 set(_SWIFT_DEFINED_COMPONENTS
-  "autolink-driver;compiler;clang-builtin-headers;clang-resource-dir-symlink;clang-builtin-headers-in-clang-resource-dir;stdlib;stdlib-experimental;sdk-overlay;parser-lib;editor-integration;tools;testsuite-tools;toolchain-dev-tools;dev;license;sourcekit-xpc-service;sourcekit-inproc;swift-remote-mirror;swift-remote-mirror-headers")
+  "autolink-driver;back-deployment;compiler;clang-builtin-headers;clang-resource-dir-symlink;clang-builtin-headers-in-clang-resource-dir;libexec;stdlib;stdlib-experimental;sdk-overlay;static-mirror-lib;swift-syntax-lib;editor-integration;tools;testsuite-tools;toolchain-tools;toolchain-dev-tools;llvm-toolchain-dev-tools;dev;license;sourcekit-xpc-service;sourcekit-inproc;swift-remote-mirror;swift-remote-mirror-headers;swift-external-generic-metadata-builder;swift-external-generic-metadata-builder-headers")
 
 # The default install components include all of the defined components, except
 # for the following exceptions.
@@ -76,24 +81,45 @@ list(REMOVE_ITEM _SWIFT_DEFAULT_COMPONENTS "dev")
 list(REMOVE_ITEM _SWIFT_DEFAULT_COMPONENTS "clang-resource-dir-symlink")
 list(REMOVE_ITEM _SWIFT_DEFAULT_COMPONENTS "clang-builtin-headers-in-clang-resource-dir")
 # This conflicts with LLVM itself when doing unified builds.
-list(REMOVE_ITEM _SWIFT_DEFAULT_COMPONENTS "toolchain-dev-tools")
+list(REMOVE_ITEM _SWIFT_DEFAULT_COMPONENTS "llvm-toolchain-dev-tools")
 # The sourcekit install variants are currently mutually exclusive.
-if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
   list(REMOVE_ITEM _SWIFT_DEFAULT_COMPONENTS "sourcekit-inproc")
 else()
   list(REMOVE_ITEM _SWIFT_DEFAULT_COMPONENTS "sourcekit-xpc-service")
 endif()
+list(REMOVE_ITEM _SWIFT_DEFAULT_COMPONENTS "stdlib-experimental")
+# back-deployment libraries are opt-in
+list(REMOVE_ITEM _SWIFT_DEFAULT_COMPONENTS "back-deployment")
 
 macro(swift_configure_components)
   # Set the SWIFT_INSTALL_COMPONENTS variable to the default value if it is not passed in via -D
   set(SWIFT_INSTALL_COMPONENTS "${_SWIFT_DEFAULT_COMPONENTS}" CACHE STRING
     "A semicolon-separated list of components to install from the set ${_SWIFT_DEFINED_COMPONENTS}")
 
+  # 'compiler' depends on 'swift-syntax-lib' component.
+  if ("compiler" IN_LIST SWIFT_INSTALL_COMPONENTS AND
+      NOT "swift-syntax-lib" IN_LIST SWIFT_INSTALL_COMPONENTS)
+    list(APPEND SWIFT_INSTALL_COMPONENTS "swift-syntax-lib")
+  endif()
+
   foreach(component ${_SWIFT_DEFINED_COMPONENTS})
+    add_custom_target(${component})
+    add_llvm_install_targets(install-${component}
+                             DEPENDS ${component}
+                             COMPONENT ${component})
+
     string(TOUPPER "${component}" var_name_piece)
     string(REPLACE "-" "_" var_name_piece "${var_name_piece}")
     set(SWIFT_INSTALL_${var_name_piece} FALSE)
   endforeach()
+
+  # NOTE: never_install is a dummy component to indicate something should not
+  # be installed. We explicitly do not add an install target for this.
+  add_custom_target(never_install)
+
+  add_custom_target(swift-components)
+  add_custom_target(install-swift-components)
 
   foreach(component ${SWIFT_INSTALL_COMPONENTS})
     if(NOT "${component}" IN_LIST _SWIFT_DEFINED_COMPONENTS)
@@ -104,6 +130,8 @@ macro(swift_configure_components)
     string(REPLACE "-" "_" var_name_piece "${var_name_piece}")
     if(NOT SWIFT_INSTALL_EXCLUDE_${var_name_piece})
       set(SWIFT_INSTALL_${var_name_piece} TRUE)
+      add_dependencies(swift-components ${component})
+      add_dependencies(install-swift-components install-${component})
     endif()
   endforeach()
 endmacro()
@@ -125,17 +153,23 @@ function(swift_is_installing_component component result_var_name)
   endif()
 endfunction()
 
-# swift_install_in_component(<COMPONENT NAME>
-#   <same parameters as install()>)
+# swift_install_in_component(<same parameters as install()>)
 #
 # Executes the specified installation actions if the named component is
 # requested to be installed.
 #
 # This function accepts the same parameters as install().
-function(swift_install_in_component component)
-  precondition(component MESSAGE "Component name is required")
+function(swift_install_in_component)
+  cmake_parse_arguments(
+      ARG # prefix
+      "" # options
+      "COMPONENT" # single-value args
+      "" # multi-value args
+      ${ARGN})
 
-  swift_is_installing_component("${component}" is_installing)
+  precondition(ARG_COMPONENT MESSAGE "Component name is required")
+
+  swift_is_installing_component("${ARG_COMPONENT}" is_installing)
   if(NOT is_installing)
     return()
   endif()
@@ -165,6 +199,13 @@ function(swift_install_symlink_component component)
   precondition(INSTALL_SYMLINK
     MESSAGE "LLVMInstallSymlink script must be available.")
 
+  # Create the directory if it doesn't exist. It will fail to create a symlink
+  # otherwise.
+  install(DIRECTORY DESTINATION "${ARG_DESTINATION}" COMPONENT ${component})
   install(SCRIPT ${INSTALL_SYMLINK}
-          CODE "install_symlink(${ARG_LINK_NAME} ${ARG_TARGET} ${ARG_DESTINATION})")
+          CODE "install_symlink(${ARG_LINK_NAME}
+                                ${ARG_TARGET}
+                                ${ARG_DESTINATION}
+                                ${SWIFT_COPY_OR_SYMLINK})"
+          COMPONENT ${component})
 endfunction()

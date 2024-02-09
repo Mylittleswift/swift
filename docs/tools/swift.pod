@@ -12,7 +12,7 @@ To invoke the Swift REPL (Read-Eval-Print-Loop):
 
 =over
 
-B<swift>
+B<swift> repl
 
 =back
 
@@ -20,7 +20,7 @@ To execute a Swift program:
 
 =over
 
-B<swift> program.swift -- <arguments>
+B<swift> program.swift <arguments>
 
 =back
 
@@ -81,12 +81,13 @@ works, continually evolving to make Swift even better.
 
 =head1 BUGS
 
-Reporting bugs is a great way for anyone to help improve Swift. The bug tracker
-for Swift, an open-source project, is located at L<https://bugs.swift.org>.
+Reporting bugs is a great way for anyone to help improve Swift. The issue
+tracker for Swift, an open-source project, is located at
+L<https://github.com/apple/swift/issues>.
 
 If a bug can be reproduced only within an Xcode project or a playground, or if
 the bug is associated with an Apple NDA, please file a report to Apple's
-bug reporter at L<https://bugreport.apple.com> instead.
+Feedback Assistant at L<https://feedbackassistant.apple.com> instead.
 
 =head1 SEE ALSO
 

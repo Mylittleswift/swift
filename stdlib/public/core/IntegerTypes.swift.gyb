@@ -17,7 +17,6 @@
 from SwiftIntTypes import all_integer_types, int_max_bits, should_define_truncating_bit_pattern_init
 from SwiftFloatingPointTypes import getFtoIBounds
 
-from string import maketrans, capitalize
 from itertools import chain
 
 # Number of bits in the Builtin.Word type
@@ -30,12 +29,12 @@ class struct(object):
     return 'struct(%r)' % self.__dict__
 
 binaryArithmetic = {
-  'Numeric' : [
+  'Numeric': [
     struct(operator='+', name='adding',      firstArg='_',  llvmName='add', kind='+'),
     struct(operator='-', name='subtracting', firstArg='_',  llvmName='sub', kind='-'),
     struct(operator='*', name='multiplied',  firstArg='by', llvmName='mul', kind='*'),
   ],
-  'BinaryInteger' : [
+  'BinaryInteger': [
     struct(operator='/', name='divided',     firstArg='by', llvmName='div', kind='/'),
     struct(operator='%', name='remainder',   firstArg='dividingBy', llvmName='rem', kind='/'),
   ],
@@ -1085,7 +1084,7 @@ def unsafeOperationComment(operator):
 /// ${Article} ${bits}-bit ${'' if signed else 'un'}signed integer value
 /// type.
 %   end
-@_fixed_layout
+@frozen
 public struct ${Self}
   : FixedWidthInteger, ${Unsigned}Integer,
     _ExpressibleByBuiltinIntegerLiteral {
@@ -1093,6 +1092,7 @@ public struct ${Self}
   /// A type that represents an integer literal.
   public typealias IntegerLiteralType = ${Self}
 
+  public var _value: Builtin.Int${bits}
 
   @_transparent
   public init(_builtinIntegerLiteral x: Builtin.IntLiteral) {
@@ -1115,7 +1115,7 @@ public struct ${Self}
   }
 
 %   if Self in ['Int32', 'Int64']:
-%     Floating = {32 : 'Float', 64 : 'Double'}[bits]
+%     Floating = {32: 'Float', 64: 'Double'}[bits]
   @available(*, unavailable,
     message: "Please use ${Self}(bitPattern: ${OtherSelf}) in combination with ${Floating}.bitPattern property.")
   public init(bitPattern x: ${Floating}) {
@@ -1124,11 +1124,13 @@ public struct ${Self}
 %   end
 
 %   for (FloatType, FloatBits) in [
-%     ('Float', 32), ('Double', 64), ('Float80', 80)]:
+%     ('Float16', 16), ('Float', 32), ('Double', 64), ('Float80', 80)]:
 %     (lower, upper) = getFtoIBounds(floatBits=FloatBits, intBits=int(bits), signed=signed)
 
 %     if FloatType == 'Float80':
-#if !os(Windows) && (arch(i386) || arch(x86_64))
+#if !(os(Windows) || os(Android) || ($Embedded && !os(Linux) && !(os(macOS) || os(iOS) || os(watchOS) || os(tvOS)))) && (arch(i386) || arch(x86_64))
+%     elif FloatType == 'Float16':
+#if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
 %     end
 
   /// Creates an integer from the given floating-point value, rounding toward
@@ -1151,14 +1153,27 @@ public struct ${Self}
   /// - Parameter source: A floating-point value to convert to an integer.
   ///   `source` must be representable in this type after rounding toward
   ///   zero.
+%     if FloatType == 'Float16':
+  @available(SwiftStdlib 5.3, *)
+%     end
   @_transparent
   public init(_ source: ${FloatType}) {
     _precondition(source.isFinite,
       "${FloatType} value cannot be converted to ${Self} because it is either infinite or NaN")
+%     if FloatBits == 16 and signed and bits >= 32:
+    // A Float16 value, if finite, is always in-range for 32- and 64-bit signed
+    // integer types.
+%     else:
     _precondition(source > ${str(lower)}.0,
       "${FloatType} value cannot be converted to ${Self} because the result would be less than ${Self}.min")
+%       if FloatBits == 16 and not signed and bits >= 16:
+    // A Float16 value, if greater than -1 and finite, is always in-range for
+    // 16-, 32-, and 64-bit unsigned integer types.
+%       else:
     _precondition(source < ${str(upper)}.0,
       "${FloatType} value cannot be converted to ${Self} because the result would be greater than ${Self}.max")
+%       end
+%     end
     self._value = Builtin.fpto${u}i_FPIEEE${FloatBits}_${BuiltinName}(source._value)
   }
 
@@ -1176,12 +1191,25 @@ public struct ${Self}
   ///     // y == nil
   ///
   /// - Parameter source: A floating-point value to convert to an integer.
+%     if FloatType == 'Float16':
+  @available(SwiftStdlib 5.3, *)
+%     end
   @_transparent
   public init?(exactly source: ${FloatType}) {
     // The value passed as `source` must not be infinite, NaN, or exceed the
     // bounds of the integer type; the result of `fptosi` or `fptoui` is
     // undefined if it overflows.
+%     if FloatBits == 16 and signed and bits >= 32:
+    // A Float16 value, if finite, is always in-range for 32- and 64-bit signed
+    // integer types.
+    guard source.isFinite else {
+%     elif FloatBits == 16 and not signed and bits >= 16:
+    // A Float16 value, if greater than -1 and finite, is always in-range for
+    // 16-, 32-, and 64-bit unsigned integer types.
+    guard source > ${str(lower)}.0 && source.isFinite else {
+%     else:
     guard source > ${str(lower)}.0 && source < ${str(upper)}.0 else {
+%     end
       return nil
     }
     guard source == source.rounded(.towardZero) else {
@@ -1190,7 +1218,7 @@ public struct ${Self}
     self._value = Builtin.fpto${u}i_FPIEEE${FloatBits}_${BuiltinName}(source._value)
   }
 
-%     if FloatType == 'Float80':
+%     if FloatType in ['Float16', 'Float80']:
 #endif
 %     end
 
@@ -1234,7 +1262,8 @@ ${assignmentOperatorComment(x.operator, True)}
       Builtin.${u}${x.llvmName}_with_overflow_Int${bits}(
         lhs._value, rhs._value, true._value)
 %   end
-    Builtin.condfail(overflow)
+    Builtin.condfail_message(overflow,
+      StaticString("arithmetic overflow").unsafeRawPointer)
     lhs = ${Self}(result)
   }
 %       end
@@ -1333,7 +1362,7 @@ ${assignmentOperatorComment(x.operator, True)}
   /// The bit width of ${Article.lower()} `${Self}` instance is ${bits}.
 %   end
   @_transparent
-  public static var bitWidth : Int { return ${bits} }
+  public static var bitWidth: Int { return ${bits} }
 
   /// The number of leading zeros in this value's binary representation.
   ///
@@ -1383,8 +1412,8 @@ ${assignmentOperatorComment(x.operator, True)}
   }
 
   /// A type that represents the words of this integer.
-  @_fixed_layout
-  public struct Words : RandomAccessCollection {
+  @frozen
+  public struct Words: RandomAccessCollection, Sendable {
     public typealias Indices = Range<Int>
     public typealias SubSequence = Slice<${Self}.Words>
 
@@ -1485,14 +1514,23 @@ ${assignmentOperatorComment(x.operator, True)}
 % end
 
 %   dbits = bits*2
+%   if bits == 64:
+  #if _pointerBitWidth(_64) || arch(arm64_32)
+  //  On 32b architectures we fall back on the generic implementation,
+  //  because LLVM doesn't know how to codegen the 128b multiply we use.
+  //
+  //  Note that arm64_32 is a 64b architecture for the purposes of this
+  //  check, because we have a 64x64 -> 128 multiply there (the actual
+  //  ISA is AArch64).
+%   end
   /// Returns a tuple containing the high and low parts of the result of
   /// multiplying this value by the given value.
   ///
   /// Use this method to calculate the full result of a product that would
   /// otherwise overflow. Unlike traditional truncating multiplication, the
-  /// `multipliedFullWidth(by:)` method returns a tuple
-  /// containing both the `high` and `low` parts of the product of this value and
-  /// `other`. The following example uses this method to multiply two `UInt8`
+  /// `multipliedFullWidth(by:)` method returns a tuple containing both the
+  /// `high` and `low` parts of the product of this value and `other`.
+  /// The following example uses this method to multiply two `UInt8`
   /// values that normally overflow when multiplied:
   ///
   ///     let x: UInt8 = 100
@@ -1517,11 +1555,6 @@ ${assignmentOperatorComment(x.operator, True)}
   public func multipliedFullWidth(by other: ${Self})
     -> (high: ${Self}, low: ${Self}.Magnitude) {
     // FIXME(integers): tests
-%   # 128 bit types are not provided by the 32-bit LLVM
-%   if word_bits == 32 and bits == 64:
-    // FIXME(integers): implement
-    fatalError("Operation is not supported")
-%   else:
     let lhs_ = Builtin.${z}ext_Int${bits}_Int${dbits}(self._value)
     let rhs_ = Builtin.${z}ext_Int${bits}_Int${dbits}(other._value)
 
@@ -1531,15 +1564,22 @@ ${assignmentOperatorComment(x.operator, True)}
     let shifted = Builtin.ashr_Int${dbits}(res, shift)
     let high = ${Self}(Builtin.truncOrBitCast_Int${dbits}_Int${bits}(shifted))
     return (high: high, low: low)
-%   end
   }
+%   if bits == 64:
+  #endif
+%   end
 
+%   if bits == 64:
+  #if _pointerBitWidth(_64) || arch(arm64_32)
+  //  On 32b architectures we fall back on the generic implementation,
+  //  because LLVM doesn't know how to codegen the 128b divide we use.
+%   end
   /// Returns a tuple containing the quotient and remainder of dividing the
   /// given value by this value.
   ///
   /// The resulting quotient must be representable within the bounds of the
   /// type. If the quotient of dividing `dividend` by this value is too large
-  /// to represent in the type, a runtime error may occur.
+  /// to represent in the type, a runtime error will occur.
   ///
   /// - Parameter dividend: A tuple containing the high and low parts of a
   ///   double-width integer. The `high` component of the value carries the
@@ -1550,34 +1590,58 @@ ${assignmentOperatorComment(x.operator, True)}
   public func dividingFullWidth(
     _ dividend: (high: ${Self}, low: ${Self}.Magnitude)
   ) -> (quotient: ${Self}, remainder: ${Self}) {
-    // FIXME(integers): tests
-%   # 128-bit types are not provided by the 32-bit LLVM
-%   if word_bits == 32 and bits == 64:
-%   # FIXME(integers): uncomment the above after using the right conditional
-%   # compilation block to exclude 64-bit Windows, which does not support
-%   # 128-bit operations
-    fatalError("Operation is not supported")
-%   else:
-    // FIXME(integers): handle division by zero and overflows
     _precondition(self != 0, "Division by zero")
+%    if not signed:
+    _precondition(self > dividend.high, "Quotient is not representable")
+%    end
+%    if dbits <= 64:
+%     DoubleType = ('Int' if signed else 'UInt') + str(dbits)
+    let a = ${DoubleType}(dividend.high) &<< ${bits} |
+            ${DoubleType}(dividend.low)
+    let b = ${DoubleType}(self)
+    let (q, r) = a.quotientAndRemainder(dividingBy: b)
+%     if signed:
+    // remainder is guaranteed representable, but the quotient might not be
+    // so we need to use a conversion that will check for us:
+    guard let quotient = ${Self}(exactly: q) else {
+      _preconditionFailure("Quotient is not representable")
+    }
+    return (quotient, ${Self}(truncatingIfNeeded: r))
+%     else:
+    // quotient and remainder are both guaranteed to be representable by
+    // the precondition we enforced above and the definition of division.
+    return (${Self}(truncatingIfNeeded: q), ${Self}(truncatingIfNeeded: r))
+%     end
+%    else:
     let lhsHigh = Builtin.${z}ext_Int${bits}_Int${dbits}(dividend.high._value)
     let shift = Builtin.zextOrBitCast_Int8_Int${dbits}(UInt8(${bits})._value)
     let lhsHighShifted = Builtin.shl_Int${dbits}(lhsHigh, shift)
     let lhsLow = Builtin.zext_Int${bits}_Int${dbits}(dividend.low._value)
-    let lhs_ = Builtin.or_Int${dbits}(lhsHighShifted, lhsLow)
-    let rhs_ = Builtin.${z}ext_Int${bits}_Int${dbits}(self._value)
+    let a = Builtin.or_Int${dbits}(lhsHighShifted, lhsLow)
+    let b = Builtin.${z}ext_Int${bits}_Int${dbits}(self._value)
+    
+    let q = Builtin.${u}div_Int${dbits}(a, b)
+    let r = Builtin.${u}rem_Int${dbits}(a, b)
 
-    let quotient_ = Builtin.${u}div_Int${dbits}(lhs_, rhs_)
-    let remainder_ = Builtin.${u}rem_Int${dbits}(lhs_, rhs_)
+%     if signed:
+    // remainder is guaranteed representable, but the quotient might not be
+    // so we need to check that the conversion succeeds:
+    let (quotient, overflow) =
+      Builtin.s_to_s_checked_trunc_Int${dbits}_Int${bits}(q)
+    _precondition(!Bool(overflow), "Quotient is not representable")
+%     else:
+    // quotient and remainder are both guaranteed to be representable by
+    // the precondition we enforced above and the definition of division.
+    let quotient = Builtin.truncOrBitCast_Int${dbits}_Int${bits}(q)
+%     end
+    let remainder = Builtin.truncOrBitCast_Int${dbits}_Int${bits}(r)
 
-    let quotient = ${Self}(
-      Builtin.truncOrBitCast_Int${dbits}_Int${bits}(quotient_))
-    let remainder = ${Self}(
-      Builtin.truncOrBitCast_Int${dbits}_Int${bits}(remainder_))
-
-    return (quotient: quotient, remainder: remainder)
-%   end
+    return (quotient: Self(quotient), remainder: Self(remainder))
+%    end
   }
+%   if bits == 64:
+  #endif
+%   end
 
   /// A representation of this integer with the byte order swapped.
   @_transparent
@@ -1590,8 +1654,6 @@ ${assignmentOperatorComment(x.operator, True)}
   }
 
   // Implementation details
-
-  public var _value: Builtin.Int${bits}
 
 % if self_type.is_word:
   @_transparent
@@ -1630,7 +1692,7 @@ ${assignmentOperatorComment(x.operator, True)}
 }
 %# end of concrete type: ${Self}
 
-extension ${Self} : Hashable {
+extension ${Self}: Hashable {
   /// Hashes the essential components of this value by feeding them into the
   /// given hasher.
   ///
@@ -1651,12 +1713,13 @@ extension ${Self} : Hashable {
     return Hasher._hash(
       seed: seed,
       bytes: UInt64(truncatingIfNeeded: ${U}${Self}(_value)),
-      count: ${bits / 8})
+      count: ${bits // 8})
     % end
   }
 }
 
-extension ${Self} : _HasCustomAnyHashableRepresentation {
+@_unavailableInEmbedded
+extension ${Self}: _HasCustomAnyHashableRepresentation {
   // Not @inlinable
   public func _toCustomAnyHashable() -> AnyHashable? {
     return AnyHashable(_box: _IntegerAnyHashableBox(self))
@@ -1681,6 +1744,32 @@ ${operatorComment(x.operator, True)}
 
 %   end
 
+  // IMPORTANT: The following four apparently unnecessary overloads of
+  // comparison operations are necessary for literal comparands to be
+  // inferred as the desired type.
+  //
+  // Absent these, an expression like `Int8.min != 1 << 7` would have
+  // two candidates for `!=`: the heterogeneous generic operator defined
+  // on BinaryInteger, and the homogeneous generic operator defined on
+  // Equatable. The heterogeneous one is chosen because it is "more
+  // specialized," which results in `1 << 7` being given the type `Int`
+  // and the value 128, which compares not-equal to `Int8.min`.
+  //
+  // However, there is necessarily a homogeneous concrete `==` operator
+  // because it is a customization point for Equatable, so the expression
+  // `Int8.min == 1 << 7` types `1 << 7` as `Int8` with value -128, which
+  // compares equal to `Int8.min`.
+  //
+  // This inconsistency can be resolved by ensuring that we have
+  // concrete overloads of every comparison operation. It's still possible
+  // to get literal expression comparands typed Int in generic contexts,
+  // but there's also a pretty straightforward workaround (adding an
+  // explicit type).
+  @_transparent @_alwaysEmitIntoClient
+  public static func !=(lhs: ${Self}, rhs: ${Self}) -> Bool {
+    return !(lhs == rhs)
+  }
+
   @_transparent
   public static func <= (lhs: ${Self}, rhs: ${Self}) -> Bool {
     return !(rhs < lhs)
@@ -1697,6 +1786,8 @@ ${operatorComment(x.operator, True)}
   }
 }
 
+
+extension ${Self}: Sendable { }
 
 % if signed:
 // TODO: Consider removing the underscore.
@@ -1768,6 +1859,7 @@ internal func _unsafeMinus(_ lhs: Int, _ rhs: Int) -> Int {
 #endif
 }
 
+@_unavailableInEmbedded
 internal struct _IntegerAnyHashableBox<
   Base: FixedWidthInteger
 >: _AnyHashableBox {

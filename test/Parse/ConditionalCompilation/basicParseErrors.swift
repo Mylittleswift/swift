@@ -27,8 +27,8 @@ func h() {}
 #else /* aaa */
 #endif /* bbb */
 
-#if foo.bar() 
-      .baz() // expected-error {{unexpected platform condition (expected 'os', 'arch', or 'swift')}}
+#if foo.bar() // expected-error {{unexpected platform condition (expected 'os', 'arch', or 'swift')}}
+      .baz()
 
 #endif
 
@@ -78,6 +78,7 @@ struct S {
 // expected-note@-2{{did you mean 'FreeBSD'?}} {{8-15=FreeBSD}}
 // expected-note@-3{{did you mean 'Android'?}} {{8-15=Android}}
 // expected-note@-4{{did you mean 'OSX'?}} {{8-15=OSX}}
+// expected-note@-5{{did you mean 'OpenBSD'?}} {{8-15=OpenBSD}}
 #endif
 
 #if arch(leg) // expected-warning {{unknown architecture for build configuration 'arch'}} expected-note{{did you mean 'arm'?}} {{10-13=arm}}
@@ -97,14 +98,14 @@ func fn_j() {}
 #endif
 fn_j() // OK
 
-#if foo || bar || nonExistent() // expected-error {{expected only one argument to platform condition}}
+#if foo || bar || nonExistent() // expected-error {{expected argument to platform condition}}
 #endif
 
 #if FOO = false
 // expected-error @-1 {{invalid conditional compilation expression}}
 undefinedFunc() // ignored.
 #else
-undefinedFunc() // expected-error {{use of unresolved identifier 'undefinedFunc'}}
+undefinedFunc() // expected-error {{cannot find 'undefinedFunc' in scope}}
 #endif
 
 #if false
@@ -112,7 +113,7 @@ undefinedFunc() // expected-error {{use of unresolved identifier 'undefinedFunc'
 // expected-error @-1 {{invalid conditional compilation expression}}
 undefinedFunc() // ignored.
 #else
-undefinedFunc() // expected-error {{use of unresolved identifier 'undefinedFunc'}}
+undefinedFunc() // expected-error {{cannot find 'undefinedFunc' in scope}}
 #endif
 
 /// Invalid platform condition arguments don't invalidate the whole condition.
@@ -122,8 +123,9 @@ undefinedFunc() // expected-error {{use of unresolved identifier 'undefinedFunc'
 // expected-warning@-3 {{unknown operating system for build configuration 'os'}}
 // expected-note@-4 {{did you mean 'OSX'?}} {{27-32=OSX}}
 // expected-note@-5 {{did you mean 'PS4'?}} {{27-32=PS4}}
-// expected-warning@-6 {{unknown endianness for build configuration '_endian'}}
-// expected-note@-7 {{did you mean 'big'?}} {{46-50=big}}
+// expected-note@-6 {{did you mean 'none'?}} {{27-32=none}}
+// expected-warning@-7 {{unknown endianness for build configuration '_endian'}}
+// expected-note@-8 {{did you mean 'big'?}} {{46-50=big}}
 func fn_k() {}
 #endif
 fn_k()
@@ -137,4 +139,38 @@ fn_k()
 // expected-note@-6 {{did you mean 'i386'?}} {{26-29=i386}}
 func undefinedFunc() // ignored.
 #endif
-undefinedFunc() // expected-error {{use of unresolved identifier 'undefinedFunc'}}
+undefinedFunc() // expected-error {{cannot find 'undefinedFunc' in scope}}
+
+#if os(simulator) // expected-warning {{unknown operating system for build configuration 'os'}} expected-note {{did you mean 'targetEnvironment'}} {{5-7=targetEnvironment}}
+#endif
+
+#if arch(iOS) // expected-warning {{unknown architecture for build configuration 'arch'}} expected-note {{did you mean 'os'}} {{5-9=os}}
+#endif
+
+#if _endian(arm64) // expected-warning {{unknown endianness for build configuration '_endian'}} expected-note {{did you mean 'arch'}} {{5-12=arch}}
+#endif
+
+#if targetEnvironment(_ObjC) // expected-warning {{unknown target environment for build configuration 'targetEnvironment'}} expected-note {{did you mean 'macabi'}} {{23-28=macabi}}
+#endif
+
+#if os(iOS) || os(simulator) // expected-warning {{unknown operating system for build configuration 'os'}} expected-note {{did you mean 'targetEnvironment'}} {{16-18=targetEnvironment}}
+#endif
+
+#if arch(ios) // expected-warning {{unknown architecture for build configuration 'arch'}} expected-note {{did you mean 'os'}} {{5-9=os}} expected-note {{did you mean 'iOS'}} {{10-13=iOS}}
+#endif
+
+#if FOO
+#else if BAR
+// expected-error@-1 {{unexpected 'if' keyword following '#else' conditional compilation directive; did you mean '#elseif'?}} {{1-9=#elseif}}
+#else
+#endif
+
+#if FOO
+#else
+if true {}
+#endif // OK
+
+// rdar://83017601 Make sure we don't crash
+#if canImport()
+// expected-error@-1 {{expected argument to platform condition}}
+#endif

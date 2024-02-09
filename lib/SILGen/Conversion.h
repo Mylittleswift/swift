@@ -59,6 +59,11 @@ public:
   static bool isBridgingKind(KindTy kind) {
     return kind <= LastBridgingKind;
   }
+  
+  static bool isReabstractionKind(KindTy kind) {
+    // Update if we end up with more kinds!
+    return !isBridgingKind(kind);
+  }
 
 private:
   KindTy Kind;
@@ -73,6 +78,7 @@ private:
   struct ReabstractionTypes {
     AbstractionPattern OrigType;
     CanType SubstType;
+    SILType LoweredResultType;
   };
 
   using Members = ExternalUnionMembers<BridgingTypes, ReabstractionTypes>;
@@ -104,20 +110,24 @@ private:
                                           loweredResultTy, isExplicit);
   }
 
-  Conversion(KindTy kind, AbstractionPattern origType, CanType substType)
+  Conversion(KindTy kind, AbstractionPattern origType, CanType substType,
+             SILType loweredResultTy)
       : Kind(kind) {
-    Types.emplaceAggregate<ReabstractionTypes>(kind, origType, substType);
+    Types.emplaceAggregate<ReabstractionTypes>(kind, origType, substType,
+                                               loweredResultTy);
   }
 
 public:
   static Conversion getOrigToSubst(AbstractionPattern origType,
-                                   CanType substType) {
-    return Conversion(OrigToSubst, origType, substType);
+                                   CanType substType,
+                                   SILType loweredResultTy) {
+    return Conversion(OrigToSubst, origType, substType, loweredResultTy);
   }
 
   static Conversion getSubstToOrig(AbstractionPattern origType,
-                                   CanType substType) {
-    return Conversion(SubstToOrig, origType, substType);
+                                   CanType substType,
+                                   SILType loweredResultTy) {
+    return Conversion(SubstToOrig, origType, substType, loweredResultTy);
   }
 
   static Conversion getBridging(KindTy kind, CanType origType,
@@ -134,6 +144,10 @@ public:
   bool isBridging() const {
     return isBridgingKind(getKind());
   }
+  
+  bool isReabstraction() const {
+    return isReabstractionKind(getKind());
+  }
 
   AbstractionPattern getReabstractionOrigType() const {
     return Types.get<ReabstractionTypes>(Kind).OrigType;
@@ -141,6 +155,10 @@ public:
 
   CanType getReabstractionSubstType() const {
     return Types.get<ReabstractionTypes>(Kind).SubstType;
+  }
+
+  SILType getReabstractionLoweredResultType() const {
+    return Types.get<ReabstractionTypes>(Kind).LoweredResultType;
   }
 
   bool isBridgingExplicit() const {
@@ -164,12 +182,12 @@ public:
 
   /// Try to form a conversion that does an optional injection
   /// or optional-to-optional conversion followed by this conversion.
-  Optional<Conversion>
+  llvm::Optional<Conversion>
   adjustForInitialOptionalConversions(CanType newSourceType) const;
 
   /// Try to form a conversion that does a force-value followed by
   /// this conversion.
-  Optional<Conversion> adjustForInitialForceValue() const;
+  llvm::Optional<Conversion> adjustForInitialForceValue() const;
 
   void dump() const LLVM_ATTRIBUTE_USED;
   void print(llvm::raw_ostream &out) const;
@@ -208,17 +226,9 @@ public:
   bool isForced() const { return Forced; }
 };
 
-Optional<ConversionPeepholeHint>
-canPeepholeConversions(SILGenFunction &SGF,
-                       const Conversion &outerConversion,
+llvm::Optional<ConversionPeepholeHint>
+canPeepholeConversions(SILGenFunction &SGF, const Conversion &outerConversion,
                        const Conversion &innerConversion);
-
-ManagedValue emitPeepholedConversions(SILGenFunction &SGF, SILLocation loc,
-                                      const Conversion &outerConversion,
-                                      const Conversion &innerConversion,
-                                      ConversionPeepholeHint hint,
-                                      SGFContext C,
-                                      ValueProducerRef produceValue);
 
 /// An initialization where we ultimately want to apply a conversion to
 /// the value before completing the initialization.
@@ -239,7 +249,15 @@ private:
     Finished,
 
     /// The converted value has been extracted.
-    Extracted
+    Extracted,
+
+    /// We're doing pack initialization instead of the normal state
+    /// transition, and we haven't been finished yet.
+    PackExpanding,
+
+    /// We're doing pack initialization instead of the normal state
+    /// transition, and finishInitialization has been called.
+    FinishedPackExpanding,
   };
 
   StateTy State;
@@ -255,12 +273,22 @@ private:
   StateTy getState() const {
     return State;
   }
+  
+  InitializationPtr OwnedSubInitialization;
 
 public:
   ConvertingInitialization(Conversion conversion, SGFContext finalContext)
     : State(Uninitialized), TheConversion(conversion),
       FinalContext(finalContext) {}
 
+  ConvertingInitialization(Conversion conversion,
+                           InitializationPtr subInitialization)
+    : State(Uninitialized), TheConversion(conversion),
+      FinalContext(SGFContext(subInitialization.get())) {
+    OwnedSubInitialization = std::move(subInitialization);
+  }
+
+  
   /// Return the conversion to apply to the unconverted value.
   const Conversion &getConversion() const {
     return TheConversion;
@@ -278,7 +306,7 @@ public:
                            ManagedValue value, bool isInit) override;
 
   /// Given that the result of the given expression needs to sequentially
-  /// undergo the the given conversion and then this conversion, attempt to
+  /// undergo the given conversion and then this conversion, attempt to
   /// peephole the result.  If successful, the value will be set in this
   /// initialization.  The initialization will not yet be finished.
   bool tryPeephole(SILGenFunction &SGF, Expr *E, Conversion innerConversion);
@@ -319,12 +347,32 @@ public:
   ConvertingInitialization *getAsConversion() override {
     return this;
   }
+  
+  // Get the abstraction pattern, if any, the value is converted to.
+  llvm::Optional<AbstractionPattern> getAbstractionPattern() const override;
 
   // Bookkeeping.
   void finishInitialization(SILGenFunction &SGF) override {
-    assert(getState() == Initialized);
-    State = Finished;
+    if (getState() == PackExpanding) {
+      FinalContext.getEmitInto()->finishInitialization(SGF);
+      State = FinishedPackExpanding;
+    } else {
+      assert(getState() == Initialized);
+      State = Finished;
+    }
   }
+
+  // Support pack-expansion initialization.
+  bool canPerformPackExpansionInitialization() const override {
+    if (auto finalInit = FinalContext.getEmitInto())
+      return finalInit->canPerformPackExpansionInitialization();
+    return false;
+  }
+
+  void performPackExpansionInitialization(SILGenFunction &SGF,
+                                          SILLocation loc,
+                                          SILValue indexWithinComponent,
+                llvm::function_ref<void(Initialization *into)> fn) override;
 };
 
 } // end namespace Lowering

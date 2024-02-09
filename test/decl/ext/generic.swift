@@ -19,13 +19,11 @@ extension Double : P2 {
 }
 
 extension X<Int, Double, String> {
-// expected-error@-1{{constrained extension must be declared on the unspecialized generic type 'X' with constraints specified by a 'where' clause}}
   let x = 0
   // expected-error@-1 {{extensions must not contain stored properties}}
   static let x = 0
-  // expected-error@-1 {{static stored properties not supported in generic types}}
   func f() -> Int {}
-  class C<T> {}
+  class C<W> {}
 }
 
 typealias GGG = X<Int, Double, String>
@@ -131,7 +129,7 @@ func intArray(_ x: [Int]) {
 
 class GenericClass<T> { }
 
-extension GenericClass where T : Equatable {
+extension GenericClass where T : Equatable { // expected-note {{where 'T' = 'T'}}
   func foo(_ x: T, y: T) -> Bool { return x == y }
 }
 
@@ -140,7 +138,7 @@ func genericClassEquatable<T : Equatable>(_ gc: GenericClass<T>, x: T, y: T) {
 }
 
 func genericClassNotEquatable<T>(_ gc: GenericClass<T>, x: T, y: T) {
-  gc.foo(x, y: y) // expected-error{{argument type 'T' does not conform to expected type 'Equatable'}}
+  gc.foo(x, y: y) // expected-error{{referencing instance method 'foo(_:y:)' on 'GenericClass' requires that 'T' conform to 'Equatable'}}
 }
 
 
@@ -149,7 +147,7 @@ extension Array where Element == String { }
 extension GenericClass : P3 where T : P3 { }
 
 extension GenericClass where Self : P3 { }
-// expected-error@-1{{'Self' is only available in a protocol or as the result of a method in a class; did you mean 'GenericClass'?}} {{30-34=GenericClass}}
+// expected-error@-1{{covariant 'Self' or 'Self?' can only appear as the type of a property, subscript or method result; did you mean 'GenericClass'?}} {{30-34=GenericClass}}
 
 protocol P4 {
   associatedtype T
@@ -173,10 +171,10 @@ extension S5 : P4 {}
 // rdar://problem/21607421
 public typealias Array2 = Array
 extension Array2 where QQQ : VVV {}
-// expected-error@-1 {{use of undeclared type 'QQQ'}}
-// expected-error@-2 {{use of undeclared type 'VVV'}}
+// expected-error@-1 {{cannot find type 'QQQ' in scope}}
+// expected-error@-2 {{cannot find type 'VVV' in scope}}
 
-// https://bugs.swift.org/browse/SR-9009
+// https://github.com/apple/swift/issues/51512
 func foo() {
   extension Array where Element : P1 {
   // expected-error@-1 {{declaration is only valid at file scope}}

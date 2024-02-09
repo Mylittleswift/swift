@@ -46,19 +46,34 @@ public func _autorelease(_ x: AnyObject) {
 }
 #endif
 
-/// Invoke `body` with an allocated, but uninitialized memory suitable for a
-/// `String` value.
-///
-/// This function is primarily useful to call various runtime functions
-/// written in C++.
-internal func _withUninitializedString<R>(
-  _ body: (UnsafeMutablePointer<String>) -> R
-) -> (R, String) {
-  let stringPtr = UnsafeMutablePointer<String>.allocate(capacity: 1)
-  let bodyResult = body(stringPtr)
-  let stringResult = stringPtr.move()
-  stringPtr.deallocate()
-  return (bodyResult, stringResult)
+
+@available(SwiftStdlib 5.7, *)
+@_silgen_name("swift_getFunctionFullNameFromMangledName")
+public // SPI (Distributed)
+func _getFunctionFullNameFromMangledNameImpl(
+  _ mangledName: UnsafePointer<UInt8>, _ mangledNameLength: UInt
+) -> (UnsafePointer<UInt8>, UInt)
+
+/// Given a function's mangled name, return a human readable name.
+/// Used e.g. by Distributed.RemoteCallTarget to hide mangled names.
+@available(SwiftStdlib 5.7, *)
+@_unavailableInEmbedded
+public // SPI (Distributed)
+func _getFunctionFullNameFromMangledName(mangledName: String) -> String? {
+  let mangledNameUTF8 = Array(mangledName.utf8)
+  let (stringPtr, count) =
+    mangledNameUTF8.withUnsafeBufferPointer { (mangledNameUTF8) in
+    return _getFunctionFullNameFromMangledNameImpl(
+      mangledNameUTF8.baseAddress!,
+      UInt(mangledNameUTF8.endIndex))
+  }
+
+  guard count > 0 else {
+    return nil
+  }
+
+  return String._fromUTF8Repairing(
+    UnsafeBufferPointer(start: stringPtr, count: Int(count))).0
 }
 
 // FIXME(ABI)#51 : this API should allow controlling different kinds of
@@ -71,6 +86,8 @@ public func _getTypeName(_ type: Any.Type, qualified: Bool)
   -> (UnsafePointer<UInt8>, Int)
 
 /// Returns the demangled qualified name of a metatype.
+@_semantics("typeName")
+@_unavailableInEmbedded
 public // @testable
 func _typeName(_ type: Any.Type, qualified: Bool = true) -> String {
   let (stringPtr, count) = _getTypeName(type, qualified: qualified)
@@ -78,8 +95,32 @@ func _typeName(_ type: Any.Type, qualified: Bool = true) -> String {
     UnsafeBufferPointer(start: stringPtr, count: count)).0
 }
 
+@available(SwiftStdlib 5.3, *)
+@_silgen_name("swift_getMangledTypeName")
+public func _getMangledTypeName(_ type: Any.Type)
+  -> (UnsafePointer<UInt8>, Int)
+
+/// Returns the mangled name for a given type.
+@available(SwiftStdlib 5.3, *)
+@_unavailableInEmbedded
+public // SPI
+func _mangledTypeName(_ type: Any.Type) -> String? {
+  let (stringPtr, count) = _getMangledTypeName(type)
+  guard count > 0 else {
+    return nil
+  }
+
+  let (result, repairsMade) = String._fromUTF8Repairing(
+      UnsafeBufferPointer(start: stringPtr, count: count))
+
+  _precondition(!repairsMade, "repairs made to _mangledTypeName, this is not expected since names should be valid UTF-8")
+
+  return result
+}
+
 /// Lookup a class given a name. Until the demangled encoding of type
 /// names is stabilized, this is limited to top-level class names (Foo.bar).
+@_unavailableInEmbedded
 public // SPI(Foundation)
 func _typeByName(_ name: String) -> Any.Type? {
   let nameUTF8 = Array(name.utf8)
@@ -110,3 +151,26 @@ public func _getTypeByMangledNameInContext(
   genericContext: UnsafeRawPointer?,
   genericArguments: UnsafeRawPointer?)
   -> Any.Type?
+
+/// Prevents performance diagnostics in the passed closure.
+@_alwaysEmitIntoClient
+@_semantics("no_performance_analysis")
+public func _unsafePerformance<T>(_ c: () -> T) -> T {
+  return c()
+}
+
+// Helper function that exploits a bug in rethrows checking to
+// allow us to call rethrows functions from generic typed-throws functions
+// and vice-versa.
+@usableFromInline
+@_alwaysEmitIntoClient
+@inline(__always)
+func _rethrowsViaClosure(_ fn: () throws -> ()) rethrows {
+  try fn()
+}
+
+@_marker public protocol Copyable {}
+
+@_marker public protocol Escapable {}
+
+@_marker public protocol _BitwiseCopyable {}

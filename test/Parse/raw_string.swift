@@ -68,6 +68,48 @@ _ = ##"""
       """##
 // CHECK: "a raw string with \"\"\" in it"
 
+// ===---------- False Multiline Delimiters --------===
+
+/// Source code contains zero-width character in this format: `#"[U+200B]"[U+200B]"#`
+/// If this check fails after you implement `diagnoseZeroWidthMatchAndAdvance`,
+/// then you may need to tweak how to test for single-line string literals that
+/// resemble a multiline delimiter in `advanceIfMultilineDelimiter` so that it
+/// passes again.
+/// See https://github.com/apple/swift/issues/51192.
+_ = #"​"​"#
+// CHECK: "\xE2\x80\x8B\"\xE2\x80\x8B"
+
+_ = #""""#
+// CHECK: "\"\""
+
+_ = #"""""#
+// CHECK: "\"\"\""
+
+_ = #""""""#
+// CHECK: "\"\"\"\""
+
+_ = #"""#
+// CHECK: "\""
+
+_ = ##""" foo # "# "##
+// CHECK: "\"\" foo # \"# "
+
+_ = ###""" "# "## "###
+// CHECK: "\"\" \"# \"## "
+
+_ = ###"""##"###
+// CHECK: "\"\"##"
+
+_ = "interpolating \(#"""false delimiter"#)"
+// CHECK: "interpolating "
+// CHECK: "\"\"false delimiter"
+  
+_ = """
+  interpolating \(#"""false delimiters"""#)
+  """
+// CHECK: "interpolating "
+// CHECK: "\"\"false delimiters\"\""
+
 let foo = "Interpolation"
 _ = #"\b\b \#(foo)\#(foo) Kappa"#
 // CHECK: "\\b\\b "

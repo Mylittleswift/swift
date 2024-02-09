@@ -58,9 +58,9 @@ extension Hasher {
   /// trailing bytes, while the most significant 8 bits hold the count of bytes
   /// appended so far, modulo 256. The count of bytes currently stored in the
   /// buffer is in the lower three bits of the byte count.)
-  // FIXME: Remove @usableFromInline and @_fixed_layout once Hasher is resilient.
+  // FIXME: Remove @usableFromInline and @frozen once Hasher is resilient.
   // rdar://problem/38549901
-  @usableFromInline @_fixed_layout
+  @usableFromInline @frozen
   internal struct _TailBuffer {
     // msb                                                             lsb
     // +---------+-------+-------+-------+-------+-------+-------+-------+
@@ -135,9 +135,9 @@ extension Hasher {
 }
 
 extension Hasher {
-  // FIXME: Remove @usableFromInline and @_fixed_layout once Hasher is resilient.
+  // FIXME: Remove @usableFromInline and @frozen once Hasher is resilient.
   // rdar://problem/38549901
-  @usableFromInline @_fixed_layout
+  @usableFromInline @frozen
   internal struct _Core {
     private var _buffer: _TailBuffer
     private var _state: Hasher._State
@@ -160,10 +160,12 @@ extension Hasher {
 
     @inline(__always)
     internal mutating func combine(_ value: UInt) {
-#if arch(i386) || arch(arm)
+#if _pointerBitWidth(_64)
+      combine(UInt64(truncatingIfNeeded: value))
+#elseif _pointerBitWidth(_32)
       combine(UInt32(truncatingIfNeeded: value))
 #else
-      combine(UInt64(truncatingIfNeeded: value))
+#error("Unknown platform")
 #endif
     }
 
@@ -249,6 +251,16 @@ extension Hasher {
   }
 }
 
+#if $Embedded
+@usableFromInline
+var _swift_stdlib_Hashing_parameters: _SwiftHashingParameters = {
+  var seed0: UInt64 = 0, seed1: UInt64 = 0
+  swift_stdlib_random(&seed0, MemoryLayout<UInt64>.size)
+  swift_stdlib_random(&seed1, MemoryLayout<UInt64>.size)
+  return .init(seed0: seed0, seed1: seed1, deterministic: false)
+}()
+#endif
+
 /// The universal hash function used by `Set` and `Dictionary`.
 ///
 /// `Hasher` can be used to map an arbitrary sequence of bytes to an integer
@@ -272,7 +284,7 @@ extension Hasher {
 ///   different values on every new execution of your program. The hash
 ///   algorithm implemented by `Hasher` may itself change between any two
 ///   versions of the standard library.
-@_fixed_layout // FIXME: Should be resilient (rdar://problem/38549901)
+@frozen // FIXME: Should be resilient (rdar://problem/38549901)
 public struct Hasher {
   internal var _core: _Core
 
@@ -423,15 +435,17 @@ public struct Hasher {
   @usableFromInline
   internal static func _hash(seed: Int, _ value: UInt) -> Int {
     var state = _State(seed: seed)
-#if arch(i386) || arch(arm)
+#if _pointerBitWidth(_64)
+    _internalInvariant(UInt.bitWidth == UInt64.bitWidth)
+    state.compress(UInt64(truncatingIfNeeded: value))
+    let tbc = _TailBuffer(tail: 0, byteCount: 8)
+#elseif _pointerBitWidth(_32)
     _internalInvariant(UInt.bitWidth < UInt64.bitWidth)
     let tbc = _TailBuffer(
       tail: UInt64(truncatingIfNeeded: value),
       byteCount: UInt.bitWidth &>> 3)
 #else
-    _internalInvariant(UInt.bitWidth == UInt64.bitWidth)
-    state.compress(UInt64(truncatingIfNeeded: value))
-    let tbc = _TailBuffer(tail: 0, byteCount: 8)
+#error("Unknown platform")
 #endif
     return Int(truncatingIfNeeded: state.finalize(tailAndByteCount: tbc.value))
   }

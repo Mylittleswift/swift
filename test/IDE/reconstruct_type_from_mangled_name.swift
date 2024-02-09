@@ -143,7 +143,7 @@ func test001() {
 protocol P1 {}
 
 func foo1(p: P1) {
-// CHECK: type: (P1) -> ()
+// CHECK: type: (any P1) -> ()
   foo1(p: p)
 }
 
@@ -246,4 +246,10 @@ struct HasGenericSubscript<T> {
 private
 func patatino<T: Comparable>(_ vers1: T, _ vers2: T) -> Bool {
   return vers1 < vers2;
+}
+
+@available(OSX 10.9, *)
+@_originallyDefinedIn(module: "OtherModule", OSX 10.13)
+public struct MovedHere {
+  public func foo() {}
 }

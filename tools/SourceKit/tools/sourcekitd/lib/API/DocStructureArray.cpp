@@ -11,10 +11,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "sourcekitd/DocStructureArray.h"
-#include "DictionaryKeys.h"
+#include "sourcekitd/CompactArray.h"
+#include "sourcekitd/DictionaryKeys.h"
 #include "SourceKit/Core/LLVM.h"
 #include "SourceKit/Support/UIdent.h"
-#include "sourcekitd/CompactArray.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
@@ -193,10 +193,10 @@ void DocStructureArrayBuilder::beginSubStructure(
       BodyLength,
       DocOffset,
       DocLength,
-      DisplayName,
-      TypeName,
-      RuntimeName,
-      SelectorName,
+      DisplayName.str(),
+      TypeName.str(),
+      RuntimeName.str(),
+      SelectorName.str(),
       impl.addInheritedTypes(InheritedTypes),
       impl.addAttrs(Attrs),
       {}, // elements
@@ -244,6 +244,8 @@ std::unique_ptr<llvm::MemoryBuffer> DocStructureArrayBuilder::createBuffer() {
   size_t structureArrayBufferSize = impl.structureArrayBuffer.size();
   size_t structureBufferSize = impl.structureBuilder.sizeInBytes();
 
+  size_t kindSize = sizeof(uint64_t);
+
   // Header:
   // * offset of each section start (5)
   // * offset of top structure array (relative to structure array section) (1)
@@ -251,9 +253,12 @@ std::unique_ptr<llvm::MemoryBuffer> DocStructureArrayBuilder::createBuffer() {
 
   auto result = llvm::WritableMemoryBuffer::getNewUninitMemBuffer(
       inheritedTypesBufferSize + attrsBufferSize + elementsBufferSize +
-      structureArrayBufferSize + structureBufferSize + headerSize);
+      structureArrayBufferSize + structureBufferSize + headerSize + kindSize);
 
-  char *start = result->getBufferStart();
+  *reinterpret_cast<uint64_t *>(result->getBufferStart()) =
+      (uint64_t)CustomBufferKind::DocStructureArray;
+
+  char *start = result->getBufferStart() + kindSize;
   char *headerPtr = start;
   char *ptr = start + headerSize;
 
@@ -477,8 +482,10 @@ struct DocStructureReader {
       APPLY(KeyAccessLevel, UID, node.AccessLevel);
     if (node.SetterAccessLevel)
       APPLY(KeySetterAccessLevel, UID, node.SetterAccessLevel);
-    APPLY(KeyNameOffset, Int, node.NameOffset);
-    APPLY(KeyNameLength, Int, node.NameLength);
+    if (node.NameOffset || node.NameLength) {
+      APPLY(KeyNameOffset, Int, node.NameOffset);
+      APPLY(KeyNameLength, Int, node.NameLength);
+    }
     if (node.BodyOffset || node.BodyLength) {
       APPLY(KeyBodyOffset, Int, node.BodyOffset);
       APPLY(KeyBodyLength, Int, node.BodyLength);

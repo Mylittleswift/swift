@@ -25,8 +25,7 @@ namespace migrator {
 
 struct FixitFilter {
   /// Returns true if the fix-it should be applied.
-  bool shouldTakeFixit(const DiagnosticKind Kind,
-                       const DiagnosticInfo &Info) const {
+  bool shouldTakeFixit(const DiagnosticInfo &Info) const {
     // Do not add a semi or comma as it is wrong in most cases during migration
     if (Info.ID == diag::statement_same_line_without_semi.ID ||
         Info.ID == diag::declaration_same_line_without_semi.ID ||
@@ -52,13 +51,12 @@ struct FixitFilter {
       return false;
     // The following interact badly with the swift migrator by removing @IB*
     // attributes when there is some unrelated type issue.
-    if (Info.ID == diag::invalid_iboutlet.ID ||
-        Info.ID == diag::iboutlet_nonobjc_class.ID ||
+    if (Info.ID == diag::iboutlet_nonobjc_class.ID ||
         Info.ID == diag::iboutlet_nonobjc_protocol.ID ||
         Info.ID == diag::iboutlet_nonobject_type.ID ||
         Info.ID == diag::iboutlet_only_mutable.ID ||
         Info.ID == diag::invalid_ibdesignable_extension.ID ||
-        Info.ID == diag::invalid_ibinspectable.ID ||
+        Info.ID == diag::attr_must_be_used_on_class_instance.ID ||
         Info.ID == diag::invalid_ibaction_decl.ID)
       return false;
 
@@ -66,9 +64,9 @@ struct FixitFilter {
     // primary file, so if a nominal type was renamed, for example, any members
     // users have added in an extension in a separate file may not be visible,
     // due to the extension rename not having been applied. The below diag(s)
-    // can provide undesireable fixits that rename references of these
+    // can provide undesirable fixits that rename references of these
     // no-longer-visible members to similar still-visible ones.
-    // Note: missing_argument_lables and extra_argument_labels are filtered out
+    // Note: missing_argument_labels and extra_argument_labels are filtered out
     // elsewhere
     if (Info.ID == diag::wrong_argument_labels.ID)
       return false;
@@ -81,13 +79,6 @@ struct FixitFilter {
     // reverting changes made by the migrator.
     if (Info.ID == diag::could_not_find_enum_case.ID)
       return false;
-
-    // Sema suggests adding both `@objc` and `@nonobjc` as alternative fix-its
-    // for inferring Swift-3 style @objc visibility, but we don't want the
-    // migrator to suggest `@nonobjc`.
-    if (Info.ID == diag::objc_inference_swift3_addnonobjc.ID) {
-      return false;
-    }
 
     // With SE-110, the migrator may get a recommendation to add a Void
     // placeholder in the call to f in:
@@ -114,7 +105,7 @@ struct FixitFilter {
       return false;
     }
 
-    if (Kind == DiagnosticKind::Error)
+    if (Info.Kind == DiagnosticKind::Error)
       return true;
 
     // Fixits from warnings/notes that should be applied.
@@ -127,8 +118,6 @@ struct FixitFilter {
         Info.ID == diag::where_inside_brackets.ID ||
         Info.ID == diag::selector_construction_suggest.ID ||
         Info.ID == diag::selector_literal_deprecated_suggest.ID ||
-        Info.ID == diag::attr_noescape_deprecated.ID ||
-        Info.ID == diag::attr_autoclosure_escaping_deprecated.ID ||
         Info.ID == diag::attr_warn_unused_result_removed.ID ||
         Info.ID == diag::any_as_anyobject_fixit.ID ||
         Info.ID == diag::deprecated_protocol_composition.ID ||
@@ -136,10 +125,6 @@ struct FixitFilter {
         Info.ID == diag::deprecated_any_composition.ID ||
         Info.ID == diag::deprecated_operator_body.ID ||
         Info.ID == diag::unbound_generic_parameter_explicit_fix.ID ||
-        Info.ID == diag::objc_inference_swift3_addobjc.ID ||
-        Info.ID == diag::objc_inference_swift3_dynamic.ID ||
-        Info.ID == diag::override_swift3_objc_inference.ID ||
-        Info.ID == diag::objc_inference_swift3_objc_derived.ID ||
         Info.ID == diag::missing_several_cases.ID ||
         Info.ID == diag::missing_particular_case.ID ||
         Info.ID == diag::missing_unknown_case.ID ||

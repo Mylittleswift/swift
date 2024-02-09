@@ -19,18 +19,16 @@
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/DiagnosticsParse.h"
 #include "swift/AST/Module.h"
+#include "swift/AST/ParseRequests.h"
 #include "swift/AST/PrettyStackTrace.h"
+#include "swift/AST/SourceFile.h"
+#include "swift/AST/TypeCheckRequests.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/SourceManager.h"
-#include "swift/Basic/Timer.h"
 #include "swift/Parse/Lexer.h"
-#include "swift/Parse/CodeCompletionCallbacks.h"
-#include "swift/Parse/DelayedParsingCallbacks.h"
+#include "swift/Parse/IDEInspectionCallbacks.h"
 #include "swift/Parse/ParseSILSupport.h"
-#include "swift/Parse/SyntaxParseActions.h"
-#include "swift/Parse/SyntaxParsingContext.h"
-#include "swift/Syntax/RawSyntax.h"
-#include "swift/Syntax/TokenSyntax.h"
+#include "swift/SymbolGraphGen/SymbolGraphOptions.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
@@ -49,18 +47,13 @@ void tokenize(const LangOptions &LangOpts, const SourceManager &SM,
               unsigned BufferID, unsigned Offset, unsigned EndOffset,
               DiagnosticEngine * Diags,
               CommentRetentionMode RetainComments,
-              TriviaRetentionMode TriviaRetention,
               bool TokenizeInterpolatedString, ArrayRef<Token> SplitTokens,
               DF &&DestFunc) {
-  assert((TriviaRetention != TriviaRetentionMode::WithTrivia ||
-          !TokenizeInterpolatedString) &&
-         "string interpolation with trivia is not implemented yet");
-
   if (Offset == 0 && EndOffset == 0)
     EndOffset = SM.getRangeForBuffer(BufferID).getByteLength();
 
   Lexer L(LangOpts, SM, BufferID, Diags, LexerMode::Swift,
-          HashbangMode::Allowed, RetainComments, TriviaRetention, Offset,
+          HashbangMode::Allowed, RetainComments, Offset,
           EndOffset);
 
   auto TokComp = [&](const Token &A, const Token &B) {
@@ -73,9 +66,8 @@ void tokenize(const LangOptions &LangOpts, const SourceManager &SM,
   }
 
   Token Tok;
-  ParsedTrivia LeadingTrivia, TrailingTrivia;
   do {
-    L.lex(Tok, LeadingTrivia, TrailingTrivia);
+    L.lex(Tok);
 
     // If the token has the same location as a reset location,
     // reset the token stream
@@ -83,7 +75,7 @@ void tokenize(const LangOptions &LangOpts, const SourceManager &SM,
     if (F != ResetTokens.end()) {
       assert(F->isNot(tok::string_literal));
 
-      DestFunc(*F, ParsedTrivia(), ParsedTrivia());
+      DestFunc(*F);
 
       auto NewState = L.getStateForBeginningOfTokenLoc(
           F->getLoc().getAdvancedLoc(F->getLength()));
@@ -95,10 +87,10 @@ void tokenize(const LangOptions &LangOpts, const SourceManager &SM,
       std::vector<Token> StrTokens;
       getStringPartTokens(Tok, LangOpts, SM, BufferID, StrTokens);
       for (auto &StrTok : StrTokens) {
-        DestFunc(StrTok, ParsedTrivia(), ParsedTrivia());
+        DestFunc(StrTok);
       }
     } else {
-      DestFunc(Tok, LeadingTrivia, TrailingTrivia);
+      DestFunc(Tok);
     }
 
   } while (Tok.getKind() != tok::eof);
@@ -106,112 +98,131 @@ void tokenize(const LangOptions &LangOpts, const SourceManager &SM,
 } // namespace swift
 
 using namespace swift;
-using namespace swift::syntax;
+using ParsingFlags = SourceFile::ParsingFlags;
 
-void DelayedParsingCallbacks::anchor() { }
-void SILParserTUStateBase::anchor() { }
+void SILParserStateBase::anchor() { }
 
-namespace {
-/// A visitor that does delayed parsing of function bodies.
-class ParseDelayedFunctionBodies : public ASTWalker {
-  PersistentParserState &ParserState;
-  CodeCompletionCallbacksFactory *CodeCompletionFactory;
-
-public:
-  ParseDelayedFunctionBodies(PersistentParserState &ParserState,
-                             CodeCompletionCallbacksFactory *Factory)
-    : ParserState(ParserState), CodeCompletionFactory(Factory) {}
-
-  bool walkToDeclPre(Decl *D) override {
-    if (auto AFD = dyn_cast<AbstractFunctionDecl>(D)) {
-      if (AFD->getBodyKind() != FuncDecl::BodyKind::Unparsed)
-        return false;
-      parseFunctionBody(AFD);
-      return true;
-    }
-    return true;
-  }
-
-private:
-  void parseFunctionBody(AbstractFunctionDecl *AFD) {
-    assert(AFD->getBodyKind() == FuncDecl::BodyKind::Unparsed);
-
-    SourceFile &SF = *AFD->getDeclContext()->getParentSourceFile();
-    SourceManager &SourceMgr = SF.getASTContext().SourceMgr;
-    unsigned BufferID = SourceMgr.findBufferContainingLoc(AFD->getLoc());
-    Parser TheParser(BufferID, SF, nullptr, &ParserState, nullptr,
-                     /*DelayBodyParsing=*/false);
-    TheParser.SyntaxContext->disable();
-    std::unique_ptr<CodeCompletionCallbacks> CodeCompletion;
-    if (CodeCompletionFactory) {
-      CodeCompletion.reset(
-          CodeCompletionFactory->createCodeCompletionCallbacks(TheParser));
-      TheParser.setCodeCompletionCallbacks(CodeCompletion.get());
-    }
-    if (ParserState.hasFunctionBodyState(AFD))
-      TheParser.parseAbstractFunctionBodyDelayed(AFD);
-
-    if (CodeCompletion)
-      CodeCompletion->doneParsing();
-  }
-};
-
-static void parseDelayedDecl(
-              PersistentParserState &ParserState,
-              CodeCompletionCallbacksFactory *CodeCompletionFactory) {
-  if (!ParserState.hasDelayedDecl())
-    return;
-
-  SourceFile &SF = *ParserState.getDelayedDeclContext()->getParentSourceFile();
-  SourceManager &SourceMgr = SF.getASTContext().SourceMgr;
-  unsigned BufferID =
-    SourceMgr.findBufferContainingLoc(ParserState.getDelayedDeclLoc());
-  Parser TheParser(BufferID, SF, nullptr, &ParserState, nullptr,
-                   /*DelayBodyParsing=*/false);
-
-  // Disable libSyntax creation in the delayed parsing.
-  TheParser.SyntaxContext->disable();
-
-  std::unique_ptr<CodeCompletionCallbacks> CodeCompletion;
-  if (CodeCompletionFactory) {
-    CodeCompletion.reset(
-      CodeCompletionFactory->createCodeCompletionCallbacks(TheParser));
-    TheParser.setCodeCompletionCallbacks(CodeCompletion.get());
-  }
-
-  switch (ParserState.getDelayedDeclKind()) {
-  case PersistentParserState::DelayedDeclKind::TopLevelCodeDecl:
-    TheParser.parseTopLevelCodeDeclDelayed();
-    break;
-
-  case PersistentParserState::DelayedDeclKind::Decl:
-    TheParser.parseDeclDelayed();
-    break;
-  }
-
-  if (CodeCompletion)
-    CodeCompletion->doneParsing();
+void swift::performIDEInspectionSecondPass(
+    SourceFile &SF, IDEInspectionCallbacksFactory &Factory) {
+  return (void)evaluateOrDefault(SF.getASTContext().evaluator,
+                                 IDEInspectionSecondPassRequest{&SF, &Factory},
+                                 false);
 }
-} // unnamed namespace
 
+bool IDEInspectionSecondPassRequest::evaluate(
+    Evaluator &evaluator, SourceFile *SF,
+    IDEInspectionCallbacksFactory *Factory) const {
+  // If we didn't find the code completion token, bail.
+  auto *parserState = SF->getDelayedParserState();
+  if (!parserState->hasIDEInspectionDelayedDeclState())
+    return true;
 
-swift::Parser::BacktrackingScope::~BacktrackingScope() {
+  // Decrement the closure discriminator index by one so a top-level closure
+  // gets the same discriminator as before when being re-parsed in the second
+  // pass.
+  auto state = parserState->takeIDEInspectionDelayedDeclState();
+  auto &Ctx = SF->getASTContext();
+
+  auto BufferID = Ctx.SourceMgr.getIDEInspectionTargetBufferID();
+  Parser TheParser(BufferID, *SF, nullptr, parserState);
+
+  auto Callbacks = Factory->createCallbacks(TheParser);
+  TheParser.setCodeCompletionCallbacks(Callbacks.CompletionCallbacks.get());
+  TheParser.setDoneParsingCallback(Callbacks.DoneParsingCallback.get());
+
+  TheParser.performIDEInspectionSecondPassImpl(*state);
+  return true;
+}
+
+void Parser::performIDEInspectionSecondPassImpl(
+    IDEInspectionDelayedDeclState &info) {
+  // Disable updating the interface hash
+  llvm::SaveAndRestore<llvm::Optional<StableHasher>> CurrentTokenHashSaver(
+      CurrentTokenHash, llvm::None);
+
+  auto BufferID = L->getBufferID();
+  auto startLoc = SourceMgr.getLocForOffset(BufferID, info.StartOffset);
+  SourceLoc prevLoc;
+  if (info.PrevOffset != ~0U)
+    prevLoc = SourceMgr.getLocForOffset(BufferID, info.PrevOffset);
+  // Set the parser position to the start of the delayed decl or the body.
+  restoreParserPosition(getParserPosition(startLoc, prevLoc));
+
+  DeclContext *DC = info.ParentContext;
+
+  // Forget about the fact that we may have already computed local
+  // discriminators.
+  Context.evaluator.clearCachedOutput(LocalDiscriminatorsRequest{DC});
+
+  // Clear any ASTScopes that were expanded.
+  SF.clearScope();
+
+  switch (info.Kind) {
+  case IDEInspectionDelayedDeclKind::TopLevelCodeDecl: {
+    // Re-enter the top-level code decl context.
+    // FIXME: this can issue discriminators out-of-order?
+    auto *TLCD = cast<TopLevelCodeDecl>(DC);
+    ContextChange CC(*this, TLCD);
+
+    SourceLoc StartLoc = Tok.getLoc();
+    ASTNode Result;
+    parseExprOrStmt(Result);
+    if (!Result.isNull()) {
+      auto Brace = BraceStmt::create(Context, StartLoc, Result, Tok.getLoc());
+      TLCD->setBody(Brace);
+    }
+    break;
+  }
+
+  case IDEInspectionDelayedDeclKind::Decl: {
+    assert((DC->isTypeContext() || DC->isModuleScopeContext()) &&
+           "Delayed decl must be a type member or a top-level decl");
+    ContextChange CC(*this, DC);
+
+    parseDecl(/*IsAtStartOfLineOrPreviousHadSemi=*/true,
+              /*IfConfigsAreDeclAttrs=*/false, [&](Decl *D) {
+                if (auto *NTD = dyn_cast<NominalTypeDecl>(DC)) {
+                  NTD->addMemberPreservingSourceOrder(D);
+                } else if (auto *ED = dyn_cast<ExtensionDecl>(DC)) {
+                  ED->addMemberPreservingSourceOrder(D);
+                } else if (auto *SF = dyn_cast<SourceFile>(DC)) {
+                  SF->addTopLevelDecl(D);
+                } else {
+                  llvm_unreachable("invalid decl context kind");
+                }
+              });
+    break;
+  }
+
+  case IDEInspectionDelayedDeclKind::FunctionBody: {
+    auto *AFD = cast<AbstractFunctionDecl>(DC);
+    (void)parseAbstractFunctionBodyImpl(AFD);
+    break;
+  }
+  }
+
+  assert(!State->hasIDEInspectionDelayedDeclState() &&
+         "Second pass should not set any code completion info");
+
+  DoneParsingCallback->doneParsing(DC->getParentSourceFile());
+
+  State->restoreIDEInspectionDelayedDeclState(info);
+}
+
+swift::Parser::BacktrackingScopeImpl::~BacktrackingScopeImpl() {
   if (Backtrack) {
     P.backtrackToPosition(PP);
     DT.abort();
   }
 }
 
-void swift::performDelayedParsing(
-    DeclContext *DC, PersistentParserState &PersistentState,
-    CodeCompletionCallbacksFactory *CodeCompletionFactory) {
-  SharedTimer timer("Parsing");
-  ParseDelayedFunctionBodies Walker(PersistentState,
-                                    CodeCompletionFactory);
-  DC->walkContext(Walker);
+void swift::Parser::CancellableBacktrackingScope::cancelBacktrack() {
+  if (!Backtrack)
+    return;
 
-  if (CodeCompletionFactory)
-    parseDelayedDecl(PersistentState, CodeCompletionFactory);
+  Backtrack = false;
+  DT.commit();
+  TempReceiver.shouldTransfer = true;
 }
 
 /// Tokenizes a string literal, taking into account string interpolation.
@@ -288,55 +299,15 @@ std::vector<Token> swift::tokenize(const LangOptions &LangOpts,
                                    ArrayRef<Token> SplitTokens) {
   std::vector<Token> Tokens;
 
-  tokenize(LangOpts, SM, BufferID, Offset, EndOffset,
-           Diags,
+  tokenize(LangOpts, SM, BufferID, Offset, EndOffset, Diags,
            KeepComments ? CommentRetentionMode::ReturnAsTokens
                         : CommentRetentionMode::AttachToNextToken,
-           TriviaRetentionMode::WithoutTrivia, TokenizeInterpolatedString,
+           TokenizeInterpolatedString,
            SplitTokens,
-           [&](const Token &Tok, const ParsedTrivia &LeadingTrivia,
-               const ParsedTrivia &TrailingTrivia) { Tokens.push_back(Tok); });
+           [&](const Token &Tok) { Tokens.push_back(Tok); });
 
   assert(Tokens.back().is(tok::eof));
   Tokens.pop_back(); // Remove EOF.
-  return Tokens;
-}
-
-std::vector<std::pair<RC<syntax::RawSyntax>, syntax::AbsolutePosition>>
-swift::tokenizeWithTrivia(const LangOptions &LangOpts, const SourceManager &SM,
-                          unsigned BufferID, unsigned Offset,
-                          unsigned EndOffset,
-                          DiagnosticEngine *Diags) {
-  std::vector<std::pair<RC<syntax::RawSyntax>, syntax::AbsolutePosition>>
-      Tokens;
-  syntax::AbsolutePosition RunningPos;
-
-  tokenize(
-      LangOpts, SM, BufferID, Offset, EndOffset, Diags,
-      CommentRetentionMode::AttachToNextToken, TriviaRetentionMode::WithTrivia,
-      /*TokenizeInterpolatedString=*/false,
-      /*SplitTokens=*/ArrayRef<Token>(),
-      [&](const Token &Tok, const ParsedTrivia &LeadingTrivia,
-          const ParsedTrivia &TrailingTrivia) {
-        CharSourceRange TokRange = Tok.getRangeWithoutBackticks();
-        SourceLoc LeadingTriviaLoc =
-          TokRange.getStart().getAdvancedLoc(-LeadingTrivia.getLength());
-        SourceLoc TrailingTriviaLoc =
-          TokRange.getStart().getAdvancedLoc(TokRange.getByteLength());
-        Trivia syntaxLeadingTrivia =
-          LeadingTrivia.convertToSyntaxTrivia(LeadingTriviaLoc, SM, BufferID);
-        Trivia syntaxTrailingTrivia =
-          TrailingTrivia.convertToSyntaxTrivia(TrailingTriviaLoc, SM, BufferID);
-        auto Text = OwnedString::makeRefCounted(Tok.getText());
-        auto ThisToken =
-            RawSyntax::make(Tok.getKind(), Text, syntaxLeadingTrivia.Pieces,
-                            syntaxTrailingTrivia.Pieces,
-                            SourcePresence::Present);
-
-        auto ThisTokenPos = ThisToken->accumulateAbsolutePosition(RunningPos);
-        Tokens.push_back({ThisToken, ThisTokenPos.getValue()});
-      });
-
   return Tokens;
 }
 
@@ -353,23 +324,19 @@ static LexerMode sourceFileKindToLexerMode(SourceFileKind kind) {
       return LexerMode::SIL;
     case swift::SourceFileKind::Library:
     case swift::SourceFileKind::Main:
-    case swift::SourceFileKind::REPL:
+    case swift::SourceFileKind::MacroExpansion:
       return LexerMode::Swift;
   }
+  llvm_unreachable("covered switch");
 }
 
-Parser::Parser(unsigned BufferID, SourceFile &SF, SILParserTUStateBase *SIL,
-               PersistentParserState *PersistentState,
-               std::shared_ptr<SyntaxParseActions> SPActions,
-               bool DelayBodyParsing)
-    : Parser(BufferID, SF, &SF.getASTContext().Diags, SIL, PersistentState,
-             std::move(SPActions), DelayBodyParsing) {}
+Parser::Parser(unsigned BufferID, SourceFile &SF, SILParserStateBase *SIL,
+               PersistentParserState *PersistentState)
+    : Parser(BufferID, SF, &SF.getASTContext().Diags, SIL, PersistentState) {}
 
 Parser::Parser(unsigned BufferID, SourceFile &SF, DiagnosticEngine* LexerDiags,
-               SILParserTUStateBase *SIL,
-               PersistentParserState *PersistentState,
-               std::shared_ptr<SyntaxParseActions> SPActions,
-               bool DelayBodyParsing)
+               SILParserStateBase *SIL,
+               PersistentParserState *PersistentState)
     : Parser(
           std::unique_ptr<Lexer>(new Lexer(
               SF.getASTContext().LangOpts, SF.getASTContext().SourceMgr,
@@ -380,11 +347,8 @@ Parser::Parser(unsigned BufferID, SourceFile &SF, DiagnosticEngine* LexerDiags,
                   : HashbangMode::Disallowed,
               SF.getASTContext().LangOpts.AttachCommentsToDecls
                   ? CommentRetentionMode::AttachToNextToken
-                  : CommentRetentionMode::None,
-              SF.shouldBuildSyntaxTree()
-                  ? TriviaRetentionMode::WithTrivia
-                  : TriviaRetentionMode::WithoutTrivia)),
-          SF, SIL, PersistentState, std::move(SPActions), DelayBodyParsing) {}
+                  : CommentRetentionMode::None)),
+          SF, SIL, PersistentState) {}
 
 namespace {
 
@@ -392,18 +356,20 @@ namespace {
 /// underlying corrected token stream.
 class TokenRecorder: public ConsumeTokenReceiver {
   ASTContext &Ctx;
-  SourceManager &SM;
-
-  // Token list ordered by their appearance in the source file.
-  std::vector<Token> &Bag;
+  /// The lexer that is being used to lex the source file. Used to query whether
+  /// lexing has been cut off.
+  Lexer &BaseLexer;
   unsigned BufferID;
 
-  // Registered token kind change. These changes are regiestered before the
+  // Token list ordered by their appearance in the source file.
+  std::vector<Token> Tokens;
+
+  // Registered token kind change. These changes are registered before the
   // token is consumed, so we need to keep track of them here.
   llvm::DenseMap<const void*, tok> TokenKindChangeMap;
 
   std::vector<Token>::iterator lower_bound(SourceLoc Loc) {
-    return token_lower_bound(Bag, Loc);
+    return token_lower_bound(Tokens, Loc);
   }
 
   std::vector<Token>::iterator lower_bound(Token Tok) {
@@ -412,12 +378,19 @@ class TokenRecorder: public ConsumeTokenReceiver {
 
   void relexComment(CharSourceRange CommentRange,
                     llvm::SmallVectorImpl<Token> &Scratch) {
-    Lexer L(Ctx.LangOpts, Ctx.SourceMgr, BufferID, nullptr, LexerMode::Swift,
-            HashbangMode::Disallowed,
-            CommentRetentionMode::ReturnAsTokens,
-            TriviaRetentionMode::WithoutTrivia,
+    auto &SM = Ctx.SourceMgr;
+    auto EndOffset = SM.getLocOffsetInBuffer(CommentRange.getEnd(), BufferID);
+    if (auto LexerCutOffOffset = BaseLexer.lexingCutOffOffset()) {
+      if (*LexerCutOffOffset < EndOffset) {
+        // If lexing was cut off due to a too deep nesting level, adjust the end
+        // offset to not point past the cut off point.
+        EndOffset = *LexerCutOffOffset;
+      }
+    }
+    Lexer L(Ctx.LangOpts, SM, BufferID, nullptr, LexerMode::Swift,
+            HashbangMode::Disallowed, CommentRetentionMode::ReturnAsTokens,
             SM.getLocOffsetInBuffer(CommentRange.getStart(), BufferID),
-            SM.getLocOffsetInBuffer(CommentRange.getEnd(), BufferID));
+            EndOffset);
     while(true) {
       Token Result;
       L.lex(Result);
@@ -429,19 +402,17 @@ class TokenRecorder: public ConsumeTokenReceiver {
   }
 
 public:
-  TokenRecorder(SourceFile &SF):
-  Ctx(SF.getASTContext()),
-  SM(SF.getASTContext().SourceMgr),
-  Bag(SF.getTokenVector()),
-  BufferID(SF.getBufferID().getValue()) {};
+  TokenRecorder(ASTContext &ctx, Lexer &BaseLexer)
+      : Ctx(ctx), BaseLexer(BaseLexer), BufferID(BaseLexer.getBufferID()) {}
 
-  void finalize() override {
+  llvm::Optional<std::vector<Token>> finalize() override {
+    auto &SM = Ctx.SourceMgr;
 
     // We should consume the comments at the end of the file that don't attach
     // to any tokens.
     SourceLoc TokEndLoc;
-    if (!Bag.empty()) {
-      Token Last = Bag.back();
+    if (!Tokens.empty()) {
+      Token Last = Tokens.back();
       TokEndLoc = Last.getLoc().getAdvancedLoc(Last.getLength());
     } else {
 
@@ -453,14 +424,15 @@ public:
                                  SM.getRangeForBuffer(BufferID).getEnd()),
                  Scratch);
     // Accept these orphaned comments.
-    Bag.insert(Bag.end(), Scratch.begin(), Scratch.end());
+    Tokens.insert(Tokens.end(), Scratch.begin(), Scratch.end());
+    return std::move(Tokens);
   }
 
   void registerTokenKindChange(SourceLoc Loc, tok NewKind) override {
     // If a token with the same location is already in the bag, update its kind.
     auto Pos = lower_bound(Loc);
-    if (Pos != Bag.end() && Pos->getLoc().getOpaquePointerValue() ==
-        Loc.getOpaquePointerValue()) {
+    if (Pos != Tokens.end() &&
+        Pos->getLoc().getOpaquePointerValue() == Loc.getOpaquePointerValue()) {
       Pos->setKind(NewKind);
       return;
     }
@@ -469,19 +441,20 @@ public:
     TokenKindChangeMap[Loc.getOpaquePointerValue()] = NewKind;
   }
 
-  void receive(Token Tok) override {
+  void receive(const Token &TokParam) override {
+    Token Tok = TokParam;
     // We filter out all tokens without valid location
     if(Tok.getLoc().isInvalid())
       return;
 
     // If a token with the same location is already in the bag, skip this token.
     auto Pos = lower_bound(Tok);
-    if (Pos != Bag.end() && Pos->getLoc().getOpaquePointerValue() ==
-        Tok.getLoc().getOpaquePointerValue()) {
+    if (Pos != Tokens.end() && Pos->getLoc().getOpaquePointerValue() ==
+                                   Tok.getLoc().getOpaquePointerValue()) {
       return;
     }
 
-    // Update Token kind if a kind update was regiestered before.
+    // Update Token kind if a kind update was registered before.
     auto Found = TokenKindChangeMap.find(Tok.getLoc().
                                          getOpaquePointerValue());
     if (Found != TokenKindChangeMap.end()) {
@@ -496,72 +469,98 @@ public:
     }
 
     TokensToConsume.push_back(Tok);
-    Bag.insert(Pos, TokensToConsume.begin(), TokensToConsume.end());
+    Tokens.insert(Pos, TokensToConsume.begin(), TokensToConsume.end());
   }
 };
 } // End of an anonymous namespace.
 
 Parser::Parser(std::unique_ptr<Lexer> Lex, SourceFile &SF,
-               SILParserTUStateBase *SIL,
-               PersistentParserState *PersistentState,
-               std::shared_ptr<SyntaxParseActions> SPActions,
-               bool DelayBodyParsing)
-  : SourceMgr(SF.getASTContext().SourceMgr),
-    Diags(SF.getASTContext().Diags),
-    SF(SF),
-    L(Lex.release()),
-    SIL(SIL),
-    CurDeclContext(&SF),
-    Context(SF.getASTContext()),
-    DelayBodyParsing(DelayBodyParsing),
-    TokReceiver(SF.shouldCollectToken() ?
-                new TokenRecorder(SF) :
-                new ConsumeTokenReceiver()),
-    SyntaxContext(new SyntaxParsingContext(SyntaxContext, SF,
-                                           L->getBufferID(),
-                                           std::move(SPActions))) {
+               SILParserStateBase *SIL, PersistentParserState *PersistentState)
+    : SourceMgr(SF.getASTContext().SourceMgr), Diags(SF.getASTContext().Diags),
+      SF(SF), L(Lex.release()), SIL(SIL), CurDeclContext(&SF),
+      Context(SF.getASTContext()),
+      TokReceiver(SF.shouldCollectTokens()
+                      ? new TokenRecorder(SF.getASTContext(), *L)
+                      : new ConsumeTokenReceiver()) {
   State = PersistentState;
   if (!State) {
-    OwnedState.reset(new PersistentParserState(Context));
+    OwnedState.reset(new PersistentParserState());
     State = OwnedState.get();
   }
+
+  // If the interface hash is enabled, set up the initial hash.
+  if (SF.hasInterfaceHash())
+    CurrentTokenHash.emplace(StableHasher::defaultHasher());
 
   // Set the token to a sentinel so that we know the lexer isn't primed yet.
   // This cannot be tok::unknown, since that is a token the lexer could produce.
   Tok.setKind(tok::NUM_TOKENS);
 
-  auto ParserPos = State->takeParserPosition();
-  if (ParserPos.isValid() &&
-      L->isStateForCurrentBuffer(ParserPos.LS)) {
-    restoreParserPosition(ParserPos);
-    InPoundLineEnvironment = State->InPoundLineEnvironment;
-  }
+  EnabledNoncopyableGenerics =
+      Context.LangOpts.hasFeature(Feature::NoncopyableGenerics);
 }
 
 Parser::~Parser() {
   delete L;
   delete TokReceiver;
-  delete SyntaxContext;
+}
+
+bool Parser::isInSILMode() const { return SF.Kind == SourceFileKind::SIL; }
+
+bool Parser::isDelayedParsingEnabled() const {
+  // Do not delay parsing during IDE inspection's second pass.
+  if (DoneParsingCallback)
+    return false;
+
+  return SF.hasDelayedBodyParsing();
+}
+
+bool Parser::shouldEvaluatePoundIfDecls() const {
+  auto opts = SF.getParsingOptions();
+  return !opts.contains(ParsingFlags::DisablePoundIfEvaluation);
 }
 
 bool Parser::allowTopLevelCode() const {
   return SF.isScriptMode();
 }
 
+bool Parser::isInMacroExpansion(SourceLoc loc) const {
+  if (loc.isInvalid())
+    return false;
+
+  auto bufferID = SourceMgr.findBufferContainingLoc(loc);
+  auto generatedSourceInfo = SourceMgr.getGeneratedSourceInfo(bufferID);
+  if (!generatedSourceInfo)
+    return false;
+
+  return true;
+}
+
 const Token &Parser::peekToken() {
   return L->peekNextToken();
 }
 
-SourceLoc Parser::consumeTokenWithoutFeedingReceiver() {
-  SourceLoc Loc = Tok.getLoc();
+SourceLoc Parser::discardToken() {
   assert(Tok.isNot(tok::eof) && "Lexing past eof!");
+  SourceLoc Loc = Tok.getLoc();
+  L->lex(Tok);
+  return Loc;
+}
 
-  if (IsParsingInterfaceTokens && !Tok.getText().empty()) {
-    SF.recordInterfaceToken(Tok.getText());
-  }
-  L->lex(Tok, LeadingTrivia, TrailingTrivia);
+SourceLoc Parser::consumeTokenWithoutFeedingReceiver() {
+  recordTokenHash(Tok);
+  auto Loc = discardToken();
   PreviousLoc = Loc;
   return Loc;
+}
+
+void Parser::recordTokenHash(StringRef token) {
+  assert(!token.empty());
+  if (CurrentTokenHash) {
+    CurrentTokenHash->combine(token);
+    // Add null byte to separate tokens.
+    CurrentTokenHash->combine(uint8_t{0});
+  }
 }
 
 void Parser::consumeExtraToken(Token Extra) {
@@ -570,12 +569,28 @@ void Parser::consumeExtraToken(Token Extra) {
 
 SourceLoc Parser::consumeToken() {
   TokReceiver->receive(Tok);
-  SyntaxContext->addToken(Tok, LeadingTrivia, TrailingTrivia);
   return consumeTokenWithoutFeedingReceiver();
 }
 
-SourceLoc Parser::getEndOfPreviousLoc() {
+SourceLoc Parser::getEndOfPreviousLoc() const {
   return Lexer::getLocForEndOfToken(SourceMgr, PreviousLoc);
+}
+
+SourceLoc Parser::consumeAttributeLParen() {
+  SourceLoc LastTokenEndLoc = getEndOfPreviousLoc();
+  if (LastTokenEndLoc != Tok.getLoc() && !isInSILMode()) {
+    diagnose(LastTokenEndLoc, diag::attr_extra_whitespace_before_lparen)
+        .warnUntilSwiftVersion(6);
+  }
+  return consumeToken(tok::l_paren);
+}
+
+bool Parser::consumeIfAttributeLParen() {
+  if (!Tok.isFollowingLParen()) {
+    return false;
+  }
+  consumeAttributeLParen();
+  return true;
 }
 
 SourceLoc Parser::consumeStartingCharacterOfCurrentToken(tok Kind, size_t Len) {
@@ -605,8 +620,6 @@ SourceLoc Parser::consumeStartingCharacterOfCurrentToken(tok Kind, size_t Len) {
 void Parser::markSplitToken(tok Kind, StringRef Txt) {
   SplitTokens.emplace_back();
   SplitTokens.back().setToken(Kind, Txt);
-  ParsedTrivia EmptyTrivia;
-  SyntaxContext->addToken(SplitTokens.back(), LeadingTrivia, EmptyTrivia);
   TokReceiver->receive(SplitTokens.back());
 }
 
@@ -620,21 +633,34 @@ SourceLoc Parser::consumeStartingGreater() {
   return consumeStartingCharacterOfCurrentToken(tok::r_angle);
 }
 
-void Parser::skipSingle() {
+bool Parser::startsWithEllipsis(Token Tok) {
+  if (!Tok.isAnyOperator() && !Tok.isPunctuation())
+    return false;
+
+  return Tok.getText().startswith("...");
+}
+
+SourceLoc Parser::consumeStartingEllipsis() {
+  assert(startsWithEllipsis(Tok) && "Token does not start with '...'");
+  return consumeStartingCharacterOfCurrentToken(tok::ellipsis, /*length*/ 3);
+}
+
+ParserStatus Parser::skipSingle() {
+  ParserStatus status;
   switch (Tok.getKind()) {
   case tok::l_paren:
     consumeToken();
-    skipUntil(tok::r_paren);
+    status |= skipUntil(tok::r_paren, tok::r_brace);
     consumeIf(tok::r_paren);
     break;
   case tok::l_brace:
     consumeToken();
-    skipUntil(tok::r_brace);
+    status |= skipUntil(tok::r_brace);
     consumeIf(tok::r_brace);
     break;
   case tok::l_square:
     consumeToken();
-    skipUntil(tok::r_square);
+    status |= skipUntil(tok::r_square, tok::r_brace);
     consumeIf(tok::r_square);
     break;
   case tok::pound_if:
@@ -642,26 +668,35 @@ void Parser::skipSingle() {
   case tok::pound_elseif:
     consumeToken();
     // skipUntil also implicitly stops at tok::pound_endif.
-    skipUntil(tok::pound_else, tok::pound_elseif);
+    status |= skipUntil(tok::pound_else, tok::pound_elseif);
       
     if (Tok.isAny(tok::pound_else, tok::pound_elseif))
-      skipSingle();
+      status |= skipSingle();
     else
       consumeIf(tok::pound_endif);
     break;
       
   default:
+    if (Tok.is(tok::code_complete))
+      status.setHasCodeCompletionAndIsError();
     consumeToken();
     break;
   }
+
+  return status;
 }
 
-void Parser::skipUntil(tok T1, tok T2) {
+ParserStatus Parser::skipUntil(tok T1, tok T2) {
+  ParserStatus status;
+
   // tok::NUM_TOKENS is a sentinel that means "don't skip".
-  if (T1 == tok::NUM_TOKENS && T2 == tok::NUM_TOKENS) return;
-  
-  while (Tok.isNot(T1, T2, tok::eof, tok::pound_endif, tok::code_complete))
-    skipSingle();
+  if (T1 == tok::NUM_TOKENS && T2 == tok::NUM_TOKENS) return status;
+
+  while (Tok.isNot(T1, T2, tok::eof, tok::pound_endif, tok::pound_else,
+                   tok::pound_elseif))
+    status |= skipSingle();
+
+  return status;
 }
 
 void Parser::skipUntilAnyOperator() {
@@ -686,12 +721,14 @@ SourceLoc Parser::skipUntilGreaterInTypeList(bool protocolComposition) {
 
 #define KEYWORD(X) case tok::kw_##X:
 #define POUND_KEYWORD(X) case tok::pound_##X:
-#include "swift/Syntax/TokenKinds.def"
+#include "swift/AST/TokenKinds.def"
     // 'Self' can appear in types, skip it.
     if (Tok.is(tok::kw_Self))
       break;
-    if (isStartOfStmt() || isStartOfDecl() || Tok.is(tok::pound_endif))
+    if (isStartOfStmt(/*preferExpr*/ false) || isStartOfSwiftDecl() ||
+        Tok.is(tok::pound_endif)) {
       return lastLoc;
+    }
     break;
 
     case tok::l_paren:
@@ -719,24 +756,41 @@ void Parser::skipUntilDeclRBrace() {
   while (Tok.isNot(tok::eof, tok::r_brace, tok::pound_endif,
                    tok::pound_else, tok::pound_elseif,
                    tok::code_complete) &&
-         !isStartOfDecl())
+         !isStartOfSwiftDecl(/*allowPoundIfAttributes=*/false))
     skipSingle();
 }
 
-void Parser::skipUntilDeclStmtRBrace(tok T1) {
-  while (Tok.isNot(T1, tok::eof, tok::r_brace, tok::pound_endif,
-                   tok::pound_else, tok::pound_elseif,
-                   tok::code_complete) &&
-         !isStartOfStmt() && !isStartOfDecl()) {
-    skipSingle();
-  }
-}
-
-void Parser::skipUntilDeclStmtRBrace(tok T1, tok T2) {
+void Parser::skipListUntilDeclRBrace(SourceLoc startLoc, tok T1, tok T2) {
   while (Tok.isNot(T1, T2, tok::eof, tok::r_brace, tok::pound_endif,
-                   tok::pound_else, tok::pound_elseif,
-                   tok::code_complete) &&
-         !isStartOfStmt() && !isStartOfDecl()) {
+                   tok::pound_else, tok::pound_elseif)) {
+    bool hasDelimiter = Tok.getLoc() == startLoc || consumeIf(tok::comma);
+    bool possibleDeclStartsLine = Tok.isAtStartOfLine();
+    
+    if (isStartOfSwiftDecl(/*allowPoundIfAttributes=*/false)) {
+      
+      // Could have encountered something like `_ var:` 
+      // or `let foo:` or `var:`
+      if (Tok.isAny(tok::kw_var, tok::kw_let) ||
+          (Context.LangOpts.hasFeature(Feature::ReferenceBindings) &&
+           Tok.isAny(tok::kw_inout))) {
+        if (possibleDeclStartsLine && !hasDelimiter) {
+          break;
+        }
+
+        Parser::CancellableBacktrackingScope backtrack(*this);
+        // Consume the let or var
+        consumeToken();
+        
+        // If the following token is either <identifier> or :, it means that
+        // this `var` or `let` should be interpreted as a label
+        if ((Tok.canBeArgumentLabel() && peekToken().is(tok::colon)) ||
+             peekToken().is(tok::colon)) {
+          backtrack.cancelBacktrack();
+          continue;
+        }
+      }
+      break;
+    }
     skipSingle();
   }
 }
@@ -744,7 +798,7 @@ void Parser::skipUntilDeclStmtRBrace(tok T1, tok T2) {
 void Parser::skipUntilDeclRBrace(tok T1, tok T2) {
   while (Tok.isNot(T1, T2, tok::eof, tok::r_brace, tok::pound_endif,
                    tok::pound_else, tok::pound_elseif) &&
-         !isStartOfDecl()) {
+         !isStartOfSwiftDecl(/*allowPoundIfAttributes=*/false)) {
     skipSingle();
   }
 }
@@ -756,31 +810,11 @@ void Parser::skipUntilConditionalBlockClose() {
   }
 }
 
-bool Parser::skipUntilTokenOrEndOfLine(tok T1) {
-  while (Tok.isNot(tok::eof, T1) && !Tok.isAtStartOfLine())
+bool Parser::skipUntilTokenOrEndOfLine(tok T1, tok T2) {
+  while (Tok.isNot(tok::eof, T1, T2) && !Tok.isAtStartOfLine())
     skipSingle();
 
-  return Tok.is(T1) && !Tok.isAtStartOfLine();
-}
-
-bool Parser::loadCurrentSyntaxNodeFromCache() {
-  // Don't do a cache lookup when not building a syntax tree since otherwise
-  // the corresponding AST nodes do not get created
-  if (!SF.shouldBuildSyntaxTree()) {
-    return false;
-  }
-  unsigned LexerOffset =
-      SourceMgr.getLocOffsetInBuffer(Tok.getLoc(), L->getBufferID());
-  unsigned LeadingTriviaLen = LeadingTrivia.getLength();
-  unsigned LeadingTriviaOffset = LexerOffset - LeadingTriviaLen;
-  SourceLoc LeadingTriviaLoc = Tok.getLoc().getAdvancedLoc(-LeadingTriviaLen);
-  if (auto TextLength = SyntaxContext->lookupNode(LeadingTriviaOffset,
-                                                  LeadingTriviaLoc)) {
-    L->resetToOffset(LeadingTriviaOffset + TextLength);
-    L->lex(Tok, LeadingTrivia, TrailingTrivia);
-    return true;
-  }
-  return false;
+  return Tok.isAny(T1, T2) && !Tok.isAtStartOfLine();
 }
 
 bool Parser::parseEndIfDirective(SourceLoc &Loc) {
@@ -809,39 +843,36 @@ getStructureMarkerKindForToken(const Token &tok) {
   }
 }
 
-Parser::StructureMarkerRAII::StructureMarkerRAII(Parser &parser,
-                                                 const Token &tok)
-    : StructureMarkerRAII(parser, tok.getLoc(),
-                          getStructureMarkerKindForToken(tok)) {}
-
-bool Parser::StructureMarkerRAII::pushStructureMarker(
-                                      Parser &parser, SourceLoc loc,    
-                                      StructureMarkerKind kind) {
-  
-  if (parser.StructureMarkers.size() < MaxDepth) {
-    parser.StructureMarkers.push_back({loc, kind, None});
-    return true;
-  } else {
+Parser::StructureMarkerRAII::StructureMarkerRAII(Parser &parser, SourceLoc loc,
+                                                 StructureMarkerKind kind)
+    : StructureMarkerRAII(parser) {
+  parser.StructureMarkers.push_back({loc, kind, llvm::None});
+  if (parser.StructureMarkers.size() > MaxDepth) {
     parser.diagnose(loc, diag::structure_overflow, MaxDepth);
     // We need to cut off parsing or we will stack-overflow.
     // But `cutOffParsing` changes the current token to eof, and we may be in
     // a place where `consumeToken()` will be expecting e.g. '[',
     // since we need that to get to the callsite, so this can cause an assert.
-    parser.cutOffParsing();
-    return false;
+    parser.L->cutOffLexing();
   }
 }
+
+Parser::StructureMarkerRAII::StructureMarkerRAII(Parser &parser,
+                                                 const Token &tok)
+    : StructureMarkerRAII(parser, tok.getLoc(),
+                          getStructureMarkerKindForToken(tok)) {}
+
 //===----------------------------------------------------------------------===//
 // Primitive Parsing
 //===----------------------------------------------------------------------===//
 
 bool Parser::parseIdentifier(Identifier &Result, SourceLoc &Loc,
-                             const Diagnostic &D) {
+                             const Diagnostic &D, bool diagnoseDollarPrefix) {
   switch (Tok.getKind()) {
   case tok::kw_self:
   case tok::kw_Self:
   case tok::identifier:
-    Loc = consumeIdentifier(&Result);
+    Loc = consumeIdentifier(Result, diagnoseDollarPrefix);
     return false;
   default:
     checkForInputIncomplete();
@@ -863,8 +894,14 @@ bool Parser::parseSpecificIdentifier(StringRef expected, SourceLoc &loc,
 /// parseAnyIdentifier - Consume an identifier or operator if present and return
 /// its name in Result.  Otherwise, emit an error and return true.
 bool Parser::parseAnyIdentifier(Identifier &Result, SourceLoc &Loc,
-                                const Diagnostic &D) {
-  if (Tok.is(tok::identifier) || Tok.isAnyOperator()) {
+                                const Diagnostic &D,
+                                bool diagnoseDollarPrefix) {
+  if (Tok.is(tok::identifier)) {
+    Loc = consumeIdentifier(Result, diagnoseDollarPrefix);
+    return false;
+  }
+
+  if (Tok.isAnyOperator()) {
     Result = Context.getIdentifier(Tok.getText());
     Loc = Tok.getLoc();
     consumeToken();
@@ -908,10 +945,7 @@ bool Parser::parseToken(tok K, SourceLoc &TokLoc, const Diagnostic &D) {
   return true;
 }
 
-/// parseMatchingToken - Parse the specified expected token and return its
-/// location on success.  On failure, emit the specified error diagnostic, and a
-/// note at the specified note location.
-bool Parser::parseMatchingToken(tok K, SourceLoc &TokLoc, Diag<> ErrorDiag,
+bool Parser::parseMatchingToken(tok K, SourceLoc &TokLoc, Diagnostic ErrorDiag,
                                 SourceLoc OtherLoc) {
   Diag<> OtherNote;
   switch (K) {
@@ -923,119 +957,138 @@ bool Parser::parseMatchingToken(tok K, SourceLoc &TokLoc, Diag<> ErrorDiag,
   if (parseToken(K, TokLoc, ErrorDiag)) {
     diagnose(OtherLoc, OtherNote);
 
-    TokLoc = PreviousLoc;
+    TokLoc = getLocForMissingMatchingToken();
     return true;
   }
 
   return false;
 }
 
-static SyntaxKind getListElementKind(SyntaxKind ListKind) {
-  switch (ListKind) {
-  case SyntaxKind::FunctionCallArgumentList:
-    return SyntaxKind::FunctionCallArgument;
-  case SyntaxKind::ArrayElementList:
-    return SyntaxKind::ArrayElement;
-  case SyntaxKind::DictionaryElementList:
-    return SyntaxKind::DictionaryElement;
-  case SyntaxKind::TupleElementList:
-    return SyntaxKind::TupleElement;
-  case SyntaxKind::FunctionParameterList:
-    return SyntaxKind::FunctionParameter;
-  case SyntaxKind::TupleTypeElementList:
-    return SyntaxKind::TupleTypeElement;
-  case SyntaxKind::TuplePatternElementList:
-    return SyntaxKind::TuplePatternElement;
-  default:
-    return SyntaxKind::Unknown;
+bool Parser::parseUnsignedInteger(unsigned &Result, SourceLoc &Loc,
+                                  const Diagnostic &D) {
+  auto IntTok = Tok;
+  if (parseToken(tok::integer_literal, Loc, D))
+    return true;
+  if (IntTok.getText().getAsInteger(0, Result)) {
+    diagnose(IntTok.getLoc(), D);
+    return true;
   }
+  return false;
+}
+
+SourceLoc Parser::getLocForMissingMatchingToken() const {
+  // At present, use the same location whether it's an error or whether
+  // the matching token is missing.
+  // Both cases supply a location for something the user didn't type.
+  return getErrorOrMissingLoc();
+}
+
+SourceLoc Parser::getErrorOrMissingLoc() const {
+  // The next token might start a new enclosing construct,
+  // and SourceLoc's are always at the start of a token (for example, for
+  // fixits, so use the previous token's SourceLoc and allow a subnode to end
+  // right at the same place as its supernode.
+
+  // The tricky case is when the previous token is an InterpolatedStringLiteral.
+  // Then, there will be names in scope whose SourceLoc is *after* the
+  // the location of a missing close brace.
+  // ASTScope tree creation will have to cope.
+
+  return PreviousLoc;
+}
+
+static bool tokIsStringInterpolationEOF(Token &Tok, tok RightK) {
+  return Tok.is(tok::eof) && Tok.getText() == ")" && RightK == tok::r_paren;
+}
+
+Parser::ParseListItemResult
+Parser::parseListItem(ParserStatus &Status, tok RightK, SourceLoc LeftLoc,
+                      SourceLoc &RightLoc, bool AllowSepAfterLast,
+                      llvm::function_ref<ParserStatus()> callback) {
+  while (Tok.is(tok::comma)) {
+    diagnose(Tok, diag::unexpected_separator, ",").fixItRemove(Tok.getLoc());
+    consumeToken();
+  }
+  SourceLoc StartLoc = Tok.getLoc();
+
+  Status |= callback();
+  if (Tok.is(RightK))
+    return ParseListItemResult::Finished;
+
+  // If the lexer stopped with an EOF token whose spelling is ")", then this
+  // is actually the tuple that is a string literal interpolation context.
+  // Just accept the ")" and build the tuple as we usually do.
+  if (tokIsStringInterpolationEOF(Tok, RightK)) {
+    RightLoc = Tok.getLoc();
+    return ParseListItemResult::FinishedInStringInterpolation;
+  }
+  // If we haven't made progress, or seeing any error, skip ahead.
+  if (Tok.getLoc() == StartLoc || Status.isErrorOrHasCompletion()) {
+    assert(Status.isErrorOrHasCompletion() && "no progress without error");
+    skipListUntilDeclRBrace(LeftLoc, RightK, tok::comma);
+    if (Tok.is(RightK) || Tok.isNot(tok::comma))
+      return ParseListItemResult::Finished;
+  }
+  if (consumeIf(tok::comma)) {
+    if (Tok.isNot(RightK))
+      return ParseListItemResult::Continue;
+    if (!AllowSepAfterLast) {
+      diagnose(Tok, diag::unexpected_separator, ",").fixItRemove(PreviousLoc);
+    }
+    return ParseListItemResult::Finished;
+  }
+  // If we're in a comma-separated list, the next token is at the
+  // beginning of a new line and can never start an element, break.
+  if (Tok.isAtStartOfLine() && (Tok.is(tok::r_brace) || isStartOfSwiftDecl() ||
+                                isStartOfStmt(/*preferExpr*/ false))) {
+    return ParseListItemResult::Finished;
+  }
+  // If we found EOF or such, bailout.
+  if (Tok.isAny(tok::eof, tok::pound_endif)) {
+    IsInputIncomplete = true;
+    return ParseListItemResult::Finished;
+  }
+
+  diagnose(Tok, diag::expected_separator, ",")
+      .fixItInsertAfter(PreviousLoc, ",");
+  Status.setIsParseError();
+  return ParseListItemResult::Continue;
 }
 
 ParserStatus
 Parser::parseList(tok RightK, SourceLoc LeftLoc, SourceLoc &RightLoc,
-                  bool AllowSepAfterLast, Diag<> ErrorDiag, SyntaxKind Kind,
+                  bool AllowSepAfterLast, Diag<> ErrorDiag,
                   llvm::function_ref<ParserStatus()> callback) {
-  auto TokIsStringInterpolationEOF = [&]() -> bool {
-    return Tok.is(tok::eof) && Tok.getText() == ")" && RightK == tok::r_paren;
-  };
-  
-  llvm::Optional<SyntaxParsingContext> ListContext;
-  ListContext.emplace(SyntaxContext, Kind);
-  if (Kind == SyntaxKind::Unknown)
-    ListContext->setTransparent();
-
-  SyntaxKind ElementKind = getListElementKind(Kind);
-
   if (Tok.is(RightK)) {
-    ListContext.reset();
     RightLoc = consumeToken(RightK);
     return makeParserSuccess();
   }
-  if (TokIsStringInterpolationEOF()) {
+  if (tokIsStringInterpolationEOF(Tok, RightK)) {
     RightLoc = Tok.getLoc();
     return makeParserSuccess();
   }
 
   ParserStatus Status;
-  while (true) {
-    while (Tok.is(tok::comma)) {
-      diagnose(Tok, diag::unexpected_separator, ",")
-        .fixItRemove(SourceRange(Tok.getLoc()));
-      consumeToken();
-    }
-    SourceLoc StartLoc = Tok.getLoc();
+  ParseListItemResult Result;
+  do {
+    Result = parseListItem(Status, RightK, LeftLoc, RightLoc, AllowSepAfterLast,
+                           callback);
+  } while (Result == ParseListItemResult::Continue);
 
-    SyntaxParsingContext ElementContext(SyntaxContext, ElementKind);
-    if (ElementKind == SyntaxKind::Unknown)
-      ElementContext.setTransparent();
-    Status |= callback();
-    if (Tok.is(RightK))
-      break;
-    // If the lexer stopped with an EOF token whose spelling is ")", then this
-    // is actually the tuple that is a string literal interpolation context.
-    // Just accept the ")" and build the tuple as we usually do.
-    if (TokIsStringInterpolationEOF()) {
-      RightLoc = Tok.getLoc();
-      return Status;
-    }
-    // If we haven't made progress, or seeing any error, skip ahead.
-    if (Tok.getLoc() == StartLoc || Status.isError()) {
-      assert(Status.isError() && "no progress without error");
-      skipUntilDeclRBrace(RightK, tok::comma);
-      if (Tok.is(RightK) || Tok.isNot(tok::comma))
-        break;
-    }
-    if (consumeIf(tok::comma)) {
-      if (Tok.isNot(RightK))
-        continue;
-      if (!AllowSepAfterLast) {
-        diagnose(Tok, diag::unexpected_separator, ",")
-          .fixItRemove(SourceRange(PreviousLoc));
-      }
-      break;
-    }
-    // If we're in a comma-separated list, the next token is at the
-    // beginning of a new line and can never start an element, break.
-    if (Tok.isAtStartOfLine() &&
-        (Tok.is(tok::r_brace) || isStartOfDecl() || isStartOfStmt())) {
-      break;
-    }
-    // If we found EOF or such, bailout.
-    if (Tok.isAny(tok::eof, tok::pound_endif)) {
-      IsInputIncomplete = true;
-      break;
-    }
-
-    diagnose(Tok, diag::expected_separator, ",")
-      .fixItInsertAfter(PreviousLoc, ",");
-    Status.setIsParseError();
+  if (Result == ParseListItemResult::FinishedInStringInterpolation) {
+    return Status;
   }
 
-  ListContext.reset();
-
-  if (Status.isError()) {
+  if (Status.isErrorOrHasCompletion()) {
     // If we've already got errors, don't emit missing RightK diagnostics.
-    RightLoc = Tok.is(RightK) ? consumeToken() : PreviousLoc;
+    if (Tok.is(RightK)) {
+      RightLoc = consumeToken();
+      // Don't propagate the error because we have recovered.
+      if (!Status.hasCodeCompletion())
+        Status = makeParserSuccess();
+    } else {
+      RightLoc = getLocForMissingMatchingToken();
+    }
   } else if (parseMatchingToken(RightK, RightLoc, ErrorDiag, LeftLoc)) {
     Status.setIsParseError();
   }
@@ -1043,24 +1096,19 @@ Parser::parseList(tok RightK, SourceLoc LeftLoc, SourceLoc &RightLoc,
   return Status;
 }
 
-/// diagnoseRedefinition - Diagnose a redefinition error, with a note
-/// referring back to the original definition.
-
-void Parser::diagnoseRedefinition(ValueDecl *Prev, ValueDecl *New) {
-  assert(New != Prev && "Cannot conflict with self");
-  diagnose(New->getLoc(), diag::decl_redefinition);
-  diagnose(Prev->getLoc(), diag::previous_decldef, Prev->getBaseName());
-}
-
-Optional<StringRef>
-Parser::getStringLiteralIfNotInterpolated(SourceLoc Loc,
-                                          StringRef DiagText) {
+llvm::Optional<StringRef>
+Parser::getStringLiteralIfNotInterpolated(SourceLoc Loc, StringRef DiagText,
+                                          bool AllowMultiline) {
   assert(Tok.is(tok::string_literal));
 
   // FIXME: Support extended escaping string literal.
   if (Tok.getCustomDelimiterLen()) {
     diagnose(Loc, diag::forbidden_extended_escaping_string, DiagText);
-    return None;
+    return llvm::None;
+  }
+  if (!AllowMultiline && Tok.isMultilineString()) {
+    diagnose(Loc, diag::forbidden_multiline_string, DiagText)
+        .warnUntilSwiftVersion(6);
   }
 
   SmallVector<Lexer::StringSegment, 1> Segments;
@@ -1068,7 +1116,7 @@ Parser::getStringLiteralIfNotInterpolated(SourceLoc Loc,
   if (Segments.size() != 1 ||
       Segments.front().Kind == Lexer::StringSegment::Expr) {
     diagnose(Loc, diag::forbidden_interpolated_string, DiagText);
-    return None;
+    return llvm::None;
   }
 
   return SourceMgr.extractText(CharSourceRange(Segments.front().Loc,
@@ -1076,58 +1124,60 @@ Parser::getStringLiteralIfNotInterpolated(SourceLoc Loc,
 }
 
 struct ParserUnit::Implementation {
-  std::shared_ptr<SyntaxParseActions> SPActions;
   LangOptions LangOpts;
+  TypeCheckerOptions TypeCheckerOpts;
+  SILOptions SILOpts;
   SearchPathOptions SearchPathOpts;
+  ClangImporterOptions clangImporterOpts;
+  symbolgraphgen::SymbolGraphOptions symbolGraphOpts;
   DiagnosticEngine Diags;
   ASTContext &Ctx;
   SourceFile *SF;
   std::unique_ptr<Parser> TheParser;
 
   Implementation(SourceManager &SM, SourceFileKind SFKind, unsigned BufferID,
-                 const LangOptions &Opts, StringRef ModuleName,
-                 std::shared_ptr<SyntaxParseActions> spActions)
-    : SPActions(std::move(spActions)),
-      LangOpts(Opts),
-      Diags(SM),
-      Ctx(*ASTContext::get(LangOpts, SearchPathOpts, SM, Diags)),
-      SF(new (Ctx) SourceFile(
-            *ModuleDecl::create(Ctx.getIdentifier(ModuleName), Ctx),
-            SFKind, BufferID,
-            SourceFile::ImplicitModuleImportKind::None,
-            Opts.CollectParsedToken,
-            Opts.BuildSyntaxTree)) {
+                 const LangOptions &Opts, const TypeCheckerOptions &TyOpts,
+                 const SILOptions &silOpts, StringRef ModuleName)
+      : LangOpts(Opts),
+        TypeCheckerOpts(TyOpts), SILOpts(silOpts), Diags(SM),
+        Ctx(*ASTContext::get(LangOpts, TypeCheckerOpts, SILOpts, SearchPathOpts,
+                             clangImporterOpts, symbolGraphOpts, SM, Diags)) {
+    registerParseRequestFunctions(Ctx.evaluator);
+
+    auto parsingOpts = SourceFile::getDefaultParsingOptions(LangOpts);
+    parsingOpts |= ParsingFlags::DisableDelayedBodies;
+    parsingOpts |= ParsingFlags::DisablePoundIfEvaluation;
+
+    auto *M = ModuleDecl::create(Ctx.getIdentifier(ModuleName), Ctx);
+    SF = new (Ctx) SourceFile(*M, SFKind, BufferID, parsingOpts);
+    M->addAuxiliaryFile(*SF);
   }
 
   ~Implementation() {
-    // We need to delete the parser before the context so that it can finalize
-    // its SourceFileSyntax while it is still alive
     TheParser.reset();
     delete &Ctx;
   }
 };
 
-ParserUnit::ParserUnit(SourceManager &SM, SourceFileKind SFKind, unsigned BufferID)
-  : ParserUnit(SM, SFKind, BufferID, LangOptions(), "input") {
-}
+ParserUnit::ParserUnit(SourceManager &SM, SourceFileKind SFKind,
+                       unsigned BufferID)
+    : ParserUnit(SM, SFKind, BufferID, LangOptions(), TypeCheckerOptions(),
+                 SILOptions(), "input") {}
 
-ParserUnit::ParserUnit(SourceManager &SM, SourceFileKind SFKind, unsigned BufferID,
-                       const LangOptions &LangOpts, StringRef ModuleName,
-                       std::shared_ptr<SyntaxParseActions> spActions,
-                       SyntaxParsingCache *SyntaxCache)
-    : Impl(*new Implementation(SM, SFKind, BufferID, LangOpts, ModuleName,
-                               std::move(spActions))) {
-
-  Impl.SF->SyntaxParsingCache = SyntaxCache;
+ParserUnit::ParserUnit(SourceManager &SM, SourceFileKind SFKind,
+                       unsigned BufferID, const LangOptions &LangOpts,
+                       const TypeCheckerOptions &TypeCheckOpts,
+                       const SILOptions &SILOpts, StringRef ModuleName)
+    : Impl(*new Implementation(SM, SFKind, BufferID, LangOpts, TypeCheckOpts,
+                               SILOpts, ModuleName)) {
   Impl.TheParser.reset(new Parser(BufferID, *Impl.SF, /*SIL=*/nullptr,
-                                  /*PersistentState=*/nullptr, Impl.SPActions,
-                                  /*DelayBodyParsing=*/false));
+                                  /*PersistentState=*/nullptr));
 }
 
-ParserUnit::ParserUnit(SourceManager &SM, SourceFileKind SFKind, unsigned BufferID,
-                       unsigned Offset, unsigned EndOffset)
-  : Impl(*new Implementation(SM, SFKind, BufferID, LangOptions(), "input",
-                             nullptr)) {
+ParserUnit::ParserUnit(SourceManager &SM, SourceFileKind SFKind,
+                       unsigned BufferID, unsigned Offset, unsigned EndOffset)
+    : Impl(*new Implementation(SM, SFKind, BufferID, LangOptions(),
+                               TypeCheckerOptions(), SILOptions(), "input")) {
 
   std::unique_ptr<Lexer> Lex;
   Lex.reset(new Lexer(Impl.LangOpts, SM,
@@ -1135,28 +1185,29 @@ ParserUnit::ParserUnit(SourceManager &SM, SourceFileKind SFKind, unsigned Buffer
                       LexerMode::Swift,
                       HashbangMode::Allowed,
                       CommentRetentionMode::None,
-                      TriviaRetentionMode::WithoutTrivia,
                       Offset, EndOffset));
   Impl.TheParser.reset(new Parser(std::move(Lex), *Impl.SF, /*SIL=*/nullptr,
-    /*PersistentState=*/nullptr, Impl.SPActions, /*DelayBodyParsing=*/false));
+                                  /*PersistentState=*/nullptr));
 }
 
 ParserUnit::~ParserUnit() {
   delete &Impl;
 }
 
-OpaqueSyntaxNode ParserUnit::parse() {
+void ParserUnit::parse() {
   auto &P = getParser();
-  bool Done = false;
-  while (!Done) {
-    P.parseTopLevel();
-    Done = P.Tok.is(tok::eof);
-  }
-  auto rawNode = P.finalizeSyntaxTree();
-  if (rawNode.isNull()) {
-    return nullptr;
-  }
-  return rawNode.getOpaqueNode();
+  auto &ctx = P.Context;
+
+  SmallVector<ASTNode, 128> items;
+  P.parseTopLevelItems(items);
+
+  llvm::Optional<ArrayRef<Token>> tokensRef;
+  if (auto tokens = P.takeTokenReceiver()->finalize())
+    tokensRef = ctx.AllocateCopy(*tokens);
+
+  auto result = SourceFileParsingResult{ctx.AllocateCopy(items), tokensRef,
+                                        P.CurrentTokenHash};
+  ctx.evaluator.cacheOutput(ParseSourceFileRequest{&P.SF}, std::move(result));
 }
 
 Parser &ParserUnit::getParser() {
@@ -1250,6 +1301,11 @@ ParsedDeclName swift::parseDeclName(StringRef name) {
     baseName = baseName.substr(7);
   }
 
+  // If the base name is prefixed by "subscript", it's an subscript.
+  if (baseName == "subscript") {
+    result.IsSubscript = true;
+  }
+
   // Parse the base name.
   if (parseBaseName(baseName)) return ParsedDeclName();
 
@@ -1278,36 +1334,61 @@ ParsedDeclName swift::parseDeclName(StringRef name) {
     }
   } while (!parameters.empty());
 
-  // Drop the argument labels for a property accessor; they aren't used.
-  if (result.isPropertyAccessor())
-    result.ArgumentLabels.clear();
-
   return result;
 }
 
-DeclName ParsedDeclName::formDeclName(ASTContext &ctx) const {
-  return swift::formDeclName(ctx, BaseName, ArgumentLabels, IsFunctionName,
-                             /*IsInitializer=*/true);
+DeclName ParsedDeclName::formDeclName(ASTContext &ctx, bool isSubscript,
+                                      bool isCxxClassTemplateSpec) const {
+  return formDeclNameRef(ctx, isSubscript, isCxxClassTemplateSpec).getFullName();
+}
+
+DeclNameRef ParsedDeclName::formDeclNameRef(ASTContext &ctx,
+                                            bool isSubscript,
+                                            bool isCxxClassTemplateSpec) const {
+  return swift::formDeclNameRef(ctx, BaseName, ArgumentLabels, IsFunctionName,
+                                /*IsInitializer=*/true, isSubscript,
+                                isCxxClassTemplateSpec);
 }
 
 DeclName swift::formDeclName(ASTContext &ctx,
                              StringRef baseName,
                              ArrayRef<StringRef> argumentLabels,
                              bool isFunctionName,
-                             bool isInitializer) {
+                             bool isInitializer,
+                             bool isSubscript,
+                             bool isCxxClassTemplateSpec) {
+  return formDeclNameRef(ctx, baseName, argumentLabels, isFunctionName,
+                         isInitializer, isSubscript,
+                         isCxxClassTemplateSpec).getFullName();
+}
+
+DeclNameRef swift::formDeclNameRef(ASTContext &ctx,
+                                   StringRef baseName,
+                                   ArrayRef<StringRef> argumentLabels,
+                                   bool isFunctionName,
+                                   bool isInitializer,
+                                   bool isSubscript,
+                                   bool isCxxClassTemplateSpec) {
   // We cannot import when the base name is not an identifier.
   if (baseName.empty())
-    return DeclName();
-  if (!Lexer::isIdentifier(baseName) && !Lexer::isOperator(baseName))
-    return DeclName();
+    return DeclNameRef();
+
+  if (!Lexer::isIdentifier(baseName) && !Lexer::isOperator(baseName) &&
+      !isCxxClassTemplateSpec)
+    return DeclNameRef();
 
   // Get the identifier for the base name. Special-case `init`.
-  DeclBaseName baseNameId = ((isInitializer && baseName == "init")
-                             ? DeclBaseName::createConstructor()
-                             : ctx.getIdentifier(baseName));
+  DeclBaseName baseNameId;
+  if (isInitializer && baseName == "init")
+    baseNameId = DeclBaseName::createConstructor();
+  else if (isSubscript && baseName == "subscript")
+    baseNameId = DeclBaseName::createSubscript();
+  else
+    baseNameId = ctx.getIdentifier(baseName);
 
   // For non-functions, just use the base name.
-  if (!isFunctionName) return baseNameId;
+  if (!isFunctionName && !baseNameId.isSubscript())
+    return DeclNameRef(baseNameId);
 
   // For functions, we need to form a complete name.
 
@@ -1323,9 +1404,11 @@ DeclName swift::formDeclName(ASTContext &ctx,
   }
 
   // Build the result.
-  return DeclName(ctx, baseNameId, argumentLabelIds);
+  return DeclNameRef({ ctx, baseNameId, argumentLabelIds });
 }
 
-DeclName swift::parseDeclName(ASTContext &ctx, StringRef name) {
-  return parseDeclName(name).formDeclName(ctx);
+void PrettyStackTraceParser::print(llvm::raw_ostream &out) const {
+  out << "With parser at source location: ";
+  P.Tok.getLoc().print(out, P.Context.SourceMgr);
+  out << '\n';
 }

@@ -3,7 +3,7 @@
 // Make sure that we completely inline/devirtualize/substitute all the way down
 // to unknown1.
 
-// CHECK-LABEL: sil @main
+// CHECK-LABEL: sil {{.*}}@main
 // CHECK: bb0({{.*}}):
 // CHECK: function_ref @unknown1
 // CHECK: apply
@@ -44,7 +44,7 @@ func driver() {
 driver()
 
 // <rdar://problem/46322928> Failure to devirtualize a protocol method
-// applied to an opened existential blocks implemention of
+// applied to an opened existential blocks implementation of
 // DataProtocol.
 public protocol ContiguousBytes {
     func withUnsafeBytes<R>(_ body: (UnsafeRawBufferPointer) throws -> R) rethrows -> R

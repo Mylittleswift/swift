@@ -14,66 +14,44 @@
 #define SWIFT_IDE_EXPRCONTEXTANALYSIS_H
 
 #include "swift/AST/Type.h"
+#include "swift/AST/TypeCheckRequests.h"
+#include "swift/AST/Types.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/SourceLoc.h"
+#include "swift/IDE/PossibleParamInfo.h"
 
 namespace swift {
 class DeclContext;
 class Expr;
 class ValueDecl;
-class AnyFunctionType;
 
 namespace ide {
-
-/// Prepare the given expression for type-checking again, prinicipally by
-/// erasing any ErrorType types on the given expression, allowing later
-/// type-checking to make progress.
-void prepareForRetypechecking(Expr *E);
+enum class SemanticContextKind : uint8_t;
 
 /// Type check parent contexts of the given decl context, and the body of the
 /// given context until \c Loc if the context is a function body.
-void typeCheckContextUntil(DeclContext *DC, SourceLoc Loc);
+void typeCheckContextAt(TypeCheckASTNodeAtLocContext TypeCheckCtx,
+                        SourceLoc Loc);
 
 /// From \p DC, find and returns the outer most expression which source range is
 /// exact the same as \p TargetRange. Returns \c nullptr if not found.
 Expr *findParsedExpr(const DeclContext *DC, SourceRange TargetRange);
 
-/// Returns expected return type of the given decl context.
+/// Collects possible expected return types of the given decl context.
 /// \p DC should be an \c AbstractFunctionDecl or an \c AbstractClosureExpr.
-Type getReturnTypeFromContext(const DeclContext *DC);
+void collectPossibleReturnTypesFromContext(DeclContext *DC,
+                                           SmallVectorImpl<Type> &candidates);
 
-using FunctionTypeAndDecl = std::pair<AnyFunctionType *, ValueDecl *>;
+struct FunctionTypeAndDecl {
+  AnyFunctionType *Type;
+  ValueDecl *Decl;
+  llvm::Optional<SemanticContextKind> SemanticContext;
 
-/// Given an expression and its decl context, the analyzer tries to figure out
-/// the expected type of the expression by analyzing its context.
-class ExprContextInfo {
-  SmallVector<Type, 2> PossibleTypes;
-  SmallVector<StringRef, 2> PossibleNames;
-  SmallVector<FunctionTypeAndDecl, 2> PossibleCallees;
-  bool singleExpressionBody = false;
-
-public:
-  ExprContextInfo(DeclContext *DC, Expr *TargetExpr);
-
-  // Returns a list of possible context types.
-  ArrayRef<Type> getPossibleTypes() const { return PossibleTypes; }
-
-  /// Whether the type context comes from a single-expression body, e.g.
-  /// `foo({ here })`.
-  ///
-  /// If the input may be incomplete, such as in code-completion, take into
-  /// account that the types returned by `getPossibleTypes()` are only a hint.
-  bool isSingleExpressionBody() const { return singleExpressionBody; }
-
-  // Returns a list of possible argument label names.
-  // Valid only if \c getKind() is \c CallArgument.
-  ArrayRef<StringRef> getPossibleNames() const { return PossibleNames; }
-
-  // Returns a list of possible callee
-  // Valid only if \c getKind() is \c CallArgument.
-  ArrayRef<FunctionTypeAndDecl> getPossibleCallees() const {
-    return PossibleCallees;
-  }
+  FunctionTypeAndDecl(AnyFunctionType *Type, ValueDecl *Decl)
+      : Type(Type), Decl(Decl) {}
+  FunctionTypeAndDecl(AnyFunctionType *Type, ValueDecl *Decl,
+                      SemanticContextKind SemanticContext)
+      : Type(Type), Decl(Decl), SemanticContext(SemanticContext) {}
 };
 
 } // namespace ide

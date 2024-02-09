@@ -1,13 +1,13 @@
 // RUN: %swiftc_driver_plain -emit-executable %s -o %t.out -emit-module -emit-module-path %t.swiftmodule -emit-objc-header-path %t.h -serialize-diagnostics -emit-dependencies -parseable-output -driver-skip-execution 2>&1 | %FileCheck %s
 
-// XFAIL: freebsd, linux
+// XFAIL: OS=freebsd, OS=openbsd, OS=linux-gnu, OS=linux-android, OS=linux-androideabi
 
 // CHECK: {{[1-9][0-9]*}}
 // CHECK-NEXT: {
 // CHECK-NEXT:   "kind": "began",
 // CHECK-NEXT:   "name": "compile",
-// CHECK-NEXT:   "command": "{{.*[\\/]}}swift{{c?(\.EXE)?(\\")?}} -frontend -c -primary-file {{.*[\\/]}}parseable_output.swift{{(\\")?}} {{.*}} -o {{.*[\\/]}}parseable_output-[[OUTPUT:.*]].o{{(\\")?}}",
-// CHECK-NEXT:   "command_executable": "{{.*[\\/]}}swift{{c?(\.EXE)?}}",
+// CHECK-NEXT:   "command": "{{.*[\\/]}}swift{{(-frontend|c)?(\.exe)?(\\")?}} -frontend -c -primary-file {{.*[\\/]}}parseable_output.swift{{(\\")?}} {{.*}} -o {{.*[\\/]}}parseable_output-[[OUTPUT:.*]].o{{(\\")?}}",
+// CHECK-NEXT:   "command_executable": "{{.*[\\/]}}swift{{(-frontend|c)?(\.exe)?}}",
 // CHECK-NEXT:   "command_arguments": [
 // CHECK-NEXT:     "-frontend",
 // CHECK-NEXT:     "-c",
@@ -37,6 +37,10 @@
 // CHECK-NEXT:       "path": "{{.*[\\/]}}parseable_output-[[OUTPUT]].swiftdoc"
 // CHECK-NEXT:     },
 // CHECK-NEXT:     {
+// CHECK-NEXT:       "type": "swiftsourceinfo",
+// CHECK-NEXT:       "path": "{{.*[\\/]}}parseable_output-[[OUTPUT]].swiftsourceinfo"
+// CHECK-NEXT:     },
+// CHECK-NEXT:     {
 // CHECK-NEXT:       "type": "diagnostics",
 // CHECK-NEXT:       "path": "{{.*[\\/]}}parseable_output-[[OUTPUT]].dia"
 // CHECK-NEXT:     }
@@ -63,8 +67,8 @@
 // CHECK-NEXT: {
 // CHECK-NEXT:   "kind": "began",
 // CHECK-NEXT:   "name": "merge-module",
-// CHECK-NEXT:   "command": "{{.*[\\/]}}swift{{c?(\.EXE)?(\\")?}} -frontend -merge-modules -emit-module {{.*[\\/]}}parseable_output-[[OUTPUT]].swiftmodule{{(\\")?}} {{.*}} -o {{.*[\\/]}}parseable_output.swift.tmp.swiftmodule{{(\\")?}}",
-// CHECK-NEXT:   "command_executable": "{{.*[\\/]}}swift{{c?(\.EXE)?}}",
+// CHECK-NEXT:   "command": "{{.*[\\/]}}swift{{(-frontend|c)?(\.exe)?(\\")?}} -frontend -merge-modules -emit-module {{.*[\\/]}}parseable_output-[[OUTPUT]].swiftmodule{{(\\")?}} {{.*}} -o {{.*[\\/]}}parseable_output.swift.tmp.swiftmodule{{(\\")?}}",
+// CHECK-NEXT:   "command_executable": "{{.*[\\/]}}swift{{(-frontend|c)?(\.exe)?}}",
 // CHECK-NEXT:   "command_arguments": [
 // CHECK-NEXT:     "-frontend",
 // CHECK-NEXT:     "-merge-modules",
@@ -86,7 +90,11 @@
 // CHECK-NEXT:       "path": "{{.*[\\/]}}parseable_output.swift.tmp.swiftdoc"
 // CHECK-NEXT:     },
 // CHECK-NEXT:     {
-// CHECK-NEXT:       "type": "objc-header",
+// CHECK-NEXT:       "type": "swiftsourceinfo",
+// CHECK-NEXT:       "path": "{{.*[\\/]}}parseable_output.swift.tmp.swiftsourceinfo"
+// CHECK-NEXT:     },
+// CHECK-NEXT:     {
+// CHECK-NEXT:       "type": "clang-header",
 // CHECK-NEXT:       "path": "{{.*[\\/]}}parseable_output.swift.tmp.h"
 // CHECK-NEXT:     }
 // CHECK-NEXT:   ],
@@ -112,8 +120,8 @@
 // CHECK-NEXT: {
 // CHECK-NEXT:   "kind": "began",
 // CHECK-NEXT:   "name": "link",
-// CHECK-NEXT:   "command": "{{.*[\\/](ld|clang\+\+)(\.exe)?(\\")?.*}}parseable_output-[[OUTPUT]].o{{(\\")?}} {{.*}}-o {{.*[\\/]}}parseable_output.swift.tmp.out{{(\\")?}}",
-// CHECK-NEXT:   "command_executable": "{{.*[\\/](ld|clang\+\+)(\.exe)?}}",
+// CHECK-NEXT:   "command": "{{.*[\\/](ld|clang)(\.exe)?(\\")?.*}}parseable_output-[[OUTPUT]].o{{(\\")?}} {{.*}}-o {{.*[\\/]}}parseable_output.swift.tmp.out{{(\\")?}}",
+// CHECK-NEXT:   "command_executable": "{{.*[\\/](ld|clang)(\.exe)?}}",
 // CHECK-NEXT:   "command_arguments": [
 // CHECK:          "{{.*[\\/]}}parseable_output-[[OUTPUT]].o",
 // CHECK:          "-o",

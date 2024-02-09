@@ -18,9 +18,9 @@
 #define SWIFT_SIL_SILNODE_H
 
 #include "llvm/Support/Compiler.h"
-#include "llvm/ADT/DenseMapInfo.h"
-#include "swift/Basic/InlineBitfield.h"
+#include "llvm/Support/PointerLikeTypeTraits.h"
 #include "swift/Basic/LLVM.h"
+#include "swift/Basic/SwiftObjectHeader.h"
 #include <type_traits>
 
 namespace swift {
@@ -28,9 +28,12 @@ namespace swift {
 class SILBasicBlock;
 class SILFunction;
 class SILInstruction;
-class SILModule;
 class SingleValueInstruction;
+class NonSingleValueInstruction;
+class SILModule;
 class ValueBase;
+class SILNode;
+class SILValue;
 
 /// An enumeration which contains values for all the nodes in SILNodes.def.
 /// Other enumerators, like ValueKind and SILInstructionKind, ultimately
@@ -44,10 +47,27 @@ enum class SILNodeKind {
 #include "swift/SIL/SILNodes.def"
 };
 
-enum { NumSILNodeKindBits =
-  countBitsUsed(static_cast<unsigned>(SILNodeKind::Last_SILNode)) };
-
 enum class SILInstructionKind : std::underlying_type<SILNodeKind>::type;
+
+/// A SILNode pointer which makes it possible to implicitly cast from all kind
+/// of nodes, values and instructions (note: there is no implicit cast from
+/// SILInstruction* to SILNode*).
+/// It's mainly used to simplify classof-functions, but it can be used for other
+/// SILNode-taking APIs, too.
+/// Currently there is only a const-version of it.
+class SILNodePointer {
+  const SILNode *node;
+public:
+  SILNodePointer(const SILNode *node) : node(node) { }
+  SILNodePointer(const SILInstruction *inst);
+  SILNodePointer(const SingleValueInstruction *svi);
+  SILNodePointer(const NonSingleValueInstruction *nsvi);
+  SILNodePointer(SILValue value);
+  
+  const SILNode *get() const { return node; }
+  const SILNode *operator->() const { return node; }
+  operator const SILNode *() const { return node; }
+};
 
 /// A SILNode is a node in the use-def graph of a SILFunction.  It is
 /// either an instruction or a defined value which can be used by an
@@ -91,327 +111,297 @@ enum class SILInstructionKind : std::underlying_type<SILNodeKind>::type;
 ///   subobject.  If the SILNode is actually the base subobject of a
 ///   ValueBase subobject, the cast will yield a corrupted value.
 ///   Always use the LLVM casts (cast<>, dyn_cast<>, etc.) instead.
-class alignas(8) SILNode {
+class alignas(8) SILNode :
+  // SILNode contains a swift object header for bridging with Swift.
+  // For details see SwiftCompilerSources/README.md.
+  public SwiftObjectHeader {
 public:
   enum { NumVOKindBits = 3 };
   enum { NumStoreOwnershipQualifierBits = 2 };
   enum { NumLoadOwnershipQualifierBits = 2 };
   enum { NumAssignOwnershipQualifierBits = 2 };
+  enum { NumAssignByWrapperModeBits = 2 };
   enum { NumSILAccessKindBits = 2 };
-  enum { NumSILAccessEnforcementBits = 2 };
+  enum { NumSILAccessEnforcementBits = 3 };
+  enum { NumAllocRefTailTypesBits = 4 };
+  enum { NumMarkDependenceKindBits = 2 };
 
 protected:
-  union { uint64_t OpaqueBits;
+  friend class SILInstruction;
+  template <class, class> friend class SILBitfield;
 
-  SWIFT_INLINE_BITFIELD_BASE(SILNode, bitmax(NumSILNodeKindBits,8)+1+1,
-    Kind : bitmax(NumSILNodeKindBits,8),
-    StorageLoc : 1,
-    IsRepresentativeNode : 1
-  );
+  static_assert((unsigned)SILNodeKind::Last_SILNode <= (unsigned)std::numeric_limits<uint8_t>::max(),
+          "too many SILNode kinds");
 
-  SWIFT_INLINE_BITFIELD_EMPTY(ValueBase, SILNode);
+  uint8_t kind;
 
-  SWIFT_INLINE_BITFIELD(SILArgument, ValueBase, NumVOKindBits,
-    VOKind : NumVOKindBits
-  );
+  // Used by `NodeBitfield`.
+  enum { numCustomBits = 8 };
 
-  // No MultipleValueInstructionResult subclass needs inline bits right now,
-  // therefore let's naturally align and size the Index for speed.
-  SWIFT_INLINE_BITFIELD_FULL(MultipleValueInstructionResult, ValueBase,
-                             NumVOKindBits+32,
-      VOKind : NumVOKindBits,
-      : NumPadBits,
-      Index : 32
-  );
+  // Used by `NodeBitfield`.
+  uint8_t customBits;
 
-  SWIFT_INLINE_BITFIELD_EMPTY(SILInstruction, SILNode);
+  // Part of SILInstruction's debug location. Together with
+  // `SILInstruction::locationStorage` this forms the SILLocation.
+  uint8_t locationKindAndFlags;
 
-  // Special handling for UnaryInstructionWithTypeDependentOperandsBase
-  SWIFT_INLINE_BITFIELD(IBWTO, SILNode, 64-NumSILNodeBits,
-    // DO NOT allocate bits at the front!
-    // IBWTO is a template, and templates must allocate bits from back to front
-    // so that "normal" subclassing can allocate bits from front to back.
-    // If you update this, then you must update the IBWTO_BITFIELD macros.
+  //===--------------------------------------------------------------------===//
+  //               MARK: Shared 8-bit and 32-bit fields
+  //
+  // Several instructions share the space for integer fields to reduce SIL
+  // instruction memory.
+  //
+  // How to define a shared field in a SIL instruction class:
+  //
+  // * Decide whether to use an 8-bit (e.g. a boolean) or 32-bit integer.
+  // * Add the `USE_SHARED_UINT8/32` or `TEMPLATE_USE_SHARED_UINT8/32` macros
+  //   to the instruction class. This is mainly used to check for accidental
+  //   overlaps of shared fields in base and derived classes.
+  // * Use `SHARED_FIELD` or `SHARED_TEMPLATE_FIELD` below to add the field.
+  // * In the instruction implementation use `sharedUInt8/32()` to access the
+  //   field.
+  //===--------------------------------------------------------------------===//
 
-    /*pad*/ : 32-NumSILNodeBits,
+/// Adds a shared field for instruction class `I`.
+#define SHARED_FIELD(I, ...) \
+  class { friend class I; __VA_ARGS__; } I
 
-    // Total number of operands of this instruction.
-    // It is number of type dependent operands + 1.
-    NumOperands : 32;
-    template<SILInstructionKind Kind, typename, typename, typename...>
-    friend class InstructionBaseWithTrailingOperands
-  );
+/// Adds a shared field for a template instruction class `I` which has a single
+/// template argument of type `T`.
+#define SHARED_TEMPLATE_FIELD(T, I, ...) \
+  class { template <T> friend class I; __VA_ARGS__; } I
 
-#define IBWTO_BITFIELD(T, U, C, ...) \
-  SWIFT_INLINE_BITFIELD_TEMPLATE(T, U, (C), 32, __VA_ARGS__)
-#define IBWTO_BITFIELD_EMPTY(T, U) \
-  SWIFT_INLINE_BITFIELD_EMPTY(T, U)
+#define SHARED_TEMPLATE2_FIELD(T1, T2, I, ...)                                 \
+  class {                                                                      \
+    template <T1, T2>                                                          \
+    friend class I;                                                            \
+    __VA_ARGS__;                                                               \
+  } I
 
-#define UIWTDOB_BITFIELD(T, U, C, ...) \
-  IBWTO_BITFIELD(T, U, (C), __VA_ARGS__)
-#define UIWTDOB_BITFIELD_EMPTY(T, U) \
-  IBWTO_BITFIELD_EMPTY(T, U)
+/// Special case for `InstructionBaseWithTrailingOperands`.
+#define SHARED_TEMPLATE4_FIELD(T1, T2, T3, T4, I, ...) \
+  class { template <T1, T2, T3, T4> friend class I; __VA_ARGS__; } I
 
-  SWIFT_INLINE_BITFIELD_EMPTY(SingleValueInstruction, SILInstruction);
-  SWIFT_INLINE_BITFIELD_EMPTY(DeallocationInst, SILInstruction);
-  SWIFT_INLINE_BITFIELD_EMPTY(LiteralInst, SingleValueInstruction);
-  SWIFT_INLINE_BITFIELD_EMPTY(AllocationInst, SingleValueInstruction);
+  // clang-format off
+  union SharedUInt8Fields {
+    uint8_t opaque;
 
-  // Ensure that StructInst bitfield does not overflow.
-  IBWTO_BITFIELD_EMPTY(StructInst, SingleValueInstruction);
+    SHARED_TEMPLATE_FIELD(typename, SwitchEnumInstBase, bool hasDefault);
+    SHARED_TEMPLATE2_FIELD(typename, typename, SelectEnumInstBase, bool hasDefault);
+    SHARED_TEMPLATE_FIELD(SILInstructionKind, LoadReferenceInstBase, bool isTake);
+    SHARED_TEMPLATE_FIELD(SILInstructionKind, StoreReferenceInstBase, bool isInitializationOfDest);
+    SHARED_FIELD(MultipleValueInstructionResult, uint8_t valueOwnershipKind);
+    SHARED_FIELD(UncheckedOwnershipConversionInst, uint8_t valueOwnershipKind);
+    SHARED_FIELD(StoreInst, uint8_t ownershipQualifier);
+    SHARED_FIELD(LoadInst, uint8_t ownershipQualifier);
+    SHARED_FIELD(AssignInst, uint8_t ownershipQualifier);
+    SHARED_FIELD(AssignByWrapperInst, uint8_t mode);
+    SHARED_FIELD(AssignOrInitInst, uint8_t mode);
+    SHARED_FIELD(StringLiteralInst, uint8_t encoding);
+    SHARED_FIELD(SwitchValueInst, bool hasDefault);
+    SHARED_FIELD(RefCountingInst, bool atomicity);
+    SHARED_FIELD(EndAccessInst, bool aborting);
+    SHARED_FIELD(RefElementAddrInst, bool immutable);
+    SHARED_FIELD(RefTailAddrInst, bool immutable);
+    SHARED_FIELD(AddressToPointerInst, bool needsStackProtection);
+    SHARED_FIELD(IndexAddrInst, bool needsStackProtection);
+    SHARED_FIELD(HopToExecutorInst, bool mandatory);
+    SHARED_FIELD(DestroyValueInst, bool poisonRefs);
+    SHARED_FIELD(EndCOWMutationInst, bool keepUnique);
+    SHARED_FIELD(ConvertFunctionInst, bool withoutActuallyEscaping);
+    SHARED_FIELD(BeginCOWMutationInst, bool native);
+    SHARED_FIELD(GlobalValueInst, bool isBare);
 
-  // Ensure that TupleInst bitfield does not overflow.
-  IBWTO_BITFIELD_EMPTY(TupleInst, SingleValueInstruction);
+    SHARED_FIELD(SILArgument, uint8_t
+                 valueOwnershipKind : NumVOKindBits,
+                 reborrow : 1,
+                 pointerEscape : 1);
 
-  IBWTO_BITFIELD(ObjectInst, SingleValueInstruction,
-                             32-NumSingleValueInstructionBits,
-    NumBaseElements : 32-NumSingleValueInstructionBits
-  );
+    SHARED_FIELD(DebugValueInst, uint8_t
+                 poisonRefs : 1,
+                 usesMoveableValueDebugInfo : 1,
+                 trace : 1);
 
-  IBWTO_BITFIELD(SelectEnumInstBase, SingleValueInstruction, 1,
-    HasDefault : 1
-  );
+    SHARED_FIELD(AllocStackInst, uint8_t
+                 dynamicLifetime : 1,
+                 lexical : 1,
+                 usesMoveableValueDebugInfo : 1,
+                 hasInvalidatedVarInfo : 1);
 
-  SWIFT_INLINE_BITFIELD_FULL(IntegerLiteralInst, LiteralInst, 32,
-    : NumPadBits,
-    numBits : 32
-  );
+    SHARED_FIELD(AllocBoxInst, uint8_t
+                 dynamicLifetime : 1,
+                 reflection : 1,
+                 usesMoveableValueDebugInfo : 1,
+                 pointerEscape : 1);
 
-  SWIFT_INLINE_BITFIELD_FULL(FloatLiteralInst, LiteralInst, 32,
-    : NumPadBits,
-    numBits : 32
-  );
+    SHARED_FIELD(AllocRefInstBase, uint8_t
+      objC : 1,
+      onStack : 1,
+      isBare : 1,   // Only used in AllocRefInst
+      numTailTypes: NumAllocRefTailTypesBits);
 
-  SWIFT_INLINE_BITFIELD_FULL(StringLiteralInst, LiteralInst, 2+32,
-    TheEncoding : 2,
-    : NumPadBits,
-    Length : 32
-  );
+    SHARED_FIELD(BeginBorrowInst, uint8_t
+                 lexical : 1,
+                 pointerEscape : 1,
+                 fromVarDecl : 1);
 
-  SWIFT_INLINE_BITFIELD(DeallocRefInst, DeallocationInst, 1,
-    OnStack : 1
-  );
+    SHARED_FIELD(CopyAddrInst, uint8_t
+      isTakeOfSrc : 1,
+      isInitializationOfDest : 1);
 
-  // Ensure that AllocBoxInst bitfield does not overflow.
-  IBWTO_BITFIELD_EMPTY(AllocBoxInst, AllocationInst);
-  // Ensure that AllocExistentialBoxInst bitfield does not overflow.
-  IBWTO_BITFIELD_EMPTY(AllocExistentialBoxInst, AllocationInst);
-  SWIFT_INLINE_BITFIELD_FULL(AllocStackInst, AllocationInst,
-                             64-NumAllocationInstBits,
-    NumOperands : 32-NumAllocationInstBits,
-    VarInfo : 32
-  );
-  IBWTO_BITFIELD(AllocRefInstBase, AllocationInst, 32-NumAllocationInstBits,
-    ObjC : 1,
-    OnStack : 1,
-    NumTailTypes : 32-1-1-NumAllocationInstBits
-  );
-  static_assert(32-1-1-NumAllocationInstBits >= 16, "Reconsider bitfield use?");
+    SHARED_FIELD(ExplicitCopyAddrInst, uint8_t
+      isTakeOfSrc : 1,
+      isInitializationOfDest : 1);
 
-  UIWTDOB_BITFIELD_EMPTY(AllocValueBufferInst, AllocationInst);
+    SHARED_FIELD(TupleAddrConstructorInst, uint8_t
+      isInitializationOfDest : 1);
 
-  // TODO: Sort the following in SILNodes.def order
+    SHARED_FIELD(PointerToAddressInst, uint8_t
+      isStrict : 1,
+      isInvariant : 1);
 
-  SWIFT_INLINE_BITFIELD_EMPTY(NonValueInstruction, SILInstruction);
-  SWIFT_INLINE_BITFIELD(RefCountingInst, NonValueInstruction, 1,
-      atomicity : 1
-  );
+    SHARED_TEMPLATE_FIELD(typename, BeginAccessBase, uint8_t
+      accessKind : NumSILAccessKindBits,
+      enforcement : NumSILAccessEnforcementBits,
+      noNestedConflict : 1,
+      fromBuiltin : 1);
+    
+    SHARED_FIELD(EndUnpairedAccessInst, uint8_t
+      enforcement : NumSILAccessEnforcementBits,
+      aborting : 1,
+      fromBuiltin : 1);
 
-  // Ensure that BindMemoryInst bitfield does not overflow.
-  IBWTO_BITFIELD_EMPTY(BindMemoryInst, NonValueInstruction);
+    SHARED_FIELD(MoveValueInst, uint8_t
+                 allowDiagnostics : 1,
+                 lexical : 1,
+                 pointerEscape : 1,
+                 fromVarDecl : 1);
 
-  // Ensure that MarkFunctionEscapeInst bitfield does not overflow.
-  IBWTO_BITFIELD_EMPTY(MarkFunctionEscapeInst, NonValueInstruction);
+    SHARED_FIELD(MarkDependenceInst, uint8_t
+                 dependenceKind : NumMarkDependenceKindBits);
 
-  // Ensure that MetatypeInst bitfield does not overflow.
-  IBWTO_BITFIELD_EMPTY(MetatypeInst, SingleValueInstruction);
+  // Do not use `_sharedUInt8_private` outside of SILNode.
+  } _sharedUInt8_private;
+  // clang-format on
 
-  SWIFT_INLINE_BITFIELD(CopyAddrInst, NonValueInstruction, 1+1,
-    /// IsTakeOfSrc - True if ownership will be taken from the value at the
-    /// source memory location.
-    IsTakeOfSrc : 1,
+  static_assert(sizeof(SharedUInt8Fields) == sizeof(uint8_t),
+    "A SILNode's shared uint8 field is too large");
 
-    /// IsInitializationOfDest - True if this is the initialization of the
-    /// uninitialized destination memory location.
-    IsInitializationOfDest : 1
-  );
+  // clang-format off
+  union SharedUInt32Fields {
+    uint32_t opaque;
 
-  SWIFT_INLINE_BITFIELD(LoadReferenceInstBaseT, NonValueInstruction, 1,
-    IsTake : 1;
-    template<SILInstructionKind K>
-    friend class LoadReferenceInstBase
-  );
+    SHARED_TEMPLATE4_FIELD(SILInstructionKind, typename, typename, typename...,
+      InstructionBaseWithTrailingOperands, uint32_t numOperands);
+    SHARED_TEMPLATE_FIELD(typename, FieldIndexCacheBase, uint32_t fieldIndex);
+    SHARED_TEMPLATE_FIELD(typename, SwitchEnumInstBase, uint32_t numCases);
+    SHARED_FIELD(AllocStackInst, uint32_t numOperands);
+    SHARED_FIELD(EnumInst, uint32_t caseIndex);
+    SHARED_FIELD(UncheckedEnumDataInst, uint32_t caseIndex);
+    SHARED_FIELD(InjectEnumAddrInst, uint32_t caseIndex);
+    SHARED_FIELD(InitEnumDataAddrInst, uint32_t caseIndex);
+    SHARED_FIELD(UncheckedTakeEnumDataAddrInst, uint32_t caseIndex);
+    SHARED_FIELD(TupleExtractInst, uint32_t fieldNo);
+    SHARED_FIELD(TupleElementAddrInst, uint32_t fieldNo);
+    SHARED_FIELD(MultipleValueInstructionResult, uint32_t index);
+    SHARED_FIELD(IntegerLiteralInst, uint32_t numBits);
+    SHARED_FIELD(FloatLiteralInst, uint32_t numBits);
+    SHARED_FIELD(StringLiteralInst, uint32_t length);
+    SHARED_FIELD(PointerToAddressInst, uint32_t alignment);
+    SHARED_FIELD(SILFunctionArgument, uint32_t noImplicitCopy : 1,
+                 lifetimeAnnotation : 2, closureCapture : 1,
+                 parameterPack : 1, hasResultDependsOn : 1);
 
-  SWIFT_INLINE_BITFIELD(StoreReferenceInstBaseT, NonValueInstruction, 1,
-    IsInitializationOfDest : 1;
-    template<SILInstructionKind K>
-    friend class StoreReferenceInstBase
-  );
+    // Do not use `_sharedUInt32_private` outside of SILNode.
+  } _sharedUInt32_private;
+  // clang-format on
 
-  SWIFT_INLINE_BITFIELD(BeginAccessInst, SingleValueInstruction,
-                        NumSILAccessKindBits+NumSILAccessEnforcementBits
-                        + 1 + 1,
-    AccessKind : NumSILAccessKindBits,
-    Enforcement : NumSILAccessEnforcementBits,
-    NoNestedConflict : 1,
-    FromBuiltin : 1
-  );
-  SWIFT_INLINE_BITFIELD(BeginUnpairedAccessInst, NonValueInstruction,
-                        NumSILAccessKindBits + NumSILAccessEnforcementBits
-                        + 1 + 1,
-                        AccessKind : NumSILAccessKindBits,
-                        Enforcement : NumSILAccessEnforcementBits,
-                        NoNestedConflict : 1,
-                        FromBuiltin : 1);
+  static_assert(sizeof(SharedUInt32Fields) == sizeof(uint32_t),
+    "A SILNode's shared uint32 field is too large");
 
-  SWIFT_INLINE_BITFIELD(EndAccessInst, NonValueInstruction, 1,
-    Aborting : 1
-  );
-  SWIFT_INLINE_BITFIELD(EndUnpairedAccessInst, NonValueInstruction,
-                        NumSILAccessEnforcementBits + 1 + 1,
-                        Enforcement : NumSILAccessEnforcementBits,
-                        Aborting : 1,
-                        FromBuiltin : 1);
+#undef SHARED_FIELD
+#undef SHARED_TEMPLATE_FIELD
+#undef SHARED_TEMPLATE4_FIELD
 
-  SWIFT_INLINE_BITFIELD(StoreInst, NonValueInstruction,
-                        NumStoreOwnershipQualifierBits,
-    OwnershipQualifier : NumStoreOwnershipQualifierBits
-  );
-  SWIFT_INLINE_BITFIELD(LoadInst, SingleValueInstruction,
-                        NumLoadOwnershipQualifierBits,
-    OwnershipQualifier : NumLoadOwnershipQualifierBits
-  );
-  SWIFT_INLINE_BITFIELD(AssignInst, NonValueInstruction,
-                        NumAssignOwnershipQualifierBits,
-    OwnershipQualifier : NumAssignOwnershipQualifierBits
-  );
+  // Used for checking field overlaps between super and derived classes.
+  enum { SharedUInt8Used = 0 };
+  enum { SharedUInt32Used = 0 };
 
-  SWIFT_INLINE_BITFIELD(UncheckedOwnershipConversionInst,SingleValueInstruction,
-                        NumVOKindBits,
-    Kind : NumVOKindBits
-  );
+#define _USE_SHARED_UINT_BASE(T, SUPER) \
+  static_assert(SUPER == 0, \
+    "SILNode's shared " #T " already used in super class"); \
+  enum { Shared##T##Used = 1 }; \
+  SILNode::Shared##T##Fields &shared##T() { \
+    return SILNode::_shared##T##_private; \
+  } \
+  SILNode::Shared##T##Fields shared##T() const { \
+    return SILNode::_shared##T##_private; \
+  }
 
-  SWIFT_INLINE_BITFIELD_FULL(TupleExtractInst, SingleValueInstruction, 32,
-    : NumPadBits,
-    FieldNo : 32
-  );
-  SWIFT_INLINE_BITFIELD_FULL(TupleElementAddrInst, SingleValueInstruction, 32,
-    : NumPadBits,
-    FieldNo : 32
-  );
+/// To be used inside a SIL instruction/value class. It declares that the
+/// instruction/value uses the SILNode's shared uint8 field.
+#define USE_SHARED_UINT8 \
+  _USE_SHARED_UINT_BASE(UInt8, SharedUInt8Used)
 
-  SWIFT_INLINE_BITFIELD_EMPTY(MethodInst, SingleValueInstruction);
-  // Ensure that WitnessMethodInst bitfield does not overflow.
-  IBWTO_BITFIELD_EMPTY(WitnessMethodInst, MethodInst);
-  UIWTDOB_BITFIELD_EMPTY(ObjCMethodInst, MethodInst);
+/// To be used inside a SIL instruction/value class. It declares that the
+/// instruction/value uses the SILNode's shared uint32 field.
+#define USE_SHARED_UINT32 \
+  _USE_SHARED_UINT_BASE(UInt32, SharedUInt32Used)
 
-  SWIFT_INLINE_BITFIELD_EMPTY(ConversionInst, SingleValueInstruction);
-  SWIFT_INLINE_BITFIELD(PointerToAddressInst, ConversionInst, 1+1,
-    IsStrict : 1,
-    IsInvariant : 1
-  );
+/// To be used inside a template SILInstruction class. It declares that the
+/// instruction uses the SILNode's shared uint8 field. The `BASE` is the
+/// template argument which defines the super class of the instruction.
+#define TEMPLATE_USE_SHARED_UINT8(BASE) \
+  _USE_SHARED_UINT_BASE(UInt8, BASE::SharedUInt8Used)
 
-  UIWTDOB_BITFIELD(ConvertFunctionInst, ConversionInst, 1,
-                   WithoutActuallyEscaping : 1);
-  UIWTDOB_BITFIELD_EMPTY(PointerToThinFunctionInst, ConversionInst);
-  UIWTDOB_BITFIELD_EMPTY(UnconditionalCheckedCastInst, ConversionInst);
-  UIWTDOB_BITFIELD_EMPTY(UpcastInst, ConversionInst);
-  UIWTDOB_BITFIELD_EMPTY(UncheckedRefCastInst, ConversionInst);
-  UIWTDOB_BITFIELD_EMPTY(UncheckedAddrCastInst, ConversionInst);
-  UIWTDOB_BITFIELD_EMPTY(UncheckedTrivialBitCastInst, ConversionInst);
-  UIWTDOB_BITFIELD_EMPTY(UncheckedBitwiseCastInst, ConversionInst);
-  UIWTDOB_BITFIELD_EMPTY(ThinToThickFunctionInst, ConversionInst);
-  UIWTDOB_BITFIELD_EMPTY(UnconditionalCheckedCastValueInst, ConversionInst);
-  UIWTDOB_BITFIELD_EMPTY(InitExistentialAddrInst, SingleValueInstruction);
-  UIWTDOB_BITFIELD_EMPTY(InitExistentialValueInst, SingleValueInstruction);
-  UIWTDOB_BITFIELD_EMPTY(InitExistentialRefInst, SingleValueInstruction);
-  UIWTDOB_BITFIELD_EMPTY(InitExistentialMetatypeInst, SingleValueInstruction);
+/// To be used inside a template SILInstruction class. It declares that the
+/// instruction uses the SILNode's shared uint32 field. The `BASE` is the
+/// template argument which defines the super class of the instruction.
+#define TEMPLATE_USE_SHARED_UINT32(BASE) \
+  _USE_SHARED_UINT_BASE(UInt32, BASE::SharedUInt32Used)
 
-  SWIFT_INLINE_BITFIELD_EMPTY(TermInst, SILInstruction);
-  UIWTDOB_BITFIELD_EMPTY(CheckedCastBranchInst, SingleValueInstruction);
-  UIWTDOB_BITFIELD_EMPTY(CheckedCastValueBranchInst, SingleValueInstruction);
+  //===---------------------- end of shared fields ------------------------===//
 
-  // Ensure that BranchInst bitfield does not overflow.
-  IBWTO_BITFIELD_EMPTY(BranchInst, TermInst);
-  // Ensure that YieldInst bitfield does not overflow.
-  IBWTO_BITFIELD_EMPTY(YieldInst, TermInst);
-  IBWTO_BITFIELD(CondBranchInst, TermInst, 32-NumTermInstBits,
-    NumTrueArgs : 32-NumTermInstBits
-  );
-  IBWTO_BITFIELD(SwitchValueInst, TermInst, 1,
-    HasDefault : 1
-  );
-  SWIFT_INLINE_BITFIELD_FULL(SwitchEnumInstBase, TermInst, 1+32,
-    HasDefault : 1,
-    : NumPadBits,
-    NumCases : 32
-  );
-
-  } Bits;
-
-  enum class SILNodeStorageLocation : uint8_t { Value, Instruction };
-
-  enum class IsRepresentative : bool {
-    No = false,
-    Yes = true,
-  };
+  /// The NodeBitfield ID of the last initialized bitfield in `customBits`.
+  /// Example:
+  ///
+  ///                   Last initialized field:
+  ///           lastInitializedBitfieldID == C.bitfieldID
+  ///                              |
+  ///                              V
+  /// customBits:  <unused> EE DDD C BB AAA
+  ///              31         ...         0
+  ///
+  /// -> AAA, BB and C are initialized,
+  ///    DD and EEE are uninitialized
+  ///
+  /// If the ID is negative, it means that the node (in case it's an instruction)
+  /// is deleted, i.e. it does not belong to the function anymore. Conceptually
+  /// this results in setting all bitfields to zero, which e.g. "removes" the
+  /// node from all NodeSets.
+  ///
+  /// See also: SILBitfield::bitfieldID, SILFunction::currentBitfieldID.
+  int64_t lastInitializedBitfieldID = 0;
 
 private:
-
-  SILNodeStorageLocation getStorageLoc() const {
-    return SILNodeStorageLocation(Bits.SILNode.StorageLoc);
-  }
-
-  const SILNode *getRepresentativeSILNodeSlowPath() const;
+  SwiftMetatype getSILNodeMetatype(SILNodeKind kind);
 
 protected:
-  SILNode(SILNodeKind kind, SILNodeStorageLocation storageLoc,
-          IsRepresentative isRepresentative) {
-    Bits.OpaqueBits = 0;
-    Bits.SILNode.Kind = unsigned(kind);
-    Bits.SILNode.StorageLoc = unsigned(storageLoc);
-    Bits.SILNode.IsRepresentativeNode = unsigned(isRepresentative);
+  SILNode(SILNodeKind kind) : SwiftObjectHeader(getSILNodeMetatype(kind)),
+                              kind((uint8_t)kind) {
+    _sharedUInt8_private.opaque = 0;
+    _sharedUInt32_private.opaque = 0;
   }
+
+  // Used by `NodeBitfield`.
+  unsigned getCustomBits() const { return customBits; }
+  // Used by `NodeBitfield`.
+  void setCustomBits(unsigned value) { customBits = value; }
 
 public:
-  /// Does the given kind of node inherit from multiple multiple SILNode base
-  /// classes?
-  ///
-  /// This enables one to know if their is a diamond in the inheritence
-  /// hierarchy for this SILNode.
-  static bool hasMultipleSILNodeBases(SILNodeKind kind) {
-    // Currently only SingleValueInstructions.  Note that multi-result
-    // instructions shouldn't return true for this.
-    return kind >= SILNodeKind::First_SingleValueInstruction &&
-           kind <= SILNodeKind::Last_SingleValueInstruction;
-  }
-
-  /// Is this SILNode the representative SILNode subobject in this object?
-  bool isRepresentativeSILNodeInObject() const {
-    return Bits.SILNode.IsRepresentativeNode;
-  }
-
-  /// Return a pointer to the representative SILNode subobject in this object.
-  SILNode *getRepresentativeSILNodeInObject() {
-    if (isRepresentativeSILNodeInObject())
-      return this;
-    return const_cast<SILNode *>(getRepresentativeSILNodeSlowPath());
-  }
-
-  const SILNode *getRepresentativeSILNodeInObject() const {
-    if (isRepresentativeSILNodeInObject())
-      return this;
-    return getRepresentativeSILNodeSlowPath();
-  }
-
   LLVM_ATTRIBUTE_ALWAYS_INLINE
   SILNodeKind getKind() const {
-    return SILNodeKind(Bits.SILNode.Kind);
-  }
-
-  /// Return the SILNodeKind of this node's representative SILNode.
-  SILNodeKind getKindOfRepresentativeSILNodeInObject() const {
-    return getRepresentativeSILNodeInObject()->getKind();
+    return SILNodeKind(kind);
   }
 
   /// If this is a SILArgument or a SILInstruction get its parent basic block,
@@ -425,7 +415,7 @@ public:
   /// If this is a SILArgument or a SILInstruction get its parent module,
   /// otherwise return null.
   SILModule *getModule() const;
-
+  
   /// Pretty-print the node.  If the node is an instruction, the output
   /// will be valid SIL assembly; otherwise, it will be an arbitrary
   /// format suitable for debugging.
@@ -441,15 +431,28 @@ public:
   // Cast to SingleValueInstruction.  This is an implementation detail
   // of the cast machinery.  At a high level, all you need to know is to
   // never use static_cast to downcast a SILNode.
-  SingleValueInstruction *castToSingleValueInstruction();
-  const SingleValueInstruction *castToSingleValueInstruction() const {
-    return const_cast<SILNode*>(this)->castToSingleValueInstruction();
+  SILInstruction *castToInstruction();
+  const SILInstruction *castToInstruction() const;
+  
+  // Called when transferring basic blocks from one function to another.
+  void resetBitfields() {
+    lastInitializedBitfieldID = 0;
   }
 
-  static bool classof(const SILNode *node) {
-    return true;
+  void markAsDeleted() {
+    lastInitializedBitfieldID = -1;
   }
+
+  bool isMarkedAsDeleted() const { return lastInitializedBitfieldID < 0; }
+
+  static SILNode *instAsNode(SILInstruction *inst);
+  static const SILNode *instAsNode(const SILInstruction *inst);
+
+  static bool classof(SILNodePointer node) { return true; }
 };
+
+static_assert(sizeof(SILNode) <= 4 * sizeof(uint64_t),
+              "SILNode must stay small");
 
 inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
                                      const SILNode &node) {
@@ -457,67 +460,46 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
   return OS;
 }
 
-template <class To> struct cast_sil_node_is_unambiguous {
-  // The only ambiguity right now is between the value and instruction
-  // nodes on a SingleValueInstruction.
-  static constexpr bool value =
-    // If the destination type isn't a subclass of ValueBase or
-    // SILInstruction, there's no ambiguity.
-       (!std::is_base_of<SILInstruction, To>::value &&
-        !std::is_base_of<ValueBase, To>::value)
+// Simply do a pointer cast from a SILNode to a SILNode. This is always
+// possible, except the To-type is SILInstruction itself.
+template <class To>
+struct cast_from_SILNode {
+  static To *doit(SILNode *node) { return &static_cast<To&>(*node); }
+};
 
-    // If the destination type is a proper subclass of ValueBase
-    // that isn't a subclass of SILInstruction, there's no ambiguity.
-    || (std::is_base_of<ValueBase, To>::value &&
-        !std::is_same<ValueBase, To>::value &&
-        !std::is_base_of<SILInstruction, To>::value)
-
-    // If the destination type is a proper subclass of SILInstruction
-    // that isn't a subclass of ValueBase, there's no ambiguity.
-    || (std::is_base_of<SILInstruction, To>::value &&
-        !std::is_same<SILInstruction, To>::value &&
-        !std::is_base_of<ValueBase, To>::value);
+// Handle the special case of casting a SILNode to SILInstruction itself.
+// This does not apply to sub-classes of SILInstruction, because all sub-classes
+// from SILInstructions are derived from SILNode.
+template <>
+struct cast_from_SILNode<SILInstruction> {
+  static SILInstruction *doit(SILNode *node) {
+    return &static_cast<SILInstruction&>(*node->castToInstruction());
+  }
+};
+template <>
+struct cast_from_SILNode<const SILInstruction> {
+  static const SILInstruction *doit(SILNode *node) {
+    return &static_cast<SILInstruction&>(*node->castToInstruction());
+  }
 };
 
 template <class To,
-          bool IsSingleValueInstruction =
-            std::is_base_of<SingleValueInstruction, To>::value,
-          bool IsKnownUnambiguous =
-            cast_sil_node_is_unambiguous<To>::value>
-struct cast_sil_node;
+          bool IsSILInstruction = std::is_base_of<SILInstruction, To>::value>
+struct cast_from_SILInstruction;
 
-// If all complete objects of the destination type are known to only
-// contain a single node, we can just use a static_cast.
+// Simply do a pointer cast from a SILInstruction to a SILInstruction.
 template <class To>
-struct cast_sil_node<To, /*single value*/ false, /*unambiguous*/ true> {
-  static To *doit(SILNode *node) {
-    return &static_cast<To&>(*node);
+struct cast_from_SILInstruction<To, /*IsSILInstruction*/ true> {
+  static To *doit(SILInstruction *inst) {
+    return &static_cast<To&>(*inst);
   }
 };
 
-// If we're casting to a subclass of SingleValueInstruction, we don't
-// need to dynamically check whether the node is an SVI.  In fact,
-// we can't, because the static_cast will be ambiguous.
+// Cast from a SILInstruction to a SILNode, which is not a SILInstruction.
 template <class To>
-struct cast_sil_node<To, /*single value*/ true, /*unambiguous*/ false> {
-  static To *doit(SILNode *node) {
-    auto svi = node->castToSingleValueInstruction();
-    return &static_cast<To&>(*svi);
-  }
-};
-
-// Otherwise, we need to dynamically check which case we're in.
-template <class To>
-struct cast_sil_node<To, /*single value*/ false, /*unambiguous*/ false> {
-  static To *doit(SILNode *node) {
-    // If the node isn't dynamically a SingleValueInstruction, then this
-    // is indeed the SILNode subobject that's statically observable in To.
-    if (!SILNode::hasMultipleSILNodeBases(node->getKind())) {
-      return &static_cast<To&>(*node);
-    }
-
-    auto svi = node->castToSingleValueInstruction();
-    return &static_cast<To&>(*svi);
+struct cast_from_SILInstruction<To, /*IsSILInstruction*/ false> {
+  static To *doit(SILInstruction *inst) {
+    return &static_cast<To&>(*SILNode::instAsNode(inst));
   }
 };
 
@@ -525,20 +507,36 @@ struct cast_sil_node<To, /*single value*/ false, /*unambiguous*/ false> {
 
 namespace llvm {
 
-/// Completely take over cast<>'ing from SILNode*.  A static_cast to
-/// ValueBase* or SILInstruction* can be quite wrong.
+/// Completely take over cast<>'ing from SILNode* and SILInstruction*.
+/// A static_cast to ValueBase* or SILInstruction* can be quite wrong.
 template <class To>
 struct cast_convert_val<To, swift::SILNode*, swift::SILNode*> {
   using ret_type = typename cast_retty<To, swift::SILNode*>::ret_type;
   static ret_type doit(swift::SILNode *node) {
-    return swift::cast_sil_node<To>::doit(node);
+    return swift::cast_from_SILNode<To>::doit(node);
   }
 };
 template <class To>
 struct cast_convert_val<To, const swift::SILNode *, const swift::SILNode *> {
   using ret_type = typename cast_retty<To, const swift::SILNode*>::ret_type;
   static ret_type doit(const swift::SILNode *node) {
-    return swift::cast_sil_node<To>::doit(const_cast<swift::SILNode*>(node));
+    return swift::cast_from_SILNode<To>::doit(const_cast<swift::SILNode*>(node));
+  }
+};
+template <class To>
+struct cast_convert_val<To, swift::SILInstruction*, swift::SILInstruction*> {
+  using ret_type = typename cast_retty<To, swift::SILInstruction*>::ret_type;
+  static ret_type doit(swift::SILInstruction *inst) {
+    return swift::cast_from_SILInstruction<To>::doit(inst);
+  }
+};
+template <class To>
+struct cast_convert_val<To, const swift::SILInstruction *,
+                            const swift::SILInstruction *> {
+  using ret_type = typename cast_retty<To, const swift::SILInstruction*>::ret_type;
+  static ret_type doit(const swift::SILInstruction *inst) {
+    return swift::cast_from_SILInstruction<To>::
+             doit(const_cast<swift::SILInstruction*>(inst));
   }
 };
 

@@ -13,6 +13,7 @@
 #ifndef SWIFT_SEMA_MISC_DIAGNOSTICS_H
 #define SWIFT_SEMA_MISC_DIAGNOSTICS_H
 
+#include "swift/AST/ASTWalker.h"
 #include "swift/AST/AttrKind.h"
 #include "swift/AST/Pattern.h"
 #include "swift/AST/Expr.h"
@@ -26,27 +27,41 @@ namespace swift {
   class AbstractFunctionDecl;
   class ApplyExpr;
   class CallExpr;
+  class ClosureExpr;
+  enum ContextualTypePurpose : uint8_t;
   class DeclContext;
+  class Decl;
   class Expr;
   class InFlightDiagnostic;
   class Stmt;
   class TopLevelCodeDecl;
-  class TypeChecker;
   class ValueDecl;
+  class ForEachStmt;
+
+/// Diagnose any expressions that appear in an unsupported position. If visiting
+/// an expression directly, its \p contextualPurpose should be provided to
+/// evaluate its position.
+void diagnoseOutOfPlaceExprs(
+    ASTContext &ctx, ASTNode root,
+    llvm::Optional<ContextualTypePurpose> contextualPurpose);
 
 /// Emit diagnostics for syntactic restrictions on a given expression.
-void performSyntacticExprDiagnostics(TypeChecker &TC, const Expr *E,
-                                     const DeclContext *DC,
-                                     bool isExprStmt);
+///
+/// Note: \p contextualPurpose must be non-nil, unless
+/// \p disableOutOfPlaceExprChecking is set to \c true.
+void performSyntacticExprDiagnostics(
+    const Expr *E, const DeclContext *DC,
+    llvm::Optional<ContextualTypePurpose> contextualPurpose,
+    bool isExprStmt, bool disableExprAvailabilityChecking = false,
+    bool disableOutOfPlaceExprChecking = false);
 
 /// Emit diagnostics for a given statement.
-void performStmtDiagnostics(TypeChecker &TC, const Stmt *S);
+void performStmtDiagnostics(const Stmt *S, DeclContext *DC);
 
-void performAbstractFuncDeclDiagnostics(TypeChecker &TC,
-                                        AbstractFunctionDecl *AFD);
+void performAbstractFuncDeclDiagnostics(AbstractFunctionDecl *AFD);
 
 /// Perform diagnostics on the top level code declaration.
-void performTopLevelDeclDiagnostics(TypeChecker &TC, TopLevelCodeDecl *TLCD);
+void performTopLevelDeclDiagnostics(TopLevelCodeDecl *TLCD);
   
 /// Emit a fix-it to set the access of \p VD to \p desiredAccess.
 ///
@@ -57,48 +72,98 @@ void fixItAccess(InFlightDiagnostic &diag,
                  bool isForSetter = false,
                  bool shouldUseDefaultAccess = false);
 
-/// Emit fix-its to correct the argument labels in \p expr, which is the
-/// argument tuple or single argument of a call.
+/// Describes the context of a parameter, for use in diagnosing argument
+/// label problems.
+enum class ParameterContext: unsigned {
+  Call = 0,
+  Subscript = 1,
+  MacroExpansion = 2
+};
+
+/// Emit fix-its to correct the argument labels in \p argList.
 ///
 /// If \p existingDiag is null, the fix-its will be attached to an appropriate
 /// error diagnostic.
 ///
 /// \returns true if the issue was diagnosed
 bool diagnoseArgumentLabelError(ASTContext &ctx,
-                                const Expr *expr,
+                                const ArgumentList *argList,
                                 ArrayRef<Identifier> newNames,
-                                bool isSubscript,
+                                ParameterContext paramContext,
                                 InFlightDiagnostic *existingDiag = nullptr);
 
 /// If \p assignExpr has a destination expression that refers to a declaration
 /// with a non-owning attribute, such as 'weak' or 'unowned' and the initializer
 /// expression refers to a class constructor, emit a warning that the assigned
 /// instance will be immediately deallocated.
-void diagnoseUnownedImmediateDeallocation(TypeChecker &TC,
+void diagnoseUnownedImmediateDeallocation(ASTContext &ctx,
                                           const AssignExpr *assignExpr);
 
 /// If \p pattern binds to a declaration with a non-owning attribute, such as
 /// 'weak' or 'unowned' and \p initializer refers to a class constructor,
 /// emit a warning that the bound instance will be immediately deallocated.
-void diagnoseUnownedImmediateDeallocation(TypeChecker &TC,
+void diagnoseUnownedImmediateDeallocation(ASTContext &ctx,
                                           const Pattern *pattern,
                                           SourceLoc equalLoc,
                                           const Expr *initializer);
+
+/// If \p expr is a call to a known function with a requirement that some
+/// arguments must be constants, whether those arguments are passed only
+/// constants. Otherwise, diagnose and emit errors.
+void diagnoseConstantArgumentRequirement(const Expr *expr,
+                                         const DeclContext *declContext);
 
 /// Attempt to fix the type of \p decl so that it's a valid override for
 /// \p base...but only if we're highly confident that we know what the user
 /// should have written.
 ///
+/// The \p diag closure allows the caller to control the diagnostic that is
+/// emitted. It is passed true if the diagnostic will be emitted with fixits
+/// attached, and false otherwise. If None is returned, no diagnostics are
+/// emitted.  Else the fixits are attached to the returned diagnostic.
+///
 /// \returns true iff any fix-its were attached to \p diag.
-bool fixItOverrideDeclarationTypes(InFlightDiagnostic &diag,
-                                   ValueDecl *decl,
-                                   const ValueDecl *base);
+bool computeFixitsForOverriddenDeclaration(
+    ValueDecl *decl, const ValueDecl *base,
+    llvm::function_ref<llvm::Optional<InFlightDiagnostic>(bool)> diag);
 
 /// Emit fix-its to enclose trailing closure in argument parens.
-void fixItEncloseTrailingClosure(TypeChecker &TC,
+void fixItEncloseTrailingClosure(ASTContext &ctx,
                                  InFlightDiagnostic &diag,
                                  const CallExpr *call,
                                  Identifier closureLabel);
+
+/// Check that we use the async version of a function where available
+///
+/// If a completion-handler function is called from an async context and it has
+/// a '@available' attribute with renamed field pointing to an async function,
+/// we emit a diagnostic suggesting the async call.
+void checkFunctionAsyncUsage(AbstractFunctionDecl *decl);
+void checkPatternBindingDeclAsyncUsage(PatternBindingDecl *decl);
+
+/// Detect and diagnose a missing `try` in `for-in` loop sequence
+/// expression in async context (denoted with `await` keyword).
+bool diagnoseUnhandledThrowsInAsyncContext(DeclContext *dc,
+                                           ForEachStmt *forEach);
+
+class BaseDiagnosticWalker : public ASTWalker {
+  PreWalkAction walkToDeclPre(Decl *D) override;
+
+  bool shouldWalkIntoSeparatelyCheckedClosure(ClosureExpr *expr) override {
+    return false;
+  }
+
+  // Only emit diagnostics in the expansion of macros.
+  MacroWalking getMacroWalkingBehavior() const override {
+    return MacroWalking::Expansion;
+  }
+
+private:
+  static bool shouldWalkIntoDeclInClosureContext(Decl *D);
+};
+
+void diagnoseCopyableTypeContainingMoveOnlyType(
+    NominalTypeDecl *copyableNominalType);
 
 } // namespace swift
 

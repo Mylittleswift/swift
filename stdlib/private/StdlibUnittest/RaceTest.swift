@@ -39,12 +39,16 @@
 import SwiftPrivate
 import SwiftPrivateLibcExtras
 import SwiftPrivateThreadExtras
-#if os(macOS) || os(iOS)
+#if canImport(Darwin)
 import Darwin
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
+#elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif os(WASI)
+import WASILibc
 #elseif os(Windows)
-import MSVCRT
+import CRT
 import WinSDK
 #endif
 
@@ -335,6 +339,36 @@ public func evaluateObservationsAllEqual<T : Equatable>(_ observations: [T])
   return .pass
 }
 
+// WebAssembly/WASI doesn't support multi-threading yet
+#if os(WASI)
+public func runRaceTest<RT : RaceTestWithPerTrialData>(
+  _: RT.Type,
+  trials: Int,
+  timeoutInSeconds: Int? = nil,
+  threads: Int? = nil
+) {}
+public func runRaceTest<RT : RaceTestWithPerTrialData>(
+  _ test: RT.Type,
+  operations: Int,
+  timeoutInSeconds: Int? = nil,
+  threads: Int? = nil
+) {}
+public func consumeCPU(units amountOfWork: Int) {}
+public func runRaceTest(
+  trials: Int,
+  timeoutInSeconds: Int? = nil,
+  threads: Int? = nil,
+  invoking body: @escaping () -> Void
+) {}
+
+public func runRaceTest(
+  operations: Int,
+  timeoutInSeconds: Int? = nil,
+  threads: Int? = nil,
+  invoking body: @escaping () -> Void
+) {}
+#else
+
 struct _RaceTestAggregatedEvaluations : CustomStringConvertible {
   var passCount: Int = 0
   var passInterestingCount = [String: Int]()
@@ -517,7 +551,7 @@ class _InterruptibleSleep {
   var completed: Bool = false
 
   init() {
-    self.event = CreateEventW(nil, TRUE, FALSE, nil)
+    self.event = CreateEventW(nil, true, false, nil)
     precondition(self.event != nil)
   }
 
@@ -536,8 +570,8 @@ class _InterruptibleSleep {
 
   func wake() {
     guard completed == false else { return }
-    let result: BOOL = SetEvent(self.event)
-    precondition(result == TRUE)
+    let result: Bool = SetEvent(self.event)
+    precondition(result == true)
   }
 }
 #else
@@ -562,7 +596,9 @@ class _InterruptibleSleep {
       return
     }
 
-    var timeout = timeval(tv_sec: duration, tv_usec: 0)
+    // WebAssembly/WASI on wasm32 is the only 32-bit platform with Int64 time_t,
+    // needs an explicit conversion to `time_t` because of this.
+    var timeout = timeval(tv_sec: time_t(duration), tv_usec: 0)
 
     var readFDs = _stdlib_fd_set()
     var writeFDs = _stdlib_fd_set()
@@ -583,12 +619,6 @@ class _InterruptibleSleep {
     precondition(ret >= 0)
   }
 }
-#endif
-
-#if os(Windows)
-typealias ThreadHandle = HANDLE
-#else
-typealias ThreadHandle = pthread_t
 #endif
 
 public func runRaceTest<RT : RaceTestWithPerTrialData>(
@@ -754,3 +784,4 @@ public func runRaceTest(
     timeoutInSeconds: timeoutInSeconds, threads: threads)
 }
 
+#endif // os(WASI)

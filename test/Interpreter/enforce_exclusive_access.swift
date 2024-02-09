@@ -1,12 +1,12 @@
 // RUN: %empty-directory(%t)
-// RUN: %target-build-swift -Xfrontend -verify-sil-ownership -swift-version 4 %s -o %t/a.out -enforce-exclusivity=checked -Onone
+// RUN: %target-build-swift  -swift-version 4 %s -o %t/a.out -enforce-exclusivity=checked -Onone
 //
 // RUN: %target-codesign %t/a.out
 // RUN: %target-run %t/a.out
 // REQUIRES: executable_test
+// REQUIRES: thread_safe_runtime
 
-// Requires explicit swift-version 4.
-// UNSUPPORTED: swift_test_mode_optimize_none_with_implicit_dynamic
+// UNSUPPORTED: use_os_stdlib
 
 // Tests for traps at run time when enforcing exclusive access.
 
@@ -381,6 +381,58 @@ ExclusiveAccessTestSuite.test("directlyAppliedEscapingConflict") {
   _ = {
     modifyAndPerformEscaping(&localVal, closure: nestedModify)
   }()
+}
+
+// rdar://102056143 - recursive locals inside a mutating method
+// effectively capture self as inout even if they don't modify
+// self. This should not trigger a runtime trap.
+struct RecursiveLocalDuringMutation {
+  var flag: Bool = false
+
+  mutating func update() {
+    func local1(_ done: Bool) -> Bool {
+      if !done {
+        return local2()
+      }
+      return flag
+    }
+    func local2() -> Bool {
+      return local1(true)
+    }
+    flag = !local1(false)
+  }
+}
+
+ExclusiveAccessTestSuite.test("recursiveLocalDuringMutation") {
+  var v = RecursiveLocalDuringMutation()
+  v.update()
+  _blackHole(v.flag)
+}
+
+// rdar://102056143 - negative test. Make sure we still catch true
+// violations on recursive captures.
+struct RecursiveCaptureViolation {
+  func testBadness() -> Bool {
+    var flag = false
+    func local1(_ x: inout Bool) {
+      if !flag {
+        x = true
+        local2()
+      }
+    }
+    func local2() {
+      local1(&flag)
+    }
+    local2()
+    return flag
+  }
+}
+
+ExclusiveAccessTestSuite.test("recursiveCaptureViolation") {
+  var s = RecursiveCaptureViolation()
+  expectCrashLater()
+  s.testBadness()
+  _blackHole(s)
 }
 
 runAllTests()

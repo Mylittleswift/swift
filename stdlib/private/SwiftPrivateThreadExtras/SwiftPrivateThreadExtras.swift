@@ -15,12 +15,16 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
+#if canImport(Darwin)
 import Darwin
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
+#elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif os(WASI)
+import WASILibc
 #elseif os(Windows)
-import MSVCRT
+import CRT
 import WinSDK
 #endif
 
@@ -67,7 +71,7 @@ public typealias ThreadHandle = HANDLE
 #else
 public typealias ThreadHandle = pthread_t
 
-#if os(Linux) || os(Android)
+#if (os(Linux) && !canImport(Musl)) || os(Android)
 internal func _make_pthread_t() -> pthread_t {
   return pthread_t()
 }
@@ -98,6 +102,9 @@ public func _stdlib_thread_create_block<Argument, Result>(
   } else {
     return (0, ThreadHandle(bitPattern: threadID))
   }
+#elseif os(WASI)
+  // WASI environment is single-threaded
+  return (0, nil)
 #else
   var threadID = _make_pthread_t()
   let result = pthread_create(&threadID, nil,
@@ -117,17 +124,21 @@ public func _stdlib_thread_join<Result>(
 ) -> (CInt, Result?) {
 #if os(Windows)
   let result = WaitForSingleObject(thread, INFINITE)
-  if result == WAIT_OBJECT_0 {
-    var threadResult: DWORD = 0
-    GetExitCodeThread(thread, &threadResult)
-    CloseHandle(thread)
+  guard result == WAIT_OBJECT_0 else { return (CInt(result), nil) }
 
-    return (CInt(result),
-            UnsafeMutablePointer<DWORD>(&threadResult)
-                .withMemoryRebound(to: Result.self, capacity: 1){ $0.pointee })
-  } else {
-    return (CInt(result), nil)
+  var dwResult: DWORD = 0
+  GetExitCodeThread(thread, &dwResult)
+  CloseHandle(thread)
+
+  let value: Result = withUnsafePointer(to: &dwResult) {
+    $0.withMemoryRebound(to: Result.self, capacity: 1) {
+      $0.pointee
+    }
   }
+  return (CInt(result), value)
+#elseif os(WASI)
+   // WASI environment has a only single thread
+   return (0, nil)
 #else
   var threadResultRawPtr: UnsafeMutableRawPointer?
   let result = pthread_join(thread, &threadResultRawPtr)
@@ -162,10 +173,7 @@ public class _stdlib_Barrier {
   }
 
   deinit {
-    let ret = _stdlib_thread_barrier_destroy(_threadBarrierPtr)
-    if ret != 0 {
-      fatalError("_stdlib_thread_barrier_destroy() failed")
-    }
+    _stdlib_thread_barrier_destroy(_threadBarrierPtr)
   }
 
   public func wait() {

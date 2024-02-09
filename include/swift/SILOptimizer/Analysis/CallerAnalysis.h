@@ -17,11 +17,9 @@
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SILOptimizer/Analysis/Analysis.h"
-#include "swift/SILOptimizer/Utils/Local.h"
-#include "llvm/ADT/ArrayRef.h"
+#include "swift/SILOptimizer/Utils/InstOptUtils.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallSet.h"
-#include "llvm/ADT/TinyPtrVector.h"
 
 namespace swift {
 
@@ -93,12 +91,7 @@ public:
 
   /// Notify the analysis about a function which will be deleted from the
   /// module.
-  void notifyWillDeleteFunction(SILFunction *f) override {
-    invalidateAllInfo(f);
-    recomputeFunctionList.remove(f);
-    // Now that we have invalidated all references to the function, delete it.
-    funcInfos.erase(f);
-  }
+  void notifyWillDeleteFunction(SILFunction *f) override;
 
   /// Notify the analysis about changed witness or vtables.
   ///
@@ -109,10 +102,12 @@ public:
 
   /// Look up the function info that we have stored for f, recomputing all
   /// invalidating parts of the call graph.
+  ///
+  /// Warning: The returned FunctionInfo is only alive until the next call to
+  /// `getFunctionInfo`.
   const FunctionInfo &getFunctionInfo(SILFunction *f) const;
 
-  LLVM_ATTRIBUTE_DEPRECATED(void dump() const LLVM_ATTRIBUTE_USED,
-                            "Only for use in the debugger");
+  SWIFT_DEBUG_DUMP;
 
   /// Print the state of the caller analysis as a sequence of yaml documents for
   /// each callee we are tracking.
@@ -120,9 +115,7 @@ public:
 
   /// Print the state of the caller analysis as a sequence of yaml documents for
   /// each callee we are tracking to the passed in file path.
-  LLVM_ATTRIBUTE_DEPRECATED(void print(const char *filePath)
-                                const LLVM_ATTRIBUTE_USED,
-                            "Only for use in the debugger");
+  SWIFT_DEBUG_DUMPER(print(const char *filePath));
 
   void verify() const override;
   void verify(SILFunction *f) const override;
@@ -151,7 +144,7 @@ private:
   void invalidateKnownCallees(SILFunction *caller, FunctionInfo &callerInfo);
 
   /// Invalidate both the known callees of f and the known callers of f.
-  void invalidateAllInfo(SILFunction *f);
+  void invalidateAllInfo(SILFunction *f, FunctionInfo &fInfo);
 
   /// Helper method that reprocesses all elements of recomputeFunctionList and
   /// then clears the function list.
@@ -187,7 +180,7 @@ private:
   void verify(SILFunction *caller, const FunctionInfo &callerInfo) const;
 };
 
-/// Auxillary information that we store about a specific caller.
+/// Auxiliary information that we store about a specific caller.
 struct CallerAnalysis::CallerInfo {
   /// Given a SILFunction F that contains at least one partial apply of the
   /// given function, map F to the minimum number of partial applied
@@ -217,9 +210,9 @@ struct CallerAnalysis::CallerInfo {
   /// indirectly. That is a separate query that is type system specific.
   bool isDirectCallerSetComplete : 1;
 
-  Optional<unsigned> getNumPartiallyAppliedArguments() const {
+  llvm::Optional<unsigned> getNumPartiallyAppliedArguments() const {
     if (!hasPartiallyAppliedArguments) {
-      return None;
+      return llvm::None;
     }
 
     auto *x = reinterpret_cast<const uint16_t *>(numPartiallyAppliedArguments);
@@ -278,6 +271,10 @@ class CallerAnalysis::FunctionInfo {
   /// visibility of a protocol conformance or class.
   bool mayHaveIndirectCallers : 1;
 
+  /// Whether the function is sufficiently visible to be called by a different
+  /// module.
+  bool mayHaveExternalCallers : 1;
+
 public:
   FunctionInfo(SILFunction *f);
 
@@ -289,7 +286,8 @@ public:
   /// function (e.g. a specialized function) without needing to introduce a
   /// thunk since we can rewrite all of the callers to call the new function.
   bool foundAllCallers() const {
-    return hasOnlyCompleteDirectCallerSets() && !mayHaveIndirectCallers;
+    return hasOnlyCompleteDirectCallerSets() && !mayHaveIndirectCallers &&
+           !mayHaveExternalCallers;
   }
 
   /// Returns true if this function has at least one direct caller.
@@ -319,7 +317,7 @@ public:
     for (const auto &iter : callerStates) {
       if (auto numArgs = iter.second.getNumPartiallyAppliedArguments()) {
         foundArg = true;
-        minArgs = std::min(minArgs, numArgs.getValue());
+        minArgs = std::min(minArgs, numArgs.value());
       }
     }
 
@@ -344,8 +342,7 @@ public:
     return llvm::make_range(callerStates.begin(), callerStates.end());
   }
 
-  LLVM_ATTRIBUTE_DEPRECATED(void dump() const LLVM_ATTRIBUTE_USED,
-                            "Only for use in the debugger");
+  SWIFT_DEBUG_DUMP;
 
   void print(llvm::raw_ostream &os) const;
 };

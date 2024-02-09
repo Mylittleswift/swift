@@ -14,15 +14,15 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef __SWIFT_ABI_KEYPATH_H__
-#define __SWIFT_ABI_KEYPATH_H__
+#ifndef SWIFT_ABI_KEYPATH_H
+#define SWIFT_ABI_KEYPATH_H
 
 // We include the basic constants in a shim header so that it can be shared with
 // the Swift implementation in the standard library.
 
 #include <cstdint>
 #include <cassert>
-#include "../../../stdlib/public/SwiftShims/KeyPath.h"
+#include "swift/shims/KeyPath.h"
 
 namespace swift {
 
@@ -192,6 +192,7 @@ public:
   
   enum ComputedPropertyIDResolution {
     Resolved,
+    ResolvedAbsolute,
     IndirectPointer,
     FunctionCall,
   };
@@ -214,6 +215,7 @@ public:
            ? _SwiftKeyPathComponentHeader_ComputedIDByVTableOffsetFlag : 0)
       | (hasArguments ? _SwiftKeyPathComponentHeader_ComputedHasArgumentsFlag : 0)
       | (resolution == Resolved ? _SwiftKeyPathComponentHeader_ComputedIDResolved
+       : resolution == ResolvedAbsolute ? _SwiftKeyPathComponentHeader_ComputedIDResolvedAbsolute
        : resolution == IndirectPointer ? _SwiftKeyPathComponentHeader_ComputedIDUnresolvedIndirectPointer
        : resolution == FunctionCall ? _SwiftKeyPathComponentHeader_ComputedIDUnresolvedFunctionCall
        : (assert(false && "invalid resolution"), 0)));
@@ -235,4 +237,4 @@ public:
 
 }
 
-#endif
+#endif // SWIFT_ABI_KEYPATH_H

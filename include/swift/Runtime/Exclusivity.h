@@ -40,6 +40,7 @@ SWIFT_RUNTIME_EXPORT
 void swift_beginAccess(void *pointer, ValueBuffer *buffer,
                        ExclusivityFlags flags, void *pc);
 
+
 /// Stop dynamically tracking an access.
 SWIFT_RUNTIME_EXPORT
 void swift_endAccess(ValueBuffer *buffer);
@@ -68,6 +69,51 @@ bool _swift_disableExclusivityChecking;
 /// happen. This eases debugging.
 SWIFT_RUNTIME_EXPORT
 void swift_dumpTrackedAccesses();
+
+#endif
+
+#ifdef SWIFT_COMPATIBILITY56
+/// Backdeploy56 shim calls swift_task_enterThreadLocalContext if it is
+/// available in the underlying runtime, otherwise does nothing
+__attribute__((visibility("hidden"), weak))
+void swift_task_enterThreadLocalContextBackdeploy56(char *state);
+
+/// Backdeploy56 shim calls swift_task_exitThreadLocalContext if it is available
+/// in the underlying runtime, otherwise does nothing
+__attribute__((visibility("hidden"), weak))
+void swift_task_exitThreadLocalContextBackdeploy56(char *state);
+#else
+
+// When building the concurrency library for back deployment, we rename these
+// symbols uniformly so they don't conflict with the real concurrency library.
+#ifdef SWIFT_CONCURRENCY_BACK_DEPLOYMENT
+#  define swift_task_enterThreadLocalContext swift_task_enterThreadLocalContextBackDeploy
+#  define swift_task_exitThreadLocalContext swift_task_exitThreadLocalContextBackDeploy
+#endif
+
+/// Called when a task inits, resumes and returns control to caller synchronous
+/// code to update any exclusivity specific state associated with the task.
+///
+/// State is assumed to point to a buffer of memory with
+/// swift_task_threadLocalContextSize bytes that was initialized with
+/// swift_task_initThreadLocalContext.
+///
+/// We describe the algorithm in detail on SwiftTaskThreadLocalContext in
+/// Exclusivity.cpp.
+SWIFT_RUNTIME_EXPORT
+void swift_task_enterThreadLocalContext(char *state);
+
+/// Called when a task suspends and returns control to caller synchronous code
+/// to update any exclusivity specific state associated with the task.
+///
+/// State is assumed to point to a buffer of memory with
+/// swift_task_threadLocalContextSize bytes that was initialized with
+/// swift_task_initThreadLocalContext.
+///
+/// We describe the algorithm in detail on SwiftTaskThreadLocalContext in
+/// Exclusivity.cpp.
+SWIFT_RUNTIME_EXPORT
+void swift_task_exitThreadLocalContext(char *state);
 
 #endif
 

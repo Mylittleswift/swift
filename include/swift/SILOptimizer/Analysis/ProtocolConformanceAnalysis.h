@@ -21,7 +21,6 @@
 #include "swift/SILOptimizer/Analysis/Analysis.h"
 #include "swift/SILOptimizer/Analysis/ClassHierarchyAnalysis.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 
@@ -40,9 +39,7 @@ public:
       SoleConformingTypeMap;
 
   ProtocolConformanceAnalysis(SILModule *Mod)
-      : SILAnalysis(SILAnalysisKind::ProtocolConformance), M(Mod) {
-    init();
-  }
+      : SILAnalysis(SILAnalysisKind::ProtocolConformance), M(Mod) {}
 
   ~ProtocolConformanceAnalysis();
 
@@ -67,14 +64,15 @@ public:
   virtual void invalidateFunctionTables() override {}
 
   /// Get the nominal types that implement a protocol.
-  ArrayRef<NominalTypeDecl *> getConformances(const ProtocolDecl *P) const {
-    auto ConformsListIt = ProtocolConformanceCache.find(P);
-    return ConformsListIt != ProtocolConformanceCache.end()
+  ArrayRef<NominalTypeDecl *> getConformances(const ProtocolDecl *P) {
+    populateConformanceCacheIfNecessary();
+    auto ConformsListIt = ProtocolConformanceCache->find(P);
+    return ConformsListIt != ProtocolConformanceCache->end()
                ? ArrayRef<NominalTypeDecl *>(ConformsListIt->second.begin(),
                                              ConformsListIt->second.end())
                : ArrayRef<NominalTypeDecl *>();
   }
-  
+
   /// Traverse ProtocolConformanceMapCache recursively to determine sole
   /// conforming concrete type. 
   NominalTypeDecl *findSoleConformingType(ProtocolDecl *Protocol);
@@ -84,17 +82,17 @@ public:
   bool getSoleConformingType(ProtocolDecl *Protocol, ClassHierarchyAnalysis *CHA, CanType &ConcreteType);
 
 private:
-  /// Compute inheritance properties.
-  void init();
-
   /// The module.
   SILModule *M;
 
   /// A cache that maps a protocol to its conformances.
-  ProtocolConformanceMap ProtocolConformanceCache;
+  llvm::Optional<ProtocolConformanceMap> ProtocolConformanceCache;
 
   /// A cache that holds SoleConformingType for protocols.
   SoleConformingTypeMap SoleConformingTypeCache;
+
+  /// Populates `ProtocolConformanceCache` if necessary.
+  void populateConformanceCacheIfNecessary();
 };
 
 } // namespace swift

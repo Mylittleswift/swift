@@ -28,12 +28,13 @@ static NominalTypeDecl *getNominalParent(const ValueDecl *D) {
 static bool isUnitTestCase(const ClassDecl *D) {
   if (!D)
     return false;
-  while (auto *SuperD = D->getSuperclassDecl()) {
-    if (SuperD->getNameStr() == "XCTestCase")
-      return true;
-    D = SuperD;
-  }
-  return false;
+
+  return D->walkSuperclasses([D](ClassDecl *SuperD) {
+    if (SuperD != D && // Do not treat XCTestCase itself as a test.
+        SuperD->getNameStr() == "XCTestCase")
+      return TypeWalker::Action::Stop; // Found test; stop and return true.
+    return TypeWalker::Action::Continue;
+  });
 }
 
 static bool isUnitTest(const ValueDecl *D) {
@@ -74,7 +75,7 @@ static bool isUnitTest(const ValueDecl *D) {
     return false;
 
   // 6. ...and starts with "test".
-  if (FD->getName().str().startswith("test"))
+  if (FD->getBaseIdentifier().str().startswith("test"))
     return true;
 
   return false;
@@ -83,7 +84,8 @@ static bool isUnitTest(const ValueDecl *D) {
 static void setFuncSymbolInfo(const FuncDecl *FD, SymbolInfo &sym) {
   sym.Kind = SymbolKind::Function;
 
-  if (FD->getAttrs().hasAttribute<IBActionAttr>())
+  if (FD->getAttrs().hasAttribute<IBActionAttr>() ||
+      FD->getAttrs().hasAttribute<IBSegueActionAttr>())
     sym.Properties |= SymbolProperty::IBAnnotated;
 
   if (isUnitTest(FD))
@@ -141,7 +143,7 @@ SymbolInfo index::getSymbolInfoForModule(ModuleEntity Mod) {
   info.SubKind = SymbolSubKind::None;
   info.Properties = SymbolPropertySet();
   if (auto *D = Mod.getAsSwiftModule()) {
-    if (!D->isClangModule()) {
+    if (!D->isNonSwiftModule()) {
       info.Lang = SymbolLanguage::Swift;
     } else {
       info.Lang = SymbolLanguage::C;
@@ -158,9 +160,15 @@ SymbolInfo index::getSymbolInfoForDecl(const Decl *D) {
   SymbolInfo info{ SymbolKind::Unknown, SymbolSubKind::None,
                    SymbolLanguage::Swift, SymbolPropertySet() };
   switch (D->getKind()) {
-    case DeclKind::Enum:             info.Kind = SymbolKind::Enum; break;
-    case DeclKind::Struct:           info.Kind = SymbolKind::Struct; break;
-    case DeclKind::Protocol:         info.Kind = SymbolKind::Protocol; break;
+    case DeclKind::Enum:
+      info.Kind = SymbolKind::Enum;
+      break;
+    case DeclKind::Struct:
+      info.Kind = SymbolKind::Struct;
+      break;
+    case DeclKind::Protocol:
+      info.Kind = SymbolKind::Protocol;
+      break;
     case DeclKind::Class:
       info.Kind = SymbolKind::Class;
       if (isUnitTestCase(cast<ClassDecl>(D)))
@@ -223,6 +231,10 @@ SymbolInfo index::getSymbolInfoForDecl(const Decl *D) {
     case DeclKind::PostfixOperator:
       break;
 
+    case DeclKind::Macro:
+      info.Kind = SymbolKind::Macro;
+      break;
+
     // These all reflect some sort of uninteresting syntactic structure
     // and don't merit indexing.
     case DeclKind::Import:
@@ -231,13 +243,22 @@ SymbolInfo index::getSymbolInfoForDecl(const Decl *D) {
     case DeclKind::TopLevelCode:
     case DeclKind::IfConfig:
     case DeclKind::PoundDiagnostic:
+    case DeclKind::Missing:
     case DeclKind::MissingMember:
     case DeclKind::Module:
+    case DeclKind::OpaqueType:
+    case DeclKind::BuiltinTuple:
+    case DeclKind::MacroExpansion:
       break;
   }
 
   if (isLocalSymbol(D)) {
     info.Properties |= SymbolProperty::Local;
+  }
+
+  if (auto *FD = dyn_cast<AbstractFunctionDecl>(D)) {
+    if (FD->hasAsync())
+      info.Properties |= SymbolProperty::SwiftAsync;
   }
 
   return info;
@@ -254,6 +275,7 @@ SymbolSubKind index::getSubKindForAccessor(AccessorKind AK) {
     return SymbolSubKind::SwiftAccessorMutableAddressor;
   case AccessorKind::Read:      return SymbolSubKind::SwiftAccessorRead;
   case AccessorKind::Modify:    return SymbolSubKind::SwiftAccessorModify;
+  case AccessorKind::Init:      return SymbolSubKind::SwiftAccessorInit;
   }
 
   llvm_unreachable("Unhandled AccessorKind in switch.");

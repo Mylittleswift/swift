@@ -18,6 +18,7 @@
 #include "swift/Driver/FrontendUtil.h"
 #include "swift/Frontend/Frontend.h"
 #include "swift/Frontend/PrintingDiagnosticConsumer.h"
+#include "swift/Sema/IDETypeChecking.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/Support/YAMLTraits.h"
@@ -393,7 +394,6 @@ struct TypealiasDecl {
 
 struct AssociatedTypeDecl {
   Identifier Name;
-  Optional<TypeName> Superclass;
   Optional<TypeName> DefaultDefinition;
   DeclAttributes Attributes;
 };
@@ -602,7 +602,6 @@ template <> struct MappingTraits<::swift::sma::TypealiasDecl> {
 template <> struct MappingTraits<::swift::sma::AssociatedTypeDecl> {
   static void mapping(IO &io, ::swift::sma::AssociatedTypeDecl &ATD) {
     io.mapRequired("Name", ATD.Name);
-    io.mapOptional("Superclass", ATD.Superclass);
     io.mapOptional("DefaultDefinition", ATD.DefaultDefinition);
     io.mapOptional("Attributes", ATD.Attributes,
                    ::swift::sma::DeclAttributes());
@@ -731,21 +730,21 @@ public:
 
   llvm::Optional<sma::TypeName> convertToOptionalTypeName(Type T) const {
     if (!T)
-      return None;
+      return llvm::None;
     return convertToTypeName(T);
   }
 
   llvm::Optional<sma::GenericSignature>
-  convertToGenericSignature(GenericSignature *GS) {
+  convertToGenericSignature(GenericSignature GS) {
     if (!GS)
-      return None;
+      return llvm::None;
     sma::GenericSignature ResultGS;
-    for (auto *GTPT : GS->getGenericParams()) {
+    for (auto *GTPT : GS.getGenericParams()) {
       sma::GenericParam ResultGP;
       ResultGP.Name = convertToIdentifier(GTPT->getName());
       ResultGS.GenericParams.emplace_back(std::move(ResultGP));
     }
-    for (auto &Req : GS->getRequirements()) {
+    for (auto &Req : GS.getRequirements()) {
       switch (Req.getKind()) {
       case RequirementKind::Superclass:
       case RequirementKind::Conformance:
@@ -755,6 +754,7 @@ public:
                 convertToTypeName(Req.getSecondType())});
         break;
       case RequirementKind::Layout:
+      case RequirementKind::SameShape:
         // FIXME
         assert(false && "Not implemented");
         break;
@@ -773,7 +773,7 @@ public:
     std::vector<sma::TypeName> Result;
     Result.reserve(AllProtocols.size());
     for (const auto *PD : AllProtocols) {
-      Result.emplace_back(convertToTypeName(PD->getDeclaredType()));
+      Result.emplace_back(convertToTypeName(PD->getDeclaredInterfaceType()));
     }
     return Result;
   }
@@ -833,7 +833,7 @@ public:
   void visitTypeAliasDecl(TypeAliasDecl *TAD) {
     auto ResultTD = std::make_shared<sma::TypealiasDecl>();
     ResultTD->Name = convertToIdentifier(TAD->getName());
-    ResultTD->Type = convertToTypeName(TAD->getUnderlyingTypeLoc().getType());
+    ResultTD->Type = convertToTypeName(TAD->getUnderlyingType());
     // FIXME
     // ResultTD->Attributes = ?;
     Result.Typealiases.emplace_back(std::move(ResultTD));
@@ -842,7 +842,6 @@ public:
   void visitAssociatedTypeDecl(AssociatedTypeDecl *ATD) {
     auto ResultATD = std::make_shared<sma::AssociatedTypeDecl>();
     ResultATD->Name = convertToIdentifier(ATD->getName());
-    ResultATD->Superclass = convertToOptionalTypeName(ATD->getSuperclass());
     ResultATD->DefaultDefinition =
         convertToOptionalTypeName(ATD->getDefaultDefinitionType());
     // FIXME
@@ -877,7 +876,7 @@ public:
 
 std::shared_ptr<sma::Module> createSMAModel(ModuleDecl *M) {
   SmallVector<Decl *, 1> Decls;
-  M->getDisplayDecls(Decls);
+  swift::getTopLevelDeclsForDisplay(M, Decls);
 
   SMAModelGenerator Generator;
   for (auto *D : Decls) {
@@ -897,7 +896,8 @@ std::shared_ptr<sma::Module> createSMAModel(ModuleDecl *M) {
 
 } // unnamed namespace
 
-int swift::doGenerateModuleAPIDescription(StringRef MainExecutablePath,
+int swift::doGenerateModuleAPIDescription(StringRef DriverPath,
+                                          StringRef MainExecutablePath,
                                           ArrayRef<std::string> Args) {
   std::vector<const char *> CStringArgs;
   for (auto &S : Args) {
@@ -911,9 +911,10 @@ int swift::doGenerateModuleAPIDescription(StringRef MainExecutablePath,
 
   CompilerInvocation Invocation;
   bool HadError = driver::getSingleFrontendInvocationFromDriverArguments(
-      CStringArgs, Diags, [&](ArrayRef<const char *> FrontendArgs) {
-    return Invocation.parseArgs(FrontendArgs, Diags);
-  });
+      MainExecutablePath, CStringArgs, Diags,
+      [&](ArrayRef<const char *> FrontendArgs) {
+        return Invocation.parseArgs(FrontendArgs, Diags);
+      });
 
   if (HadError) {
     llvm::errs() << "error: unable to create a CompilerInvocation\n";
@@ -924,15 +925,17 @@ int swift::doGenerateModuleAPIDescription(StringRef MainExecutablePath,
 
   CompilerInstance CI;
   CI.addDiagnosticConsumer(&PDC);
-  if (CI.setup(Invocation))
+  std::string InstanceSetupError;
+  if (CI.setup(Invocation, InstanceSetupError)) {
+    llvm::errs() << InstanceSetupError << '\n';
     return 1;
+  }
   CI.performSema();
 
-  PrintOptions Options = PrintOptions::printEverything();
+  PrintOptions Options = PrintOptions::printDeclarations();
 
   ModuleDecl *M = CI.getMainModule();
-  M->getMainSourceFile(Invocation.getSourceFileKind()).print(llvm::outs(),
-                                                             Options);
+  M->getMainSourceFile().print(llvm::outs(), Options);
 
   auto SMAModel = createSMAModel(M);
   llvm::yaml::Output YOut(llvm::outs());
@@ -940,4 +943,3 @@ int swift::doGenerateModuleAPIDescription(StringRef MainExecutablePath,
 
   return 0;
 }
-

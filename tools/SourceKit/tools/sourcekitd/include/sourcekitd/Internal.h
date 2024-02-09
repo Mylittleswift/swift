@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2022 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -13,10 +13,7 @@
 #ifndef LLVM_SOURCEKITD_INTERNAL_H
 #define LLVM_SOURCEKITD_INTERNAL_H
 
-#if defined (_MSC_VER)
-# define SOURCEKITD_PUBLIC __declspec(dllexport)
-#endif
-
+#include "SourceKit/Support/CancellationToken.h"
 #include "sourcekitd/sourcekitd.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/STLExtras.h"
@@ -44,8 +41,9 @@ bool sourcekitd_variant_array_apply_impl(
 
 namespace sourcekitd {
 
-using llvm::Optional;
 using llvm::None;
+using llvm::Optional;
+using SourceKit::SourceKitCancellationToken;
 
 // The IPC protocol version. This can be queried via a request.
 static const unsigned ProtocolMajorVersion = 1;
@@ -60,6 +58,7 @@ enum class CustomBufferKind {
   DocStructureElementArray,
   AttributesArray,
   ExpressionTypeArray,
+  VariableTypeArray,
   RawData
 };
 
@@ -83,10 +82,11 @@ public:
     void set(SourceKit::UIdent Key, int64_t val);
     void set(SourceKit::UIdent Key, llvm::ArrayRef<llvm::StringRef> Strs);
     void set(SourceKit::UIdent Key, llvm::ArrayRef<std::string> Strs);
+    void set(SourceKit::UIdent Key, llvm::ArrayRef<SourceKit::UIdent> UIDs);
     void setBool(SourceKit::UIdent Key, bool val);
     Array setArray(SourceKit::UIdent Key);
     Dictionary setDictionary(SourceKit::UIdent Key);
-    void setCustomBuffer(SourceKit::UIdent Key, CustomBufferKind Kind,
+    void setCustomBuffer(SourceKit::UIdent Key,
                          std::unique_ptr<llvm::MemoryBuffer> MemBuf);
 
   private:
@@ -124,11 +124,17 @@ class RequestDict {
   sourcekitd_object_t Dict;
 
 public:
-  explicit RequestDict(sourcekitd_object_t Dict) : Dict(Dict) {}
+  explicit RequestDict(sourcekitd_object_t Dict) : Dict(Dict) {
+    sourcekitd_request_retain(Dict);
+  }
+  RequestDict(const RequestDict &other) : RequestDict(other.Dict) {}
+  ~RequestDict() {
+    sourcekitd_request_release(Dict);
+  }
 
-  sourcekitd_uid_t getUID(SourceKit::UIdent Key);
-  Optional<llvm::StringRef> getString(SourceKit::UIdent Key);
-  Optional<RequestDict> getDictionary(SourceKit::UIdent Key);
+  sourcekitd_uid_t getUID(SourceKit::UIdent Key) const;
+  Optional<llvm::StringRef> getString(SourceKit::UIdent Key) const;
+  Optional<RequestDict> getDictionary(SourceKit::UIdent Key) const;
 
   /// Populate the vector with an array of C strings.
   /// \param isOptional true if the key is optional. If false and the key is
@@ -137,45 +143,39 @@ public:
   /// the array does not contain strings.
   bool getStringArray(SourceKit::UIdent Key,
                       llvm::SmallVectorImpl<const char *> &Arr,
-                      bool isOptional);
+                      bool isOptional) const;
   bool getUIDArray(SourceKit::UIdent Key,
                    llvm::SmallVectorImpl<sourcekitd_uid_t> &Arr,
-                   bool isOptional);
+                   bool isOptional) const;
 
-  bool dictionaryArrayApply(SourceKit::UIdent key,
-                            llvm::function_ref<bool(RequestDict)> applier);
+  bool
+  dictionaryArrayApply(SourceKit::UIdent key,
+                       llvm::function_ref<bool(RequestDict)> applier) const;
 
-  bool getInt64(SourceKit::UIdent Key, int64_t &Val, bool isOptional);
-  Optional<int64_t> getOptionalInt64(SourceKit::UIdent Key);
+  bool getInt64(SourceKit::UIdent Key, int64_t &Val, bool isOptional) const;
+  Optional<int64_t> getOptionalInt64(SourceKit::UIdent Key) const;
 };
 
-void initialize();
-void shutdown();
+/// Initialize the sourcekitd client library. Returns true if this is the first
+/// time it is initialized.
+bool initializeClient();
+/// Shutdown the sourcekitd client. Returns true if this is the last active
+/// client and the service should be shutdown.
+bool shutdownClient();
+
 void set_interrupted_connection_handler(llvm::function_ref<void()> handler);
-
-typedef std::function<void(sourcekitd_response_t)> ResponseReceiver;
-
-void handleRequest(sourcekitd_object_t Request, ResponseReceiver Receiver);
 
 void printRequestObject(sourcekitd_object_t Obj, llvm::raw_ostream &OS);
 void printResponse(sourcekitd_response_t Resp, llvm::raw_ostream &OS);
 
-sourcekitd_response_t createErrorRequestInvalid(const char *Description);
-sourcekitd_response_t createErrorRequestFailed(const char *Description);
-sourcekitd_response_t createErrorRequestInterrupted(const char *Description);
+sourcekitd_response_t createErrorRequestInvalid(llvm::StringRef Description);
+sourcekitd_response_t createErrorRequestFailed(llvm::StringRef Description);
+sourcekitd_response_t createErrorRequestInterrupted(llvm::StringRef Descr);
 sourcekitd_response_t createErrorRequestCancelled();
-
-/// Send notification object.
-/// The ownership of the object is transferred to the function.
-void postNotification(sourcekitd_response_t Notification);
 
 // The client & service have their own implementations for these.
 sourcekitd_uid_t SKDUIDFromUIdent(SourceKit::UIdent UID);
 SourceKit::UIdent UIdentFromSKDUID(sourcekitd_uid_t uid);
-
-std::string getRuntimeLibPath();
-
-void writeEscaped(llvm::StringRef Str, llvm::raw_ostream &OS);
 
 static inline sourcekitd_variant_t makeNullVariant() {
   return {{ 0, 0, 0 }};

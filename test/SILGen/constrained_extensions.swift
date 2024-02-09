@@ -44,7 +44,7 @@ extension Array where Element == Int {
 
   // CHECK-LABEL: sil non_abi [serialized] [ossa] @$sSa22constrained_extensionsSiRszlE12staticMethod1eS2iSg_tFZfA_ : $@convention(thin) () -> Optional<Int>
   // CHECK-LABEL: sil [ossa] @$sSa22constrained_extensionsSiRszlE12staticMethod1eS2iSg_tFZ : $@convention(method) (Optional<Int>, @thin Array<Int>.Type) -> Int
-  public static func staticMethod(e: Element? = nil) -> Element {
+  public static func staticMethod(e: Element? = (nil)) -> Element {
     return e!
   }
 
@@ -104,7 +104,7 @@ extension Dictionary where Key == Int {
   // CHECK-LABEL: sil non_abi [serialized] [ossa] @$sSD22constrained_extensionsSiRszrlE12staticMethod1k1vq_SiSg_q_SgtFZfA_ : $@convention(thin) <Key, Value where Key == Int> () -> Optional<Int>
   // CHECK-LABEL: sil non_abi [serialized] [ossa] @$sSD22constrained_extensionsSiRszrlE12staticMethod1k1vq_SiSg_q_SgtFZfA0_ : $@convention(thin) <Key, Value where Key == Int> () -> @out Optional<Value>
   // CHECK-LABEL: sil [ossa] @$sSD22constrained_extensionsSiRszrlE12staticMethod1k1vq_SiSg_q_SgtFZ : $@convention(method) <Key, Value where Key == Int> (Optional<Int>, @in_guaranteed Optional<Value>, @thin Dictionary<Int, Value>.Type) -> @out Value
-  public static func staticMethod(k: Key? = nil, v: Value? = nil) -> Value {
+  public static func staticMethod(k: Key? = (nil), v: Value? = (nil)) -> Value {
     return v!
   }
 
@@ -177,8 +177,8 @@ struct AnythingGoes<T> {
 extension AnythingGoes where T : VeryConstrained {
   // CHECK-LABEL: sil hidden [ossa] @$s22constrained_extensions12AnythingGoesVA2A15VeryConstrainedRzlE13fromExtensionACyxGyt_tcfC : $@convention(method) <T where T : VeryConstrained> (@thin AnythingGoes<T>.Type) -> @out AnythingGoes<T> {
 
+  // CHECK: [[RESULT:%.*]] = struct_element_addr {{%.*}} : $*AnythingGoes<T>, #AnythingGoes.meaningOfLife
   // CHECK: [[INIT:%.*]] = function_ref @$s22constrained_extensions12AnythingGoesV13meaningOfLifexSgvpfi : $@convention(thin) <τ_0_0> () -> @out Optional<τ_0_0>
-  // CHECK: [[RESULT:%.*]] = alloc_stack $Optional<T>
   // CHECK: apply [[INIT]]<T>([[RESULT]]) : $@convention(thin) <τ_0_0> () -> @out Optional<τ_0_0>
   // CHECK: return
   init(fromExtension: ()) {}
@@ -191,7 +191,7 @@ extension Array where Element == Int {
 
     // CHECK-LABEL: sil hidden [ossa] @$sSa22constrained_extensionsSiRszlE6NestedV10hasDefault1eySiSg_tFfA_ : $@convention(thin) () -> Optional<Int>
     // CHECK-LABEL: sil hidden [ossa] @$sSa22constrained_extensionsSiRszlE6NestedV10hasDefault1eySiSg_tF : $@convention(method) (Optional<Int>, @inout Array<Int>.Nested) -> ()
-    mutating func hasDefault(e: Element? = nil) {
+    mutating func hasDefault(e: Element? = (nil)) {
       self.e = e
     }
   }
@@ -203,7 +203,7 @@ extension Array where Element == AnyObject {
     // CHECK-LABEL: sil hidden [ossa] @$sSa22constrained_extensionsyXlRszlE11NestedClassCfD : $@convention(method) (@owned Array<AnyObject>.NestedClass) -> ()
     deinit { }
 
-    // CHECK-LABEL: sil hidden [ossa] @$sSa22constrained_extensionsyXlRszlE11NestedClassCACyyXl_GycfC : $@convention(method) (@thick Array<AnyObject>.NestedClass.Type) -> @owned Array<AnyObject>.NestedClass
+    // CHECK-LABEL: sil hidden [exact_self_class] [ossa] @$sSa22constrained_extensionsyXlRszlE11NestedClassCACyyXl_GycfC : $@convention(method) (@thick Array<AnyObject>.NestedClass.Type) -> @owned Array<AnyObject>.NestedClass
     // CHECK-LABEL: sil hidden [ossa] @$sSa22constrained_extensionsyXlRszlE11NestedClassCACyyXl_Gycfc : $@convention(method) (@owned Array<AnyObject>.NestedClass) -> @owned Array<AnyObject>.NestedClass
   }
 
@@ -226,4 +226,17 @@ extension Array where Element == AnyObject {
 func referenceNestedTypes() {
   _ = Array<AnyObject>.NestedClass()
   _ = Array<AnyObject>.DerivedClass()
+}
+
+struct S<T> {
+  struct X {}
+}
+
+// CHECK-LABEL: sil hidden [ossa] @$s22constrained_extensions1SVAASiRszlEyAC1XVySi_GSicir : $@yield_once @convention(method) (Int, S<Int>) -> @yields S<Int>.X
+extension S<Int> {
+  subscript(index:Int) -> X {
+    _read {
+      fatalError()
+    }
+  }
 }

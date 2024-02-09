@@ -1,5 +1,9 @@
-// RUN: %target-typecheck-verify-swift -swift-version 5 -enable-library-evolution
-// RUN: %target-typecheck-verify-swift -swift-version 4 -enable-library-evolution -enable-nonfrozen-enum-exhaustivity-diagnostics
+// RUN: %empty-directory(%t)
+// RUN: %target-swift-frontend -swift-version 5 -enable-library-evolution %S/Inputs/exhaustive_switch_testable_helper.swift -emit-module -o %t
+// RUN: %target-typecheck-verify-swift -swift-version 5 -enable-library-evolution -I %t
+// RUN: %target-typecheck-verify-swift -swift-version 4 -enable-library-evolution -enable-nonfrozen-enum-exhaustivity-diagnostics -I %t
+
+import exhaustive_switch_testable_helper
 
 func foo(a: Int?, b: Int?) -> Int {
   switch (a, b) {
@@ -48,8 +52,9 @@ enum Result<T> {
   }
 }
 
-func overParenthesized() {
-  // SR-7492: Space projection needs to treat extra paren-patterns explicitly.
+func parenthesized() {
+  // https://github.com/apple/swift/issues/50035
+  // Space projection needs to treat extra paren-patterns explicitly.
   let x: Result<(Result<Int>, String)> = .Ok((.Ok(1), "World"))
   switch x {
   case let .Error(e):
@@ -360,7 +365,7 @@ enum MyNever {}
 func ~= (_ : MyNever, _ : MyNever) -> Bool { return true }
 func myFatalError() -> MyNever { fatalError() }
 
-@_frozen public enum UninhabitedT4<A> {
+@frozen public enum UninhabitedT4<A> {
   case x(A)
 }
 
@@ -448,7 +453,8 @@ func infinitelySized() -> Bool {
   }
 }
 
-func sr6316() {
+// https://github.com/apple/swift/issues/48866
+do {
   let bool1 = false
   let bool2 = false
   let bool3 = false
@@ -480,7 +486,8 @@ func sr6316() {
   }
 }
 
-func sr6652() {
+// https://github.com/apple/swift/issues/49201
+do {
   enum A {
     indirect case a([A], foo: Bool)
     indirect case b(Dictionary<String, Int>)
@@ -753,7 +760,8 @@ func checkLiteralTuples() {
   }
 }
 
-func sr6975() {
+// https://github.com/apple/swift/issues/49523
+do {
   enum E {
     case a, b
   }
@@ -770,7 +778,7 @@ func sr6975() {
 
   func foo(_ str: String) -> Int {
     switch str { // expected-error {{switch must be exhaustive}}
-    // expected-note@-1 {{do you want to add a default clause?}}
+    // expected-note@-1 {{add a default clause}}
     case let (x as Int) as Any:
       return x
     }
@@ -786,7 +794,7 @@ public enum NonExhaustivePayload {
   case a(Int), b(Bool)
 }
 
-@_frozen public enum TemporalProxy {
+@frozen public enum TemporalProxy {
   case seconds(Int)
   case milliseconds(Int)
   case microseconds(Int)
@@ -802,7 +810,7 @@ public func testNonExhaustive(_ value: NonExhaustive, _ payload: NonExhaustivePa
   case .a: break
   }
 
-  switch value { // expected-warning {{switch covers known cases, but 'NonExhaustive' may have additional unknown values}} {{none}} expected-note {{handle unknown values using "@unknown default"}} {{3-3=@unknown default:\n<#fatalError#>()\n}}
+  switch value { // expected-warning {{switch covers known cases, but 'NonExhaustive' may have additional unknown values}} {{none}} expected-note {{handle unknown values using "@unknown default"}} {{+3:3-3=@unknown default:\n<#fatalError#>()\n}}
   case .a: break
   case .b: break
   }
@@ -894,7 +902,7 @@ public func testNonExhaustive(_ value: NonExhaustive, _ payload: NonExhaustivePa
   case .a: break
   }
 
-  switch payload { // expected-warning {{switch covers known cases, but 'NonExhaustivePayload' may have additional unknown values}} {{none}} expected-note {{handle unknown values using "@unknown default"}} {{3-3=@unknown default:\n<#fatalError#>()\n}}
+  switch payload { // expected-warning {{switch covers known cases, but 'NonExhaustivePayload' may have additional unknown values}} {{none}} expected-note {{handle unknown values using "@unknown default"}} {{+3:3-3=@unknown default:\n<#fatalError#>()\n}}
   case .a: break
   case .b: break
   }
@@ -1078,7 +1086,7 @@ enum UnavailableCaseOSSpecific {
   case a
   case b
 
-#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+#if canImport(Darwin)
   @available(macOS, unavailable)
   @available(iOS, unavailable)
   @available(tvOS, unavailable)
@@ -1133,5 +1141,318 @@ extension Result where T == NoError {
     case .Ok(_):
       break // But it's okay to write one.
     }
+  }
+}
+
+// https://github.com/apple/swift/issues/52701
+do {
+  enum Enum<T,E> {
+    case value(T)
+    case error(E)
+  }
+  enum MyError: Error {
+    case bad
+  }
+
+  let foo: Enum<String,(Int,Error)>
+
+  switch foo {
+  case .value: break
+  case .error((_, MyError.bad)): break
+  case .error((_, let err)):
+    _ = err
+    break
+  }
+
+  // is
+  switch foo {
+  case .value: break
+  case .error((_, is MyError)): break
+  case .error((_, let err)):
+    _ = err
+    break
+  }
+
+  // as
+  switch foo {
+  case .value: break
+  case .error((_, let err as MyError)):
+    _ = err
+    break
+  case .error((_, let err)):
+    _ = err
+    break
+  }
+}
+
+// https://github.com/apple/swift/issues/53557
+
+do {
+  switch Optional<(Int, Int)>((5, 6)) {
+  case .some((let a, let b)): print(a, b)
+  case nil:                   print(0)
+  }
+
+  switch Optional<(Int, Int)>((5, 6)) {
+  case let b?: print(b)
+  case nil:    print(0)
+  }
+}
+do {
+  enum Z {
+    case z1(a: Int)
+    case z2(a: Int, b: Int)
+    case z3((c: Int, d: Int))
+  }
+
+  switch Z.z1(a: 1) { // expected-error {{switch must be exhaustive}}
+                      // expected-note@-1 {{add missing case: '.z1(a: let a)'}}
+  case .z2(_, _): ()
+  case .z3(_): ()
+  }
+
+  switch Z.z1(a: 1) { // expected-error {{switch must be exhaustive}}
+                      // expected-note@-1 {{add missing case: '.z2(a: let a, b: let b)'}}
+  case .z1(_): ()
+  case .z3(_): ()
+  }
+
+  switch Z.z1(a: 1) { // expected-error {{switch must be exhaustive}}
+                      // expected-note@-1 {{add missing case: '.z3((let c, let d))'}}
+  case .z1(_):    ()
+  case .z2(_, _): ()
+  }
+}
+
+// https://github.com/apple/swift/issues/54081
+public enum E_54081 {
+  @frozen public enum FrozenSameModule {
+    case a, b
+  }
+  
+  func testNotRequired(_ value: NonExhaustive, _ value2: FrozenEnum, _ value3: FrozenSameModule) {
+    switch value {
+      // expected-error@-1 {{switch must be exhaustive}}
+      // expected-note@-2 {{add missing case: '.a'}}
+      // expected-note@-3 {{add missing case: '.b'}}
+      // Do not suggest adding '@unknown default'
+    }
+    
+    switch value2 {
+      // expected-error@-1 {{switch must be exhaustive}}
+      // expected-note@-2 {{add missing case: '.a'}}
+      // expected-note@-3 {{add missing case: '.b'}}
+      // expected-note@-4 {{add missing case: '.c'}}
+    }
+    
+    switch value3 {
+      // expected-error@-1 {{switch must be exhaustive}}
+      // expected-note@-2 {{add missing case: '.a'}}
+      // expected-note@-3 {{add missing case: '.b'}}
+    }
+  }
+  
+  @inlinable public func testNotRequired2(_ value: FrozenSameModule) {
+    switch value {
+      // expected-error@-1 {{switch must be exhaustive}}
+      // expected-note@-2 {{add missing case: '.a'}}
+      // expected-note@-3 {{add missing case: '.b'}}
+    }
+  }
+  
+  // Inlinable code is considered "outside" the module and must include a default
+  // case.
+  @inlinable public func testRequired(_ value: NonExhaustive) {
+    switch value {
+      // expected-error@-1 {{switch must be exhaustive}}
+      // expected-note@-2 {{add missing case: '.a'}}
+      // expected-note@-3 {{add missing case: '.b'}}
+      // expected-note@-4 {{handle unknown values using "@unknown default"}}
+    }
+  }
+}
+
+// https://github.com/apple/swift/issues/53611
+// Some of the tests here rely on compiler bugs related to implicit
+// (un)tupling in patterns.
+//
+// Related codegen test: Compatibility/implicit_tupling_untupling_codegen.swift
+do {
+  enum Untupled {
+    case upair(Int, Int)
+  }
+
+  func content_untupled_pattern_tupled1(u: Untupled) -> (Int, Int) {
+    switch u {
+    case .upair((let x, let y)): return (x, y)
+    // expected-warning@-1 {{enum case 'upair' has 2 associated values}}{{16-17=}}{{31-32=}}
+    // expected-note@-7 {{'upair' declared here}}
+    }
+  }
+
+  func content_untupled_pattern_tupled2(u: Untupled) -> (Int, Int) {
+    switch u {
+    case .upair(let (x, y)): return (x, y)
+    // expected-warning@-1 {{enum case 'upair' has 2 associated values}} // No fix-it as that would require us to peek inside the 'let' :-/
+    // expected-note@-15 {{'upair' declared here}}
+    }
+  }
+
+  func content_untupled_pattern_tupled3(u: Untupled) -> (Int, Int) {
+    switch u {
+    case let .upair((x, y)): return (x, y)
+    // expected-warning@-1 {{enum case 'upair' has 2 associated values}}{{20-21=}}{{27-28=}}
+    // expected-note@-23 {{'upair' declared here}}
+    }
+  }
+
+  func content_untupled_pattern_untupled1(u: Untupled) -> (Int, Int) {
+    switch u {
+    case .upair(let x, let y): return (x, y)
+    }
+  }
+
+  func content_untupled_pattern_untupled2(u: Untupled) -> (Int, Int) {
+      switch u {
+      case let .upair(x, y): return (x, y)
+      }
+  }
+
+  func content_untupled_pattern_ambiguous1(u: Untupled) -> (Int, Int) {
+    switch u {
+    case .upair(let u_): return u_
+    // expected-warning@-1 {{enum case 'upair' has 2 associated values; matching them as a tuple is deprecated}}
+    // expected-note@-43 {{'upair' declared here}}
+    }
+  }
+
+  func content_untupled_pattern_ambiguous2(u: Untupled) -> (Int, Int) {
+    switch u {
+    case let .upair(u_): return u_
+    // expected-warning@-1 {{enum case 'upair' has 2 associated values; matching them as a tuple is deprecated}}
+    // expected-note@-51 {{'upair' declared here}}
+    }
+  }
+
+  enum Tupled {
+    case tpair((Int, Int))
+  }
+
+  func content_tupled_pattern_tupled1(t: Tupled) -> (Int, Int) {
+    switch t {
+    case .tpair((let x, let y)): return (x, y)
+    }
+  }
+
+  func content_tupled_pattern_tupled2(t: Tupled) -> (Int, Int) {
+    switch t {
+    case .tpair(let (x, y)): return (x, y)
+    }
+  }
+
+  func content_tupled_pattern_tupled3(t: Tupled) -> (Int, Int) {
+    switch t {
+    case let .tpair((x, y)): return (x, y)
+    }
+  }
+
+  func content_tupled_pattern_untupled1(t: Tupled) -> (Int, Int) {
+    switch t {
+    case .tpair(let x, let y): return (x, y)
+    // expected-warning@-1 {{enum case 'tpair' has one associated value that is a tuple of 2 elements}}{{16-16=(}}{{30-30=)}}
+    // expected-note@-25 {{'tpair' declared here}}
+    }
+  }
+
+  func content_tupled_pattern_untupled2(t: Tupled) -> (Int, Int) {
+    switch t {
+    case let .tpair(x, y): return (x, y)
+    // expected-warning@-1 {{enum case 'tpair' has one associated value that is a tuple of 2 elements}}{{20-20=(}}{{26-26=)}}
+    // expected-note@-33 {{'tpair' declared here}}
+    }
+  }
+
+  func content_tupled_pattern_ambiguous1(t: Tupled) -> (Int, Int) {
+    switch t {
+    case .tpair(let t_): return t_
+    }
+  }
+
+  func content_tupled_pattern_ambiguous2(t: Tupled) -> (Int, Int) {
+    switch t {
+    case let .tpair(t_): return t_
+    }
+  }
+
+  enum Box<T> {
+    case box(T)
+  }
+
+  func content_generic_pattern_tupled1(b: Box<(Int, Int)>) -> (Int, Int) {
+    switch b {
+    case .box((let x, let y)): return (x, y)
+    }
+  }
+
+  func content_generic_pattern_tupled2(b: Box<(Int, Int)>) -> (Int, Int) {
+    switch b {
+    case .box(let (x, y)): return (x, y)
+    }
+  }
+
+  func content_generic_pattern_tupled3(b: Box<(Int, Int)>) -> (Int, Int) {
+   switch b {
+   case let .box((x, y)): return (x, y)
+   }
+  }
+
+  func content_generic_pattern_untupled1(b: Box<(Int, Int)>) -> (Int, Int) {
+    switch b {
+    case .box(let x, let y): return (x, y)
+    // expected-warning@-1 {{enum case 'box' has one associated value that is a tuple of 2 elements}}{{14-14=(}}{{28-28=)}}
+    // expected-note@-25 {{'box' declared here}}
+    }
+  }
+
+  func content_generic_pattern_untupled2(b: Box<(Int, Int)>) -> (Int, Int) {
+    switch b {
+    case let .box(x, y): return (x, y)
+    // expected-warning@-1 {{enum case 'box' has one associated value that is a tuple of 2 elements}}{{18-18=(}}{{24-24=)}}
+    // expected-note@-33 {{'box' declared here}}
+    }
+  }
+
+  // rdar://problem/58578342
+  func content_generic_pattern_untupled3(b: Box<((Int, Int), Int)>) -> (Int, Int, Int) {
+    switch b {
+    case let .box((x, y), z): return (x, y, z)
+    // expected-warning@-1 {{enum case 'box' has one associated value that is a tuple of 2 elements}}{{18-18=(}}{{29-29=)}}
+    // expected-note@-42 {{'box' declared here}}
+    }
+  }
+
+  func content_generic_pattern_ambiguous1(b: Box<(Int, Int)>) -> (Int, Int) {
+    switch b {
+    case .box(let b_): return b_
+    }
+  }
+
+  func content_generic_pattern_ambiguous2(b: Box<(Int, Int)>) -> (Int, Int) {
+    switch b {
+    case let .box(b_): return b_
+    }
+  }
+}
+
+// https://github.com/apple/swift/issues/54850
+do {
+  enum E {
+    case x
+    case y
+  }
+  switch (E.x, true) as Optional<(e: E, b: Bool)> {
+      case nil, (e: .x, b: _)?: break
+      case (e: .y, b: false)?: break
+      case (e: .y, b: true)?: break
   }
 }

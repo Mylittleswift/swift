@@ -1,8 +1,12 @@
 // RUN: %empty-directory(%t)
-// RUN: %target-build-swift -swift-version 5 -g %s -o %t/a.out
+// RUN: %target-build-swift -import-objc-header %S/Inputs/tail_allocated_c_array.h -swift-version 5 -g %s -o %t/a.out
 // RUN: %target-codesign %t/a.out
 // RUN: %target-run %t/a.out
 // REQUIRES: executable_test
+// UNSUPPORTED: freestanding
+
+@_spi(ObservableRerootKeyPath)
+import Swift
 
 import StdlibUnittest
 
@@ -329,12 +333,17 @@ class ABC: AB, ABCProtocol {
   var a = LifetimeTracked(1)
   var b = LifetimeTracked(2)
   var c = LifetimeTracked(3)
+  subscript(x: Int) -> Int {
+    get { return x + 27 }
+    set { }
+  }
 }
 
 protocol ABCProtocol {
   var a: LifetimeTracked { get }
   var b: LifetimeTracked { get set }
   var c: LifetimeTracked { get nonmutating set }
+  subscript(x: Int) -> Int { get set }
 }
 
 keyPath.test("dynamically-typed application") {
@@ -369,6 +378,7 @@ keyPath.test("dynamically-typed application") {
   let protoErasedPathA = \ABCProtocol.a
   let protoErasedPathB = \ABCProtocol.b
   let protoErasedPathC = \ABCProtocol.c
+  let protoErasedSubscript = \ABCProtocol[100]
 
   do {
     expectTrue(protoErasedSubject.a ===
@@ -389,6 +399,8 @@ keyPath.test("dynamically-typed application") {
     expectTrue(protoErasedSubject.c ===
                   protoErasedSubject[keyPath: protoErasedPathC])
     expectTrue(protoErasedSubject.c === newC)
+
+    expectTrue(protoErasedSubject[keyPath: protoErasedSubscript] == 127)
   }
 }
 
@@ -422,6 +434,8 @@ keyPath.test("optional force-unwrapping") {
   expectTrue(value.questionableCanary === newCanary)
 }
 
+#if !os(WASI)
+// Trap tests aren't available on WASI.
 keyPath.test("optional force-unwrapping trap") {
   let origin_x = \TestOptional.origin!.x
   var value = TestOptional(origin: nil)
@@ -429,6 +443,7 @@ keyPath.test("optional force-unwrapping trap") {
   expectCrashLater()
   _ = value[keyPath: origin_x]
 }
+#endif
 
 struct TestOptional2 {
   var optional: TestOptional?
@@ -926,24 +941,72 @@ keyPath.test("let-ness") {
   expectNotNil(\Point.secretlyMutableHypotenuse as? WritableKeyPath)
 }
 
-// SR-6096
+keyPath.test("key path literal closures") {
+  // Property access
+  let fnX: (C<String>) -> Int = \C<String>.x
+  let fnY: (C<String>) -> LifetimeTracked? = \C<String>.y
+  let fnZ: (C<String>) -> String = \C<String>.z
+  let fnImmutable: (C<String>) -> String = \C<String>.immutable
+  let fnSecretlyMutable: (C<String>) -> String = \C<String>.secretlyMutable
+  let fnComputed: (C<String>) -> String = \C<String>.computed
+  
+  let lifetime = LifetimeTracked(249)
+  let base = C(x: 1, y: lifetime, z: "SE-0249")
 
-protocol Protocol6096 {}
-struct Value6096<ValueType> {}
-extension Protocol6096 {
+  expectEqual(1, fnX(base))
+  expectEqual(lifetime, fnY(base))
+  expectEqual("SE-0249", fnZ(base))
+  expectEqual("1 Optional(249) SE-0249", fnImmutable(base))
+  expectEqual("1 Optional(249) SE-0249", fnSecretlyMutable(base))
+  expectEqual("SE-0249", fnComputed(base))
+  
+  // Subscripts
+  var callsToComputeIndex = 0
+  func computeIndexWithSideEffect(_ i: Int) -> Int {
+    callsToComputeIndex += 1
+    return -i
+  }
+  
+  let fnSubscriptResultA: (Subscripts<String>) -> SubscriptResult<String, Int>
+    = \Subscripts<String>.["A", computeIndexWithSideEffect(13)]
+  let fnSubscriptResultB: (Subscripts<String>) -> SubscriptResult<String, Int>
+    = \Subscripts<String>.["B", computeIndexWithSideEffect(42)]
+  
+  let subscripts = Subscripts<String>()
+  
+  expectEqual("A", fnSubscriptResultA(subscripts).left)
+  expectEqual(-13, fnSubscriptResultA(subscripts).right)
+  
+  expectEqual("B", fnSubscriptResultB(subscripts).left)
+  expectEqual(-42, fnSubscriptResultB(subscripts).right)
+  
+  // Did we compute the indices once per closure construction, or once per
+  // closure application?
+  expectEqual(2, callsToComputeIndex)
+
+  // rdar://problem/59445486
+  let variadicFn: (String...) -> Int = \.count
+  expectEqual(3, variadicFn("a", "b", "c"))
+}
+
+// https://github.com/apple/swift/issues/48651
+
+protocol P_48651 {}
+struct S_48651<ValueType> {}
+extension P_48651 {
     var asString: String? {
         return self as? String
     }
 }
-extension Value6096 where ValueType: Protocol6096 {
+extension S_48651 where ValueType: P_48651 {
     func doSomething() {
         _ = \ValueType.asString?.endIndex
     }
 }
-extension Int: Protocol6096 {}
+extension Int: P_48651 {}
 
 keyPath.test("optional chaining component that needs generic instantiation") {
-  Value6096<Int>().doSomething()
+  S_48651<Int>().doSomething()
 }
 
 // Nested generics.
@@ -973,6 +1036,119 @@ keyPath.test("nested generics") {
   let nestedKeyPath = nested.foo()
   typealias DictType = [UInt? : [Float]]
   expectTrue(nestedKeyPath is KeyPath<DictType, DictType.Values>)
+}
+
+keyPath.test("tail allocated c array") {
+  let offset = MemoryLayout<foo>.offset(of: \foo.tailallocatedarray)!
+  expectEqual(4, offset)
+}
+
+keyPath.test("ReferenceWritableKeyPath statically typed as WritableKeyPath") {
+  let inner = C<Int>(x: 42, y: nil, z: 43)
+  var outer = C<C<Int>>(x: 44, y: nil, z: inner)
+  let keyPath = \C<C<Int>>.z.x
+  let upcastKeyPath = keyPath as WritableKeyPath
+
+  expectEqual(outer[keyPath: keyPath], 42)
+  outer[keyPath: keyPath] = 43
+  expectEqual(outer[keyPath: keyPath], 43)
+
+  expectEqual(outer[keyPath: upcastKeyPath], 43)
+  outer[keyPath: upcastKeyPath] = 44
+  expectEqual(outer[keyPath: upcastKeyPath], 44)
+
+  func setWithInout<T>(_ lhs: inout T, _ rhs: T) { lhs = rhs }
+
+  expectEqual(outer[keyPath: keyPath], 44)
+  setWithInout(&outer[keyPath: keyPath], 45);
+  expectEqual(outer[keyPath: keyPath], 45)
+
+  expectEqual(outer[keyPath: upcastKeyPath], 45)
+  setWithInout(&outer[keyPath: upcastKeyPath], 46)
+  expectEqual(outer[keyPath: upcastKeyPath], 46)
+}
+
+struct Dog {
+  var name: String
+  var age: Int
+}
+
+class Cat {
+  var name: String
+  var age: Int
+
+  init(name: String, age: Int) {
+    self.name = name
+    self.age = age
+  }
+}
+
+if #available(SwiftStdlib 5.9, *) {
+  keyPath.test("_createOffsetBasedKeyPath") {
+    let dogAgeKp = _createOffsetBasedKeyPath(
+      root: Dog.self,
+      value: Int.self,
+      offset: MemoryLayout<String>.size
+    ) as? KeyPath<Dog, Int>
+
+    expectNotNil(dogAgeKp)
+
+    let sparky = Dog(name: "Sparky", age: 7)
+
+    expectEqual(sparky[keyPath: dogAgeKp!], 7)
+
+    let catNameKp = _createOffsetBasedKeyPath(
+      root: Cat.self,
+      value: String.self,
+      offset: 2 * MemoryLayout<UnsafeRawPointer>.size
+    ) as? KeyPath<Cat, String>
+
+    expectNotNil(catNameKp)
+
+    let chloe = Cat(name: "Chloe", age: 4)
+
+    expectEqual(chloe[keyPath: catNameKp!], "Chloe")
+  }
+}
+
+class RerootedSuper {
+  var x = "hello world"
+}
+
+class RerootedSub0: RerootedSuper {}
+class RerootedSub1: RerootedSub0 {}
+
+if #available(SwiftStdlib 5.9, *) {
+  keyPath.test("_rerootKeyPath") {
+    let x = \RerootedSub1.x
+
+    let superValue = RerootedSuper()
+    let sub0 = RerootedSub0()
+    let sub1 = RerootedSub1()
+
+    let sub0Kp = _rerootKeyPath(x, to: RerootedSub0.self)
+
+    expectTrue(type(of: sub0Kp) == ReferenceWritableKeyPath<RerootedSub0, String>.self)
+
+    let superKp = _rerootKeyPath(x, to: RerootedSuper.self)
+
+    expectTrue(type(of: superKp) == ReferenceWritableKeyPath<RerootedSuper, String>.self)
+
+    let x0 = sub1[keyPath: sub0Kp] as! String
+    expectEqual(x0, "hello world")
+
+    let x1 = sub1[keyPath: superKp] as! String
+    expectEqual(x1, "hello world")
+
+    let x2 = sub0[keyPath: sub0Kp] as! String
+    expectEqual(x2, "hello world")
+
+    let x3 = sub0[keyPath: superKp] as! String
+    expectEqual(x3, "hello world")
+
+    let x4 = superValue[keyPath: superKp] as! String
+    expectEqual(x4, "hello world")
+  }
 }
 
 runAllTests()

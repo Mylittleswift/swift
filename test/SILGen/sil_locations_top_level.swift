@@ -16,12 +16,12 @@ class TopLevelObjectTyWithoutDestructor {
 var topLevelObject2:TopLevelObjectTyWithoutDestructor
 
 // CHECK-LABEL: sil [ossa] @main
-// CHECK: integer_literal ${{.*}}, 0, {{.*}} top_level
-// CHECK: return    {{.*}} top_level
+// CHECK: integer_literal ${{.*}}, 0, {{.*}} auto_gen
+// CHECK: return    {{.*}} auto_gen
 
 // Check allocating initializer
 // CHECK-LABEL: sil_locations_top_level.TopLevelObjectTy.__allocating_init
-// CHECK: sil hidden [ossa] @$s23sil_locations_top_level16TopLevelObjectTyC{{[_0-9a-zA-Z]*}}fC
+// CHECK: sil hidden [exact_self_class] [ossa] @$s23sil_locations_top_level16TopLevelObjectTyC{{[_0-9a-zA-Z]*}}fC
 // CHECK: alloc_ref {{.*}}line:5:3:auto_gen
 // CHECK: function_ref
 
@@ -31,7 +31,7 @@ var topLevelObject2:TopLevelObjectTyWithoutDestructor
 // CHECK: return {{.*}}// {{.*}} line:5:12
 
 // Check explicit destructor
-// CHECK_LABEL: sil hidden [ossa] @$s23sil_locations_top_level16TopLevelObjectTyCfd
+// CHECK-LABEL: sil hidden [ossa] @$s23sil_locations_top_level16TopLevelObjectTyCfd
 // CHECK:   return {{.*}}// {{.*}} line:8:3
 
 // Check allocating constructor
@@ -44,5 +44,5 @@ var topLevelObject2:TopLevelObjectTyWithoutDestructor
 // CHECK: return {{.*}}// {{.*}} line:14:3:imp_return
 
 // Check implicit destructor
-// CHECK_LABEL: sil hidden [ossa] @$s23sil_locations_top_level33TopLevelObjectTyWithoutDestructorCfd
+// CHECK-LABEL: sil hidden [ossa] @$s23sil_locations_top_level33TopLevelObjectTyWithoutDestructorCfd
 // CHECK:   return {{.*}}// {{.*}} line:12:7:imp_return:auto_gen

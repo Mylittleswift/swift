@@ -67,8 +67,8 @@ class ObjCAndNonObjCNotAllowed {
   @objc @nonobjc func redundantAttributes() { } // expected-error {{declaration is marked @objc, and cannot be marked @nonobjc}}
 }
 
-class DynamicAndNonObjCNotAllowed {
-  @nonobjc dynamic func redundantAttributes() { } // expected-error {{a declaration cannot be both '@nonobjc' and 'dynamic'}}
+class DynamicAndNonObjCAreFineNow {
+  @nonobjc dynamic func someAttributes() { }
 }
 
 class IBOutletAndNonObjCNotAllowed {
@@ -106,9 +106,10 @@ class NSManagedAndNonObjCNotAllowed {
 struct SomeStruct { }
 @nonobjc extension SomeStruct { } // expected-error{{only extensions of classes can be declared @nonobjc}}
 
-protocol SR4226_Protocol : class {}
+// https://github.com/apple/swift/issues/46809
 
-extension SR4226_Protocol {
+protocol P_46809 : class {}
+extension P_46809 {
   @nonobjc func function() {} // expected-error {{only class members and extensions of classes can be declared @nonobjc}}
 }
 

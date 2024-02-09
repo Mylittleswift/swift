@@ -18,15 +18,29 @@
 #ifndef SWIFT_DEMANGLING_TYPEDECODER_H
 #define SWIFT_DEMANGLING_TYPEDECODER_H
 
-#include "swift/ABI/MetadataValues.h"
-#include "swift/Demangling/Demangler.h"
+#include "TypeLookupError.h"
 #include "swift/Basic/LLVM.h"
-#include "swift/Runtime/Unreachable.h"
+
+#include "swift/ABI/MetadataValues.h"
+#include "swift/AST/LayoutConstraintKind.h"
+#include "swift/AST/RequirementKind.h"
+#include "swift/Basic/OptionSet.h"
+#include "swift/Basic/Unreachable.h"
+#include "swift/Demangling/Demangler.h"
+#include "swift/Demangling/NamespaceMacros.h"
+#include "swift/Runtime/Portability.h"
 #include "swift/Strings.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/None.h"
+#include "llvm/ADT/Optional.h"
+#include "llvm/ADT/PointerIntPair.h"
+#include "llvm/ADT/StringSwitch.h"
 #include <vector>
 
 namespace swift {
 namespace Demangle {
+SWIFT_BEGIN_INLINE_NAMESPACE
 
 enum class ImplMetatypeRepresentation {
   Thin,
@@ -62,6 +76,8 @@ public:
   void setValueOwnership(ValueOwnership ownership) {
     Flags = Flags.withValueOwnership(ownership);
   }
+  void setNoDerivative() { Flags = Flags.withNoDerivative(true); }
+  void setIsolated() { Flags = Flags.withIsolated(true); }
   void setFlags(ParameterFlags flags) { Flags = flags; };
 
   FunctionParam withLabel(StringRef label) const {
@@ -86,19 +102,36 @@ enum class ImplParameterConvention {
   Direct_Owned,
   Direct_Unowned,
   Direct_Guaranteed,
+  Pack_Owned,
+  Pack_Guaranteed,
+  Pack_Inout,
 };
+
+enum class ImplParameterInfoFlags : uint8_t {
+  NotDifferentiable = 0x1,
+};
+
+using ImplParameterInfoOptions = OptionSet<ImplParameterInfoFlags>;
+
+enum class ImplResultInfoFlags : uint8_t {
+  NotDifferentiable = 0x1,
+};
+
+using ImplResultInfoOptions = OptionSet<ImplResultInfoFlags>;
 
 /// Describe a lowered function parameter, parameterized on the type
 /// representation.
 template <typename BuiltType>
 class ImplFunctionParam {
-  ImplParameterConvention Convention;
   BuiltType Type;
+  ImplParameterConvention Convention;
+  ImplParameterInfoOptions Options;
 
 public:
   using ConventionType = ImplParameterConvention;
+  using OptionsType = ImplParameterInfoOptions;
 
-  static Optional<ConventionType>
+  static llvm::Optional<ConventionType>
   getConventionFromString(StringRef conventionString) {
     if (conventionString == "@in")
       return ConventionType::Indirect_In;
@@ -116,14 +149,38 @@ public:
       return ConventionType::Direct_Unowned;
     if (conventionString == "@guaranteed")
       return ConventionType::Direct_Guaranteed;
+    if (conventionString == "@pack_owned")
+      return ConventionType::Pack_Owned;
+    if (conventionString == "@pack_guaranteed")
+      return ConventionType::Pack_Guaranteed;
+    if (conventionString == "@pack_inout")
+      return ConventionType::Pack_Inout;
 
-    return None;
+    return llvm::None;
   }
 
-  ImplFunctionParam(ImplParameterConvention convention, BuiltType type)
-      : Convention(convention), Type(type) {}
+  static llvm::Optional<OptionsType>
+  getDifferentiabilityFromString(StringRef string) {
+    OptionsType result;
+
+    if (string.empty())
+      return result;
+
+    if (string == "@noDerivative") {
+      result |= ImplParameterInfoFlags::NotDifferentiable;
+      return result;
+    }
+
+    return {};
+  }
+
+  ImplFunctionParam(BuiltType type, ImplParameterConvention convention,
+                    OptionsType options)
+      : Type(type), Convention(convention), Options(options) {}
 
   ImplParameterConvention getConvention() const { return Convention; }
+
+  OptionsType getOptions() const { return Options; }
 
   BuiltType getType() const { return Type; }
 };
@@ -134,19 +191,27 @@ enum class ImplResultConvention {
   Unowned,
   UnownedInnerPointer,
   Autoreleased,
+  Pack,
+};
+
+enum class ImplResultDifferentiability {
+  DifferentiableOrNotApplicable,
+  NotDifferentiable
 };
 
 /// Describe a lowered function result, parameterized on the type
 /// representation.
 template <typename BuiltType>
 class ImplFunctionResult {
-  ImplResultConvention Convention;
   BuiltType Type;
+  ImplResultConvention Convention;
+  ImplResultInfoOptions Options;
 
 public:
   using ConventionType = ImplResultConvention;
+  using OptionsType = ImplResultInfoOptions;
 
-  static Optional<ConventionType>
+  static llvm::Optional<ConventionType>
   getConventionFromString(StringRef conventionString) {
     if (conventionString == "@out")
       return ConventionType::Indirect;
@@ -158,14 +223,34 @@ public:
       return ConventionType::UnownedInnerPointer;
     if (conventionString == "@autoreleased")
       return ConventionType::Autoreleased;
+    if (conventionString == "@pack_out")
+      return ConventionType::Pack;
 
-    return None;
+    return llvm::None;
   }
 
-  ImplFunctionResult(ImplResultConvention convention, BuiltType type)
-      : Convention(convention), Type(type) {}
+  static llvm::Optional<OptionsType>
+  getDifferentiabilityFromString(StringRef string) {
+    OptionsType result;
+
+    if (string.empty())
+      return result;
+
+    if (string == "@noDerivative") {
+      result |= ImplResultInfoFlags::NotDifferentiable;
+      return result;
+    }
+
+    return {};
+  }
+
+  ImplFunctionResult(BuiltType type, ImplResultConvention convention,
+                     ImplResultInfoOptions options = {})
+      : Type(type), Convention(convention), Options(options) {}
 
   ImplResultConvention getConvention() const { return Convention; }
+
+  ImplResultInfoOptions getOptions() const { return Options; }
 
   BuiltType getType() const { return Type; }
 };
@@ -181,70 +266,224 @@ enum class ImplFunctionRepresentation {
   Closure
 };
 
+enum class ImplFunctionDifferentiabilityKind {
+  NonDifferentiable,
+  Forward,
+  Reverse,
+  Normal,
+  Linear,
+};
+
 class ImplFunctionTypeFlags {
   unsigned Rep : 3;
   unsigned Pseudogeneric : 1;
   unsigned Escaping : 1;
+  unsigned Concurrent : 1;
+  unsigned Async : 1;
+  unsigned DifferentiabilityKind : 3;
 
 public:
-  ImplFunctionTypeFlags() : Rep(0), Pseudogeneric(0), Escaping(0) {}
+  ImplFunctionTypeFlags()
+      : Rep(0), Pseudogeneric(0), Escaping(0), Concurrent(0), Async(0),
+        DifferentiabilityKind(0) {}
 
-  ImplFunctionTypeFlags(ImplFunctionRepresentation rep,
-                        bool pseudogeneric, bool noescape)
-      : Rep(unsigned(rep)), Pseudogeneric(pseudogeneric), Escaping(noescape) {}
+  ImplFunctionTypeFlags(ImplFunctionRepresentation rep, bool pseudogeneric,
+                        bool noescape, bool concurrent, bool async,
+                        ImplFunctionDifferentiabilityKind diffKind)
+      : Rep(unsigned(rep)), Pseudogeneric(pseudogeneric), Escaping(noescape),
+        Concurrent(concurrent), Async(async),
+        DifferentiabilityKind(unsigned(diffKind)) {}
 
   ImplFunctionTypeFlags
   withRepresentation(ImplFunctionRepresentation rep) const {
-    return ImplFunctionTypeFlags(rep, Pseudogeneric, Escaping);
+    return ImplFunctionTypeFlags(
+        rep, Pseudogeneric, Escaping, Concurrent, Async,
+        ImplFunctionDifferentiabilityKind(DifferentiabilityKind));
+  }
+
+  ImplFunctionTypeFlags
+  withConcurrent() const {
+    return ImplFunctionTypeFlags(
+        ImplFunctionRepresentation(Rep), Pseudogeneric, Escaping, true,
+        Async, ImplFunctionDifferentiabilityKind(DifferentiabilityKind));
+  }
+
+  ImplFunctionTypeFlags
+  withAsync() const {
+    return ImplFunctionTypeFlags(
+        ImplFunctionRepresentation(Rep), Pseudogeneric, Escaping, Concurrent,
+        true, ImplFunctionDifferentiabilityKind(DifferentiabilityKind));
   }
 
   ImplFunctionTypeFlags
   withEscaping() const {
-    return ImplFunctionTypeFlags(ImplFunctionRepresentation(Rep),
-                                 Pseudogeneric, true);
+    return ImplFunctionTypeFlags(
+        ImplFunctionRepresentation(Rep), Pseudogeneric, true, Concurrent, Async,
+        ImplFunctionDifferentiabilityKind(DifferentiabilityKind));
   }
   
   ImplFunctionTypeFlags
   withPseudogeneric() const {
-    return ImplFunctionTypeFlags(ImplFunctionRepresentation(Rep),
-                                 true, Escaping);
+    return ImplFunctionTypeFlags(
+        ImplFunctionRepresentation(Rep), true, Escaping, Concurrent, Async,
+        ImplFunctionDifferentiabilityKind(DifferentiabilityKind));
+  }
+
+  ImplFunctionTypeFlags
+  withDifferentiabilityKind(ImplFunctionDifferentiabilityKind diffKind) const {
+    return ImplFunctionTypeFlags(ImplFunctionRepresentation(Rep), Pseudogeneric,
+                                 Escaping, Concurrent, Async, diffKind);
   }
 
   ImplFunctionRepresentation getRepresentation() const {
     return ImplFunctionRepresentation(Rep);
   }
 
+  bool isAsync() const { return Async; }
+
   bool isEscaping() const { return Escaping; }
 
+  bool isSendable() const { return Concurrent; }
+
   bool isPseudogeneric() const { return Pseudogeneric; }
+
+  bool isDifferentiable() const {
+    return getDifferentiabilityKind() !=
+        ImplFunctionDifferentiabilityKind::NonDifferentiable;
+  }
+
+  ImplFunctionDifferentiabilityKind getDifferentiabilityKind() const {
+    return ImplFunctionDifferentiabilityKind(DifferentiabilityKind);
+  }
 };
 
 #if SWIFT_OBJC_INTEROP
 /// For a mangled node that refers to an Objective-C class or protocol,
 /// return the class or protocol name.
-static inline Optional<StringRef> getObjCClassOrProtocolName(
-    NodePointer node) {
+static inline llvm::Optional<StringRef>
+getObjCClassOrProtocolName(NodePointer node) {
   if (node->getKind() != Demangle::Node::Kind::Class &&
       node->getKind() != Demangle::Node::Kind::Protocol)
-    return None;
+    return llvm::None;
 
   if (node->getNumChildren() != 2)
-    return None;
+    return llvm::None;
 
   // Check whether we have the __ObjC module.
   auto moduleNode = node->getChild(0);
   if (moduleNode->getKind() != Demangle::Node::Kind::Module ||
       moduleNode->getText() != MANGLING_MODULE_OBJC)
-    return None;
+    return llvm::None;
 
   // Check whether we have an identifier.
   auto nameNode = node->getChild(1);
   if (nameNode->getKind() != Demangle::Node::Kind::Identifier)
-    return None;
+    return llvm::None;
 
   return nameNode->getText();
 }
 #endif
+
+template <typename BuiltType, typename BuiltRequirement,
+          typename BuiltLayoutConstraint, typename BuilderType>
+void decodeRequirement(NodePointer node,
+                       llvm::SmallVectorImpl<BuiltRequirement> &requirements,
+                       BuilderType &Builder) {
+  for (auto &child : *node) {
+    if (child->getKind() == Demangle::Node::Kind::DependentGenericParamCount ||
+        child->getKind() == Demangle::Node::Kind::DependentGenericParamPackMarker)
+      continue;
+
+    if (child->getNumChildren() != 2)
+      return;
+    auto subjectType = Builder.decodeMangledType(child->getChild(0));
+    if (!subjectType)
+      return;
+
+    BuiltType constraintType;
+    if (child->getKind() ==
+        Demangle::Node::Kind::DependentGenericConformanceRequirement) {
+      constraintType = Builder.decodeMangledType(child->getChild(1));
+      if (!constraintType)
+        return;
+    } else if (child->getKind() ==
+               Demangle::Node::Kind::DependentGenericSameTypeRequirement) {
+      constraintType = Builder.decodeMangledType(
+          child->getChild(1), /*forRequirement=*/false);
+      if (!constraintType)
+        return;
+    }
+
+    switch (child->getKind()) {
+    case Demangle::Node::Kind::DependentGenericConformanceRequirement: {
+      requirements.push_back(BuiltRequirement(
+          Builder.isExistential(constraintType) ? RequirementKind::Conformance
+                                                : RequirementKind::Superclass,
+          subjectType, constraintType));
+      break;
+    }
+    case Demangle::Node::Kind::DependentGenericSameTypeRequirement: {
+      requirements.push_back(BuiltRequirement(RequirementKind::SameType,
+                                              subjectType, constraintType));
+      break;
+    }
+    case Demangle::Node::Kind::DependentGenericLayoutRequirement: {
+      auto kindChild = child->getChild(1);
+      if (kindChild->getKind() != Demangle::Node::Kind::Identifier)
+        return;
+
+      auto kind =
+          llvm::StringSwitch<llvm::Optional<LayoutConstraintKind>>(
+              kindChild->getText())
+              .Case("U", LayoutConstraintKind::UnknownLayout)
+              .Case("R", LayoutConstraintKind::RefCountedObject)
+              .Case("N", LayoutConstraintKind::NativeRefCountedObject)
+              .Case("C", LayoutConstraintKind::Class)
+              .Case("D", LayoutConstraintKind::NativeClass)
+              .Case("T", LayoutConstraintKind::Trivial)
+              .Case("B", LayoutConstraintKind::BridgeObject)
+              .Cases("E", "e", LayoutConstraintKind::TrivialOfExactSize)
+              .Cases("M", "m", LayoutConstraintKind::TrivialOfAtMostSize)
+              .Case("S", LayoutConstraintKind::TrivialStride)
+              .Default(llvm::None);
+
+      if (!kind)
+        return;
+
+      BuiltLayoutConstraint layout;
+
+      if (kind != LayoutConstraintKind::TrivialOfExactSize &&
+          kind != LayoutConstraintKind::TrivialOfAtMostSize &&
+          kind != LayoutConstraintKind::TrivialStride) {
+        layout = Builder.getLayoutConstraint(*kind);
+      } else {
+        auto size = child->getChild(2)->getIndex();
+        auto alignment = 0;
+
+        if (child->getNumChildren() == 4)
+          alignment = child->getChild(3)->getIndex();
+
+        layout =
+            Builder.getLayoutConstraintWithSizeAlign(*kind, size, alignment);
+      }
+
+      requirements.push_back(BuiltRequirement(RequirementKind::Layout, subjectType, layout));
+      break;
+    }
+    default:
+      break;
+    }
+  }
+}
+
+#define MAKE_NODE_TYPE_ERROR(Node, Fmt, ...)                                   \
+  TYPE_LOOKUP_ERROR_FMT("TypeDecoder.h:%u: Node kind %u \"%.*s\" - " Fmt,      \
+                        __LINE__, (unsigned)Node->getKind(),                   \
+                        Node->hasText() ? (int)Node->getText().size() : 0,     \
+                        Node->hasText() ? Node->getText().data() : "",         \
+                        __VA_ARGS__)
+
+#define MAKE_NODE_TYPE_ERROR0(Node, Str) MAKE_NODE_TYPE_ERROR(Node, "%s", Str)
 
 /// Decode a mangled type to construct an abstract type, forming such
 /// types by invoking a custom builder.
@@ -253,35 +492,55 @@ class TypeDecoder {
   using BuiltType = typename BuilderType::BuiltType;
   using BuiltTypeDecl = typename BuilderType::BuiltTypeDecl;
   using BuiltProtocolDecl = typename BuilderType::BuiltProtocolDecl;
+  using Field = typename BuilderType::BuiltSILBoxField;
+  using BuiltSubstitution = typename BuilderType::BuiltSubstitution;
+  using BuiltRequirement = typename BuilderType::BuiltRequirement;
+  using BuiltLayoutConstraint = typename BuilderType::BuiltLayoutConstraint;
+  using BuiltGenericSignature = typename BuilderType::BuiltGenericSignature;
+  using BuiltSubstitutionMap = typename BuilderType::BuiltSubstitutionMap;
   using NodeKind = Demangle::Node::Kind;
 
   BuilderType &Builder;
 
- public:
-  explicit TypeDecoder(BuilderType &Builder)
-    : Builder(Builder) {}
+public:
+  explicit TypeDecoder(BuilderType &Builder) : Builder(Builder) {}
 
   /// Given a demangle tree, attempt to turn it into a type.
-  BuiltType decodeMangledType(NodePointer Node) {
-    if (!Node) return BuiltType();
+  TypeLookupErrorOr<BuiltType> decodeMangledType(NodePointer Node,
+                                                 bool forRequirement = true) {
+    return decodeMangledType(Node, 0, forRequirement);
+  }
+
+protected:
+  static const unsigned MaxDepth = 1024;
+
+  TypeLookupErrorOr<BuiltType> decodeMangledType(NodePointer Node,
+                                                 unsigned depth,
+                                                 bool forRequirement = true) {
+    if (depth > TypeDecoder::MaxDepth)
+      return TypeLookupError("Mangled type is too complex");
+
+    if (!Node)
+      return TypeLookupError("Node is NULL");
 
     using NodeKind = Demangle::Node::Kind;
     switch (Node->getKind()) {
     case NodeKind::Global:
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children.");
 
-      return decodeMangledType(Node->getChild(0));
+      return decodeMangledType(Node->getChild(0), depth + 1);
     case NodeKind::TypeMangling:
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children.");
 
-      return decodeMangledType(Node->getChild(0));
+      return decodeMangledType(Node->getChild(0), depth + 1);
     case NodeKind::Type:
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children.");
 
-      return decodeMangledType(Node->getChild(0));
+      return decodeMangledType(Node->getChild(0), depth + 1,
+                               forRequirement);
     case NodeKind::Class:
     {
 #if SWIFT_OBJC_INTEROP
@@ -298,8 +557,9 @@ class TypeDecoder {
       BuiltTypeDecl typeDecl = BuiltTypeDecl();
       BuiltType parent = BuiltType();
       bool typeAlias = false;
-      if (!decodeMangledTypeDecl(Node, typeDecl, parent, typeAlias))
-        return BuiltType();
+      if (auto error =
+              decodeMangledTypeDecl(Node, depth, typeDecl, parent, typeAlias))
+        return *error;
 
       if (typeAlias)
         return Builder.createTypeAliasType(typeDecl, parent);
@@ -313,19 +573,13 @@ class TypeDecoder {
     case NodeKind::BoundGenericTypeAlias:
     case NodeKind::BoundGenericOtherNominalType: {
       if (Node->getNumChildren() < 2)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR(Node,
+                                    "fewer children (%zu) than required (2)",
+                                    Node->getNumChildren());
 
-      SmallVector<BuiltType, 8> args;
-
-      const auto &genericArgs = Node->getChild(1);
-      assert(genericArgs->getKind() == NodeKind::TypeList);
-
-      for (auto genericArg : *genericArgs) {
-        auto paramType = decodeMangledType(genericArg);
-        if (!paramType)
-          return BuiltType();
-        args.push_back(paramType);
-      }
+      llvm::SmallVector<BuiltType, 8> args;
+      if (auto error = decodeGenericArgs(Node->getChild(1), depth+1, args))
+        return *error;
 
       auto ChildNode = Node->getChild(0);
       if (ChildNode->getKind() == NodeKind::Type &&
@@ -341,9 +595,9 @@ class TypeDecoder {
       BuiltTypeDecl typeDecl = BuiltTypeDecl();
       BuiltType parent = BuiltType();
       bool typeAlias = false;
-      if (!decodeMangledTypeDecl(ChildNode, typeDecl,
-                                 parent, typeAlias))
-        return BuiltType();
+      if (auto error = decodeMangledTypeDecl(ChildNode, depth, typeDecl, parent,
+                                             typeAlias))
+        return *error;
 
       return Builder.createBoundGenericType(typeDecl, args, parent);
     }
@@ -373,22 +627,32 @@ class TypeDecoder {
       // But when resolving it to a type, we want to *keep* the argument
       // so that the parent type becomes 'S' and not 'P'.
       if (Node->getNumChildren() < 2)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR(Node,
+                                    "fewer children (%zu) than required (2)",
+                                    Node->getNumChildren());
 
       const auto &genericArgs = Node->getChild(1);
       if (genericArgs->getNumChildren() != 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR(genericArgs,
+                                    "expected 1 generic argument, saw %zu",
+                                    genericArgs->getNumChildren());
 
-      return decodeMangledType(genericArgs->getChild(0));
+      return decodeMangledType(genericArgs->getChild(0), depth + 1);
     }
     case NodeKind::BuiltinTypeName: {
-      auto mangledName = Demangle::mangleNode(Node);
-      return Builder.createBuiltinType(Node->getText(), mangledName);
+      auto mangling = Demangle::mangleNode(Node);
+      if (!mangling.isSuccess()) {
+        return MAKE_NODE_TYPE_ERROR(Node,
+                                    "failed to mangle node (%d:%u)",
+                                    mangling.error().code,
+                                    mangling.error().line);
+      }
+      return Builder.createBuiltinType(Node->getText().str(), mangling.result());
     }
     case NodeKind::Metatype:
     case NodeKind::ExistentialMetatype: {
       unsigned i = 0;
-      Optional<ImplMetatypeRepresentation> repr;
+      llvm::Optional<ImplMetatypeRepresentation> repr;
 
       // Handle lowered metatypes in a hackish way. If the representation
       // was not thin, force the resulting typeref to have a non-empty
@@ -397,7 +661,7 @@ class TypeDecoder {
         auto reprNode = Node->getChild(i++);
         if (reprNode->getKind() != NodeKind::MetatypeRepresentation ||
             !reprNode->hasText())
-          return BuiltType();
+          return MAKE_NODE_TYPE_ERROR0(reprNode, "wrong node kind or no text");
         if (reprNode->getText() == "@thin")
           repr = ImplMetatypeRepresentation::Thin;
         else if (reprNode->getText() == "@thick")
@@ -405,29 +669,43 @@ class TypeDecoder {
         else if (reprNode->getText() == "@objc_metatype")
           repr = ImplMetatypeRepresentation::ObjC;
       } else if (Node->getNumChildren() < 1) {
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children");
       }
 
-      auto instance = decodeMangledType(Node->getChild(i));
-      if (!instance)
-        return BuiltType();
+      auto instance = decodeMangledType(Node->getChild(i), depth + 1);
+      if (instance.isError())
+        return instance;
       if (Node->getKind() == NodeKind::Metatype) {
-        return Builder.createMetatypeType(instance, repr);
+        return Builder.createMetatypeType(instance.getType(), repr);
       } else if (Node->getKind() == NodeKind::ExistentialMetatype) {
-        return Builder.createExistentialMetatypeType(instance, repr);
+        return Builder.createExistentialMetatypeType(instance.getType(), repr);
       } else {
         assert(false);
-        return nullptr;
+        return MAKE_NODE_TYPE_ERROR0(Node,
+                                     "Metatype/ExistentialMetatype Node "
+                                     "had a different kind when re-checked");
       }
     }
+    case NodeKind::SymbolicExtendedExistentialType: {
+      if (Node->getNumChildren() < 2)
+        return MAKE_NODE_TYPE_ERROR0(Node, "not enough children");
+
+      auto shapeNode = Node->getChild(0);
+      llvm::SmallVector<BuiltType, 8> args;
+      if (auto error = decodeGenericArgs(Node->getChild(1), depth + 1, args))
+        return *error;
+
+      return Builder.createSymbolicExtendedExistentialType(shapeNode, args);
+    }
+
     case NodeKind::ProtocolList:
     case NodeKind::ProtocolListWithAnyObject:
     case NodeKind::ProtocolListWithClass: {
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children");
 
       // Find the protocol list.
-      SmallVector<BuiltProtocolDecl, 8> Protocols;
+      llvm::SmallVector<BuiltProtocolDecl, 8> Protocols;
       auto TypeList = Node->getChild(0);
       if (TypeList->getKind() == NodeKind::ProtocolList &&
           TypeList->getNumChildren() >= 1) {
@@ -436,10 +714,11 @@ class TypeDecoder {
 
       // Demangle the protocol list.
       for (auto componentType : *TypeList) {
-        if (auto Protocol = decodeMangledProtocolType(componentType))
+        if (auto Protocol = decodeMangledProtocolType(componentType, depth + 1))
           Protocols.push_back(Protocol);
         else
-          return BuiltType();
+          return MAKE_NODE_TYPE_ERROR0(componentType,
+                                       "failed to decode protocol type");
       }
 
       // Superclass or AnyObject, if present.
@@ -447,11 +726,15 @@ class TypeDecoder {
       auto Superclass = BuiltType();
       if (Node->getKind() == NodeKind::ProtocolListWithClass) {
         if (Node->getNumChildren() < 2)
-          return BuiltType();
+          return MAKE_NODE_TYPE_ERROR(Node,
+                                      "fewer children (%zu) than required (2)",
+                                      Node->getNumChildren());
 
         auto superclassNode = Node->getChild(1);
-        Superclass = decodeMangledType(superclassNode);
-        if (!Superclass) return BuiltType();
+        auto result = decodeMangledType(superclassNode, depth + 1);
+        if (result.isError())
+          return result;
+        Superclass = result.getType();
 
         IsClassBound = true;
       } else if (Node->getKind() == NodeKind::ProtocolListWithAnyObject) {
@@ -459,33 +742,63 @@ class TypeDecoder {
       }
 
       return Builder.createProtocolCompositionType(Protocols, Superclass,
-                                                   IsClassBound);
+                                                   IsClassBound,
+                                                   forRequirement);
     }
 
+    case NodeKind::ConstrainedExistential: {
+      if (Node->getNumChildren() < 2)
+        return MAKE_NODE_TYPE_ERROR(Node,
+                                    "fewer children (%zu) than required (2)",
+                                    Node->getNumChildren());
+
+      auto protocolType = decodeMangledType(Node->getChild(0), depth + 1);
+      if (protocolType.isError())
+        return protocolType;
+
+      llvm::SmallVector<BuiltRequirement, 8> requirements;
+
+      auto *reqts = Node->getChild(1);
+      if (reqts->getKind() != NodeKind::ConstrainedExistentialRequirementList)
+        return MAKE_NODE_TYPE_ERROR0(reqts, "is not requirement list");
+
+      decodeRequirement<BuiltType, BuiltRequirement, BuiltLayoutConstraint,
+                        BuilderType>(reqts, requirements, Builder);
+
+      return Builder.createConstrainedExistentialType(protocolType.getType(),
+                                                      requirements);
+    }
+    case NodeKind::ConstrainedExistentialSelf:
+      return Builder.createGenericTypeParameterType(/*depth*/ 0, /*index*/ 0);
+
+    case NodeKind::ObjectiveCProtocolSymbolicReference:
     case NodeKind::Protocol:
     case NodeKind::ProtocolSymbolicReference: {
-      if (auto Proto = decodeMangledProtocolType(Node)) {
+      if (auto Proto = decodeMangledProtocolType(Node, depth + 1)) {
         return Builder.createProtocolCompositionType(Proto, BuiltType(),
-                                                     /*IsClassBound=*/false);
+                                                     /*IsClassBound=*/false,
+                                                     forRequirement);
       }
 
-      return BuiltType();
+      return MAKE_NODE_TYPE_ERROR0(Node, "failed to decode protocol type");
     }
     case NodeKind::DynamicSelf: {
       if (Node->getNumChildren() != 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR(Node, "expected 1 child, saw %zu",
+                                    Node->getNumChildren());
 
-      auto selfType = decodeMangledType(Node->getChild(0));
-      if (!selfType)
-        return BuiltType();
+      auto selfType = decodeMangledType(Node->getChild(0), depth + 1);
+      if (selfType.isError())
+        return selfType;
 
-      return Builder.createDynamicSelfType(selfType);
+      return Builder.createDynamicSelfType(selfType.getType());
     }
     case NodeKind::DependentGenericParamType: {
       auto depth = Node->getChild(0)->getIndex();
       auto index = Node->getChild(1)->getIndex();
       return Builder.createGenericTypeParameterType(depth, index);
     }
+    case NodeKind::EscapingObjCBlock:
     case NodeKind::ObjCBlock:
     case NodeKind::CFunctionPointer:
     case NodeKind::ThinFunctionType:
@@ -494,10 +807,14 @@ class TypeDecoder {
     case NodeKind::EscapingAutoClosureType:
     case NodeKind::FunctionType: {
       if (Node->getNumChildren() < 2)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR(Node,
+                                    "fewer children (%zu) than required (2)",
+                                    Node->getNumChildren());
 
       FunctionTypeFlags flags;
-      if (Node->getKind() == NodeKind::ObjCBlock) {
+      ExtendedFunctionTypeFlags extFlags;
+      if (Node->getKind() == NodeKind::ObjCBlock ||
+          Node->getKind() == NodeKind::EscapingObjCBlock) {
         flags = flags.withConvention(FunctionMetadataConvention::Block);
       } else if (Node->getKind() == NodeKind::CFunctionPointer) {
         flags =
@@ -506,34 +823,142 @@ class TypeDecoder {
         flags = flags.withConvention(FunctionMetadataConvention::Thin);
       }
 
-      bool isThrow =
-        Node->getChild(0)->getKind() == NodeKind::ThrowsAnnotation;
-      flags = flags.withThrows(isThrow);
+      unsigned firstChildIdx = 0;
+      if (Node->getChild(firstChildIdx)->getKind() == NodeKind::ClangType) {
+        // [TODO: synthesize-Clang-type-from-mangled-name] Use the first child
+        // to create a ClangTypeInfo.
+        ++firstChildIdx;
+      }
 
-      if (isThrow && Node->getNumChildren() < 3)
-        return BuiltType();
+      BuiltType globalActorType = BuiltType();
+      if (Node->getChild(firstChildIdx)->getKind() ==
+          NodeKind::GlobalActorFunctionType) {
+        auto child = Node->getChild(firstChildIdx);
+        if (child->getNumChildren() < 1) {
+          return MAKE_NODE_TYPE_ERROR0(child,
+                                       "Global actor node is missing child");
+        }
+
+        auto globalActorResult =
+            decodeMangledType(child->getChild(0), depth + 1);
+        if (globalActorResult.isError())
+          return globalActorResult;
+
+        globalActorType = globalActorResult.getType();
+        ++firstChildIdx;
+      } else if (Node->getChild(firstChildIdx)->getKind() ==
+                 NodeKind::IsolatedAnyFunctionType) {
+        extFlags = extFlags.withIsolatedAny();
+      }
+
+      FunctionMetadataDifferentiabilityKind diffKind;
+      if (Node->getChild(firstChildIdx)->getKind() ==
+            NodeKind::DifferentiableFunctionType) {
+        auto mangledDiffKind = (MangledDifferentiabilityKind)
+            Node->getChild(firstChildIdx)->getIndex();
+        switch (mangledDiffKind) {
+        case MangledDifferentiabilityKind::NonDifferentiable:
+          assert(false && "Unexpected case NonDifferentiable");
+          break;
+        case MangledDifferentiabilityKind::Forward:
+          diffKind = FunctionMetadataDifferentiabilityKind::Forward;
+          break;
+        case MangledDifferentiabilityKind::Reverse:
+          diffKind = FunctionMetadataDifferentiabilityKind::Reverse;
+          break;
+        case MangledDifferentiabilityKind::Normal:
+          diffKind = FunctionMetadataDifferentiabilityKind::Normal;
+          break;
+        case MangledDifferentiabilityKind::Linear:
+          diffKind = FunctionMetadataDifferentiabilityKind::Linear;
+          break;
+        }
+        ++firstChildIdx;
+      }
+
+      BuiltType thrownErrorType = BuiltType();
+      bool isThrow = false;
+      if (Node->getChild(firstChildIdx)->getKind()
+            == NodeKind::ThrowsAnnotation) {
+        isThrow = true;
+        ++firstChildIdx;
+      } else if (Node->getChild(firstChildIdx)->getKind()
+                   == NodeKind::TypedThrowsAnnotation) {
+        isThrow = true;
+
+        auto child = Node->getChild(firstChildIdx);
+        if (child->getNumChildren() < 1) {
+          return MAKE_NODE_TYPE_ERROR0(child,
+                                       "Thrown error node is missing child");
+        }
+
+        auto thrownErrorResult =
+            decodeMangledType(child->getChild(0), depth + 1);
+        if (thrownErrorResult.isError())
+          return thrownErrorResult;
+
+        thrownErrorType = thrownErrorResult.getType();
+        ++firstChildIdx;
+
+        extFlags = extFlags.withTypedThrows(true);
+      }
+
+      bool isSendable = false;
+      if (Node->getChild(firstChildIdx)->getKind()
+            == NodeKind::ConcurrentFunctionType) {
+        isSendable = true;
+        ++firstChildIdx;
+      }
+
+      bool isAsync = false;
+      if (Node->getChild(firstChildIdx)->getKind()
+            == NodeKind::AsyncAnnotation) {
+        isAsync = true;
+        ++firstChildIdx;
+      }
+
+      flags = flags.withConcurrent(isSendable)
+          .withAsync(isAsync).withThrows(isThrow)
+          .withDifferentiable(diffKind.isDifferentiable());
+
+      if (Node->getNumChildren() < firstChildIdx + 2)
+        return MAKE_NODE_TYPE_ERROR(Node,
+                                    "fewer children (%zu) than required (%u)",
+                                    Node->getNumChildren(), firstChildIdx + 2);
 
       bool hasParamFlags = false;
-      SmallVector<FunctionParam<BuiltType>, 8> parameters;
-      if (!decodeMangledFunctionInputType(Node->getChild(isThrow ? 1 : 0),
-                                          parameters, hasParamFlags))
-        return BuiltType();
+      llvm::SmallVector<FunctionParam<BuiltType>, 8> parameters;
+      auto optError = decodeMangledFunctionInputType(Node->getChild(firstChildIdx),
+                                                     depth + 1, parameters, hasParamFlags);
+      if (optError)
+        return *optError;
+
       flags =
           flags.withNumParameters(parameters.size())
               .withParameterFlags(hasParamFlags)
               .withEscaping(
                           Node->getKind() == NodeKind::FunctionType ||
-                          Node->getKind() == NodeKind::EscapingAutoClosureType);
+                          Node->getKind() == NodeKind::EscapingAutoClosureType ||
+                          Node->getKind() == NodeKind::EscapingObjCBlock);
 
-      auto result = decodeMangledType(Node->getChild(isThrow ? 2 : 1));
-      if (!result) return BuiltType();
-      return Builder.createFunctionType(parameters, result, flags);
+      auto result =
+          decodeMangledType(Node->getChild(firstChildIdx + 1), depth + 1,
+                            /*forRequirement=*/false);
+      if (result.isError())
+        return result;
+
+      if (extFlags != ExtendedFunctionTypeFlags())
+        flags = flags.withExtendedFlags(true);
+
+      return Builder.createFunctionType(
+          parameters, result.getType(), flags, extFlags, diffKind, globalActorType,
+          thrownErrorType);
     }
     case NodeKind::ImplFunctionType: {
       auto calleeConvention = ImplParameterConvention::Direct_Unowned;
-      SmallVector<ImplFunctionParam<BuiltType>, 8> parameters;
-      SmallVector<ImplFunctionResult<BuiltType>, 8> results;
-      SmallVector<ImplFunctionResult<BuiltType>, 8> errorResults;
+      llvm::SmallVector<ImplFunctionParam<BuiltType>, 8> parameters;
+      llvm::SmallVector<ImplFunctionResult<BuiltType>, 8> results;
+      llvm::SmallVector<ImplFunctionResult<BuiltType>, 8> errorResults;
       ImplFunctionTypeFlags flags;
 
       for (unsigned i = 0; i < Node->getNumChildren(); i++) {
@@ -541,7 +966,7 @@ class TypeDecoder {
 
         if (child->getKind() == NodeKind::ImplConvention) {
           if (!child->hasText())
-            return BuiltType();
+            return MAKE_NODE_TYPE_ERROR0(child, "expected text");
 
           if (child->getText() == "@convention(thin)") {
             flags =
@@ -549,35 +974,66 @@ class TypeDecoder {
           } else if (child->getText() == "@callee_guaranteed") {
             calleeConvention = ImplParameterConvention::Direct_Guaranteed;
           }
-        } else if (child->getKind() == NodeKind::ImplFunctionAttribute) {
-          if (!child->hasText())
-            return BuiltType();
+        } else if (child->getKind() == NodeKind::ImplFunctionConvention) {
+          if (child->getNumChildren() == 0)
+            return MAKE_NODE_TYPE_ERROR0(child, "expected grandchildren");
+          if ((child->getFirstChild()->getKind() !=
+               NodeKind::ImplFunctionConventionName) ||
+              !child->getFirstChild()->hasText())
+            return MAKE_NODE_TYPE_ERROR0(child, "expected convention name");
 
-          StringRef text = child->getText();
-          if (text == "@convention(c)") {
+          // [TODO: synthesize-Clang-type-from-mangled-name] If there are two
+          // grand-children, the second is going to be the mangled Clang type.
+          StringRef text = child->getFirstChild()->getText();
+          if (text == "c") {
             flags =
               flags.withRepresentation(ImplFunctionRepresentation::CFunctionPointer);
-          } else if (text == "@convention(block)") {
+          } else if (text == "block") {
             flags =
               flags.withRepresentation(ImplFunctionRepresentation::Block);
           }
+        } else if (child->getKind() == NodeKind::ImplFunctionAttribute) {
+          if (!child->hasText())
+            return MAKE_NODE_TYPE_ERROR0(child, "expected text");
+          if (child->getText() == "@Sendable") {
+            flags = flags.withConcurrent();
+          } else if (child->getText() == "@async") {
+            flags = flags.withAsync();
+          }
+        } else if (child->getKind() == NodeKind::ImplDifferentiabilityKind) {
+          ImplFunctionDifferentiabilityKind implDiffKind;
+          switch ((MangledDifferentiabilityKind)child->getIndex()) {
+          #define SIMPLE_CASE(CASE) \
+              case MangledDifferentiabilityKind::CASE: \
+                implDiffKind = ImplFunctionDifferentiabilityKind::CASE; break;
+          SIMPLE_CASE(NonDifferentiable)
+          SIMPLE_CASE(Normal)
+          SIMPLE_CASE(Linear)
+          SIMPLE_CASE(Forward)
+          SIMPLE_CASE(Reverse)
+          #undef SIMPLE_CASE
+          }
+          flags = flags.withDifferentiabilityKind(implDiffKind);
         } else if (child->getKind() == NodeKind::ImplEscaping) {
           flags = flags.withEscaping();
         } else if (child->getKind() == NodeKind::ImplParameter) {
-          if (decodeImplFunctionPart(child, parameters))
-            return BuiltType();
+          if (decodeImplFunctionParam(child, depth + 1, parameters))
+            return MAKE_NODE_TYPE_ERROR0(child,
+                                         "failed to decode function parameter");
         } else if (child->getKind() == NodeKind::ImplResult) {
-          if (decodeImplFunctionPart(child, results))
-            return BuiltType();
+          if (decodeImplFunctionParam(child, depth + 1, results))
+            return MAKE_NODE_TYPE_ERROR0(child,
+                                         "failed to decode function parameter");
         } else if (child->getKind() == NodeKind::ImplErrorResult) {
-          if (decodeImplFunctionPart(child, errorResults))
-            return BuiltType();
+          if (decodeImplFunctionPart(child, depth + 1, errorResults))
+            return MAKE_NODE_TYPE_ERROR0(child,
+                                         "failed to decode function part");
         } else {
-          return BuiltType();
+          return MAKE_NODE_TYPE_ERROR0(child, "unexpected kind");
         }
       }
 
-      Optional<ImplFunctionResult<BuiltType>> errorResult;
+      llvm::Optional<ImplFunctionResult<BuiltType>> errorResult;
       switch (errorResults.size()) {
       case 0:
         break;
@@ -585,7 +1041,8 @@ class TypeDecoder {
         errorResult = errorResults.front();
         break;
       default:
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR(Node, "got %zu errors",
+                                    errorResults.size());
       }
 
       // TODO: Some cases not handled above, but *probably* they cannot
@@ -600,192 +1057,425 @@ class TypeDecoder {
 
     case NodeKind::ArgumentTuple:
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children");
 
-      return decodeMangledType(Node->getChild(0));
+      return decodeMangledType(Node->getChild(0), depth + 1);
 
     case NodeKind::ReturnType:
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children");
 
-      return decodeMangledType(Node->getChild(0));
+      return decodeMangledType(Node->getChild(0), depth + 1,
+                               /*forRequirement=*/false);
 
     case NodeKind::Tuple: {
-      SmallVector<BuiltType, 8> elements;
-      std::string labels;
-      bool variadic = false;
+      llvm::SmallVector<BuiltType, 8> elements;
+      llvm::SmallVector<StringRef, 8> labels;
+
       for (auto &element : *Node) {
         if (element->getKind() != NodeKind::TupleElement)
-          return BuiltType();
+          return MAKE_NODE_TYPE_ERROR0(Node, "unexpected kind");
 
         // If the tuple element is labeled, add its label to 'labels'.
         unsigned typeChildIndex = 0;
-        unsigned nameIdx = 0;
-        if (element->getChild(nameIdx)->getKind() == NodeKind::VariadicMarker) {
-          variadic = true;
-          nameIdx = 1;
-          typeChildIndex = 1;
+        if (element->getChild(typeChildIndex)->getKind() == NodeKind::VariadicMarker) {
+          return MAKE_NODE_TYPE_ERROR0(element->getChild(typeChildIndex),
+                                       "no children");
         }
-        if (element->getChild(nameIdx)->getKind() == NodeKind::TupleElementName) {
-          // Add spaces to terminate all the previous labels if this
-          // is the first we've seen.
-          if (labels.empty()) labels.append(elements.size(), ' ');
 
-          // Add the label and its terminator.
-          labels += element->getChild(0)->getText();
-          labels += ' ';
+        StringRef label;
+        if (element->getChild(typeChildIndex)->getKind() == NodeKind::TupleElementName) {
+          label = element->getChild(typeChildIndex)->getText();
           typeChildIndex++;
-
-        // Otherwise, add a space if a previous element had a label.
-        } else if (!labels.empty()) {
-          labels += ' ';
         }
 
         // Decode the element type.
-        BuiltType elementType =
-          decodeMangledType(element->getChild(typeChildIndex));
-        if (!elementType)
-          return BuiltType();
-
-        elements.push_back(elementType);
+        auto optError = decodeTypeSequenceElement(
+            element->getChild(typeChildIndex), depth + 1,
+            [&](BuiltType type) {
+              elements.push_back(type);
+              labels.push_back(label);
+            });
+        if (optError)
+          return *optError;
       }
-      return Builder.createTupleType(elements, std::move(labels), variadic);
+
+      return Builder.createTupleType(elements, labels);
     }
     case NodeKind::TupleElement:
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children");
 
       if (Node->getChild(0)->getKind() == NodeKind::TupleElementName) {
         if (Node->getNumChildren() < 2)
-          return BuiltType();
+          return MAKE_NODE_TYPE_ERROR(Node,
+                                      "fewer children (%zu) than required (2)",
+                                      Node->getNumChildren());
 
-        return decodeMangledType(Node->getChild(1));
+        return decodeMangledType(Node->getChild(1), depth + 1,
+                                 /*forRequirement=*/false);
       }
-      return decodeMangledType(Node->getChild(0));
+      return decodeMangledType(Node->getChild(0), depth + 1,
+                               /*forRequirement=*/false);
+
+    case NodeKind::Pack:
+    case NodeKind::SILPackDirect:
+    case NodeKind::SILPackIndirect: {
+      llvm::SmallVector<BuiltType, 8> elements;
+
+      for (auto &element : *Node) {
+        // Decode the element type.
+        auto optError = decodeTypeSequenceElement(
+            element, depth + 1,
+            [&](BuiltType elementType) {
+              elements.push_back(elementType);
+            });
+        if (optError)
+          return *optError;
+      }
+
+      switch (Node->getKind()) {
+      case NodeKind::Pack:
+        return Builder.createPackType(elements);
+      case NodeKind::SILPackDirect:
+        return Builder.createSILPackType(elements, /*isElementAddress=*/false);
+      case NodeKind::SILPackIndirect:
+        return Builder.createSILPackType(elements, /*isElementAddress=*/true);
+      default:
+        llvm_unreachable("Bad kind");
+      }
+    }
+
+    case NodeKind::PackExpansion: {
+      return MAKE_NODE_TYPE_ERROR0(Node,
+                                   "pack expansion type in unsupported position");
+    }
 
     case NodeKind::DependentGenericType: {
       if (Node->getNumChildren() < 2)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR(Node,
+                                    "fewer children (%zu) than required (2)",
+                                    Node->getNumChildren());
 
-      return decodeMangledType(Node->getChild(1));
+      return decodeMangledType(Node->getChild(1), depth + 1);
     }
     case NodeKind::DependentMemberType: {
       if (Node->getNumChildren() < 2)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR(Node,
+                                    "fewer children (%zu) than required (2)",
+                                    Node->getNumChildren());
 
-      auto base = decodeMangledType(Node->getChild(0));
-      if (!base)
-        return BuiltType();
+      auto base = decodeMangledType(Node->getChild(0), depth + 1);
+      if (base.isError())
+        return base;
       auto assocTypeChild = Node->getChild(1);
       auto member = assocTypeChild->getFirstChild()->getText();
       if (assocTypeChild->getNumChildren() < 2)
-        return Builder.createDependentMemberType(member, base);
+        return Builder.createDependentMemberType(member.str(), base.getType());
 
-      auto protocol = decodeMangledProtocolType(assocTypeChild->getChild(1));
+      auto protocol =
+          decodeMangledProtocolType(assocTypeChild->getChild(1), depth + 1);
       if (!protocol)
         return BuiltType();
-      return Builder.createDependentMemberType(member, base, protocol);
+      return Builder.createDependentMemberType(member.str(), base.getType(),
+                                               protocol);
     }
     case NodeKind::DependentAssociatedTypeRef: {
       if (Node->getNumChildren() < 2)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR(Node,
+                                    "fewer children (%zu) than required (2)",
+                                    Node->getNumChildren());
 
-      return decodeMangledType(Node->getChild(1));
+      return decodeMangledType(Node->getChild(1), depth + 1);
     }
     case NodeKind::Unowned: {
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children");
 
-      auto base = decodeMangledType(Node->getChild(0));
-      if (!base)
-        return BuiltType();
-      return Builder.createUnownedStorageType(base);
+      auto base = decodeMangledType(Node->getChild(0), depth + 1);
+      if (base.isError())
+        return base;
+      return Builder.createUnownedStorageType(base.getType());
     }
     case NodeKind::Unmanaged: {
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children");
 
-      auto base = decodeMangledType(Node->getChild(0));
-      if (!base)
-        return BuiltType();
-      return Builder.createUnmanagedStorageType(base);
+      auto base = decodeMangledType(Node->getChild(0), depth + 1);
+      if (base.isError())
+        return base;
+      return Builder.createUnmanagedStorageType(base.getType());
     }
     case NodeKind::Weak: {
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children");
 
-      auto base = decodeMangledType(Node->getChild(0));
-      if (!base)
-        return BuiltType();
-      return Builder.createWeakStorageType(base);
+      auto base = decodeMangledType(Node->getChild(0), depth + 1);
+      if (base.isError())
+        return base;
+      return Builder.createWeakStorageType(base.getType());
     }
     case NodeKind::SILBoxType: {
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children");
 
-      auto base = decodeMangledType(Node->getChild(0));
-      if (!base)
-        return BuiltType();
-      return Builder.createSILBoxType(base);
+      auto base = decodeMangledType(Node->getChild(0), depth + 1);
+      if (base.isError())
+        return base;
+      return Builder.createSILBoxType(base.getType());
     }
     case NodeKind::SILBoxTypeWithLayout: {
-      // TODO: Implement SILBoxTypeRefs with layout. As a stopgap, specify the
-      // NativeObject type ref.
-      return Builder.createBuiltinType("Builtin.NativeObject", "Bo");
+      llvm::SmallVector<Field, 4> fields;
+      llvm::SmallVector<BuiltSubstitution, 4> substitutions;
+      llvm::SmallVector<BuiltRequirement, 4> requirements;
+      llvm::SmallVector<BuiltType, 4> genericParams;
+
+      if (Node->getNumChildren() < 1)
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children");
+
+      bool pushedGenericParams = false;
+
+      if (Node->getNumChildren() > 1) {
+        auto *substNode = Node->getChild(2);
+        if (substNode->getKind() != NodeKind::TypeList)
+          return MAKE_NODE_TYPE_ERROR0(substNode, "expected type list");
+
+        auto *dependentGenericSignatureNode = Node->getChild(1);
+        if (dependentGenericSignatureNode->getKind() !=
+            NodeKind::DependentGenericSignature)
+          return MAKE_NODE_TYPE_ERROR0(dependentGenericSignatureNode,
+                                       "expected dependent generic signature");
+        if (dependentGenericSignatureNode->getNumChildren() < 1)
+          return MAKE_NODE_TYPE_ERROR(
+              dependentGenericSignatureNode,
+              "fewer children (%zu) than required (1)",
+              dependentGenericSignatureNode->getNumChildren());
+
+        // The number of generic parameters at each depth are in a mini
+        // state machine and come first.
+        llvm::SmallVector<unsigned, 4> genericParamsAtDepth;
+        for (auto *reqNode : *dependentGenericSignatureNode)
+          if (reqNode->getKind() == NodeKind::DependentGenericParamCount)
+            if (reqNode->hasIndex())
+              genericParamsAtDepth.push_back(reqNode->getIndex());
+
+        llvm::SmallVector<std::pair<unsigned, unsigned>> parameterPacks;
+        for (auto &child : *dependentGenericSignatureNode) {
+          if (child->getKind() == Demangle::Node::Kind::DependentGenericParamPackMarker) {
+            auto *marker = child->getChild(0)->getChild(0);
+            parameterPacks.emplace_back(marker->getChild(0)->getIndex(),
+                                        marker->getChild(1)->getIndex());
+          }
+        }
+
+        Builder.pushGenericParams(parameterPacks);
+        pushedGenericParams = true;
+
+        // Decode generic parameter types.
+        for (unsigned d = 0; d < genericParamsAtDepth.size(); ++d) {
+          for (unsigned i = 0; i < genericParamsAtDepth[d]; ++i) {
+            auto paramTy = Builder.createGenericTypeParameterType(d, i);
+            genericParams.push_back(paramTy);
+          }
+        }
+
+        // Decode requirements.
+        decodeRequirement<BuiltType, BuiltRequirement, BuiltLayoutConstraint,
+                          BuilderType>(dependentGenericSignatureNode,
+                                       requirements,
+                                       Builder);
+
+        // Decode substitutions.
+        for (unsigned i = 0, e = substNode->getNumChildren(); i < e; ++i) {
+          auto *subst = substNode->getChild(i);
+          auto substTy = decodeMangledType(subst, depth + 1,
+                                           /*forRequirement=*/false);
+          if (substTy.isError())
+            return substTy;
+          substitutions.emplace_back(genericParams[i], substTy.getType());
+        }
+      }
+
+      // Decode field types.
+      auto fieldsNode = Node->getChild(0);
+      if (fieldsNode->getKind() != NodeKind::SILBoxLayout)
+        return MAKE_NODE_TYPE_ERROR0(fieldsNode, "expected layout");
+      for (auto *fieldNode : *fieldsNode) {
+        bool isMutable;
+        switch (fieldNode->getKind()) {
+        case NodeKind::SILBoxMutableField: isMutable = true; break;
+        case NodeKind::SILBoxImmutableField: isMutable = false; break;
+        default:
+          return MAKE_NODE_TYPE_ERROR0(fieldNode, "unhandled field type");
+        }
+        if (fieldNode->getNumChildren() < 1)
+          return MAKE_NODE_TYPE_ERROR0(fieldNode, "no children");
+        auto type = decodeMangledType(fieldNode->getChild(0), depth + 1);
+        if (type.isError())
+          return type;
+        fields.emplace_back(type.getType(), isMutable);
+      }
+
+      if (pushedGenericParams) {
+        Builder.popGenericParams();
+      }
+
+      return Builder.createSILBoxTypeWithLayout(fields, substitutions,
+                                                requirements);
     }
     case NodeKind::SugaredOptional: {
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children");
 
-      auto base = decodeMangledType(Node->getChild(0));
-      if (!base)
-        return BuiltType();
+      auto base = decodeMangledType(Node->getChild(0), depth + 1);
+      if (base.isError())
+        return base;
 
-      return Builder.createOptionalType(base);
+      return Builder.createOptionalType(base.getType());
     }
     case NodeKind::SugaredArray: {
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children");
 
-      auto base = decodeMangledType(Node->getChild(0));
-      if (!base)
-        return BuiltType();
+      auto base = decodeMangledType(Node->getChild(0), depth + 1);
+      if (base.isError())
+        return base;
 
-      return Builder.createArrayType(base);
+      return Builder.createArrayType(base.getType());
     }
     case NodeKind::SugaredDictionary: {
       if (Node->getNumChildren() < 2)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR(Node,
+                                    "fewer children (%zu) than required (2)",
+                                    Node->getNumChildren());
 
-      auto key = decodeMangledType(Node->getChild(0));
-      if (!key)
-        return BuiltType();
+      auto key = decodeMangledType(Node->getChild(0), depth + 1);
+      if (key.isError())
+        return key;
 
-      auto value = decodeMangledType(Node->getChild(1));
-      if (!key)
-        return BuiltType();
+      auto value = decodeMangledType(Node->getChild(1), depth + 1);
+      if (value.isError())
+        return value;
 
-      return Builder.createDictionaryType(key, value);
+      return Builder.createDictionaryType(key.getType(), value.getType());
     }
     case NodeKind::SugaredParen: {
       if (Node->getNumChildren() < 1)
-        return BuiltType();
+        return MAKE_NODE_TYPE_ERROR0(Node, "no children");
 
-      auto base = decodeMangledType(Node->getChild(0));
-      if (!base)
-        return BuiltType();
+      auto base = decodeMangledType(Node->getChild(0), depth + 1);
+      if (base.isError())
+        return base;
 
-      return Builder.createParenType(base);
+      return Builder.createParenType(base.getType());
     }
+    case NodeKind::OpaqueType: {
+      if (Node->getNumChildren() < 3)
+        return MAKE_NODE_TYPE_ERROR(Node,
+                                    "fewer children (%zu) than required (3)",
+                                    Node->getNumChildren());
+      auto descriptor = Node->getChild(0);
+      auto ordinalNode = Node->getChild(1);
+
+      if (ordinalNode->getKind() != NodeKind::Index
+          || !ordinalNode->hasIndex())
+        return MAKE_NODE_TYPE_ERROR0(ordinalNode,
+                                     "unexpected kind or no index");
+      auto ordinal = ordinalNode->getIndex();
+
+      std::vector<BuiltType> genericArgsBuf;
+      std::vector<unsigned> genericArgsLevels;
+      auto boundGenerics = Node->getChild(2);
+      for (unsigned i = 0; i < boundGenerics->getNumChildren(); ++i) {
+        genericArgsLevels.push_back(genericArgsBuf.size());
+        auto genericsNode = boundGenerics->getChild(i);
+        if (genericsNode->getKind() != NodeKind::TypeList)
+          break;
+        for (auto argNode : *genericsNode) {
+          auto arg = decodeMangledType(argNode, depth + 1,
+                                       /*forRequirement=*/false);
+          if (arg.isError())
+            return arg;
+          genericArgsBuf.push_back(arg.getType());
+        }
+      }
+      genericArgsLevels.push_back(genericArgsBuf.size());
+      std::vector<llvm::ArrayRef<BuiltType>> genericArgs;
+      for (unsigned i = 0; i < genericArgsLevels.size() - 1; ++i) {
+        auto start = genericArgsLevels[i], end = genericArgsLevels[i+1];
+        genericArgs.emplace_back(genericArgsBuf.data() + start,
+                                 end - start);
+      }
+      
+      return Builder.resolveOpaqueType(descriptor, genericArgs, ordinal);
+    }
+    // TODO: Handle OpaqueReturnType, when we're in the middle of reconstructing
+    // the defining decl
     default:
-      return BuiltType();
+
+      return MAKE_NODE_TYPE_ERROR0(Node, "unexpected kind");
     }
   }
 
 private:
+  template<typename Fn>
+  llvm::Optional<TypeLookupError>
+  decodeTypeSequenceElement(Demangle::NodePointer node, unsigned depth,
+                            Fn resultCallback) {
+    if (node->getKind() == NodeKind::Type)
+      node = node->getChild(0);
+
+    if (node->getKind() == NodeKind::PackExpansion) {
+      if (node->getNumChildren() < 2)
+        return MAKE_NODE_TYPE_ERROR(node,
+                                    "fewer children (%zu) than required (2)",
+                                    node->getNumChildren());
+
+      auto patternType = node->getChild(0);
+
+      // Decode the shape pack first, to form a metadata pack.
+      auto countType = decodeMangledType(node->getChild(1), depth);
+      if (countType.isError())
+        return *countType.getError();
+
+      // Push the pack expansion on the active expansion stack inside the
+      // builder concept.
+      size_t numElements = Builder.beginPackExpansion(countType.getType());
+
+      for (size_t i = 0; i < numElements; ++i) {
+        // Advance the lane index inside the builder concept.
+        Builder.advancePackExpansion(i);
+
+        // Decode the pattern type, taking the ith element of each pack
+        // referenced therein.
+        auto expandedElementType = decodeMangledType(patternType, depth);
+        if (expandedElementType.isError())
+          return *expandedElementType.getError();
+
+        resultCallback(Builder.createExpandedPackElement(
+            expandedElementType.getType()));
+      }
+
+      // Pop the active expansion stack inside the builder concept.
+      Builder.endPackExpansion();
+    } else {
+      auto elementType =
+          decodeMangledType(node, depth, /*forRequirement=*/false);
+      if (elementType.isError())
+        return *elementType.getError();
+
+      resultCallback(elementType.getType());
+    }
+
+    return llvm::None;
+  }
+
   template <typename T>
-  bool decodeImplFunctionPart(Demangle::NodePointer node,
-                              SmallVectorImpl<T> &results) {
+  bool decodeImplFunctionPart(Demangle::NodePointer node, unsigned depth,
+                              llvm::SmallVectorImpl<T> &results) {
+    if (depth > TypeDecoder::MaxDepth)
+      return true;
+
     if (node->getNumChildren() != 2)
       return true;
     
@@ -794,24 +1484,85 @@ private:
       return true;
 
     StringRef conventionString = node->getChild(0)->getText();
-    Optional<typename T::ConventionType> convention =
+    llvm::Optional<typename T::ConventionType> convention =
         T::getConventionFromString(conventionString);
     if (!convention)
       return true;
-    BuiltType type = decodeMangledType(node->getChild(1));
-    if (!type)
+    auto type = decodeMangledType(node->getChild(1), depth + 1);
+    if (type.isError())
       return true;
 
-    results.emplace_back(*convention, type);
+    results.emplace_back(type.getType(), *convention);
     return false;
   }
 
-  bool decodeMangledTypeDecl(Demangle::NodePointer node,
-                             BuiltTypeDecl &typeDecl,
-                             BuiltType &parent,
-                             bool &typeAlias) {
+  template <typename T>
+  bool decodeImplFunctionParam(Demangle::NodePointer node, unsigned depth,
+                               llvm::SmallVectorImpl<T> &results) {
+    if (depth > TypeDecoder::MaxDepth)
+      return true;
+
+    // Children: `convention, differentiability?, type`
+    if (node->getNumChildren() != 2 && node->getNumChildren() != 3)
+      return true;
+
+    auto *conventionNode = node->getChild(0);
+    auto *typeNode = node->getLastChild();
+    if (conventionNode->getKind() != Node::Kind::ImplConvention ||
+        typeNode->getKind() != Node::Kind::Type)
+      return true;
+
+    StringRef conventionString = conventionNode->getText();
+    auto convention = T::getConventionFromString(conventionString);
+    if (!convention)
+      return true;
+    auto result = decodeMangledType(typeNode, depth + 1);
+    if (result.isError())
+      return true;
+
+    typename T::OptionsType options;
+    if (node->getNumChildren() == 3) {
+      auto diffKindNode = node->getChild(1);
+      if (diffKindNode->getKind() !=
+          Node::Kind::ImplParameterResultDifferentiability)
+        return true;
+      auto optDiffOptions =
+          T::getDifferentiabilityFromString(diffKindNode->getText());
+      if (!optDiffOptions)
+        return true;
+      options |= *optDiffOptions;
+    }
+
+    results.emplace_back(result.getType(), *convention, options);
+
+    return false;
+  }
+
+  llvm::Optional<TypeLookupError>
+  decodeGenericArgs(Demangle::NodePointer node, unsigned depth,
+                    llvm::SmallVectorImpl<BuiltType> &args) {
+    if (node->getKind() != NodeKind::TypeList)
+      return MAKE_NODE_TYPE_ERROR0(node, "is not TypeList");
+
+    for (auto genericArg : *node) {
+      auto paramType = decodeMangledType(genericArg, depth,
+                                         /*forRequirement=*/false);
+      if (paramType.isError())
+        return *paramType.getError();
+      args.push_back(paramType.getType());
+    }
+    return llvm::None;
+  }
+
+  llvm::Optional<TypeLookupError>
+  decodeMangledTypeDecl(Demangle::NodePointer node, unsigned depth,
+                        BuiltTypeDecl &typeDecl, BuiltType &parent,
+                        bool &typeAlias) {
+    if (depth > TypeDecoder::MaxDepth)
+      return TypeLookupError("Mangled type is too complex");
+
     if (node->getKind() == NodeKind::Type)
-      return decodeMangledTypeDecl(node->getChild(0), typeDecl,
+      return decodeMangledTypeDecl(node->getChild(0), depth + 1, typeDecl,
                                    parent, typeAlias);
 
     Demangle::NodePointer declNode;
@@ -820,7 +1571,9 @@ private:
       declNode = node;
     } else {
       if (node->getNumChildren() < 2)
-        return false;
+        return MAKE_NODE_TYPE_ERROR(
+            node, "Number of node children (%zu) less than required (2)",
+            node->getNumChildren());
 
       auto parentContext = node->getChild(0);
 
@@ -836,29 +1589,42 @@ private:
       case Node::Kind::Extension:
         // Decode the type being extended.
         if (parentContext->getNumChildren() < 2)
-          return false;
+          return MAKE_NODE_TYPE_ERROR(parentContext,
+                                      "Number of parentContext children (%zu) "
+                                      "less than required (2)",
+                                      node->getNumChildren());
         parentContext = parentContext->getChild(1);
         LLVM_FALLTHROUGH;
       default:
-        parent = decodeMangledType(parentContext);
+        parent = decodeMangledType(parentContext, depth + 1).getType();
         // Remove any generic arguments from the context node, producing a
         // node that references the nominal type declaration.
-        declNode = Demangle::getUnspecialized(node, Builder.getNodeFactory());
+        auto unspec =
+            Demangle::getUnspecialized(node, Builder.getNodeFactory());
+        if (!unspec.isSuccess())
+          return TypeLookupError("Failed to unspecialize type");
+        declNode = unspec.result();
         break;
       }
     }
     typeDecl = Builder.createTypeDecl(declNode, typeAlias);
-    if (!typeDecl) return false;
+    if (!typeDecl)
+      return TypeLookupError("Failed to create type decl");
 
-    return true;
+    return llvm::None;
   }
 
-  BuiltProtocolDecl decodeMangledProtocolType(Demangle::NodePointer node) {
-    if (node->getKind() == NodeKind::Type)
-      return decodeMangledProtocolType(node->getChild(0));
+  BuiltProtocolDecl decodeMangledProtocolType(Demangle::NodePointer node,
+                                              unsigned depth) {
+    if (depth > TypeDecoder::MaxDepth)
+      return BuiltProtocolDecl();
 
-    if ((node->getNumChildren() < 2 || node->getKind() != NodeKind::Protocol)
-        && node->getKind() != NodeKind::ProtocolSymbolicReference)
+    if (node->getKind() == NodeKind::Type)
+      return decodeMangledProtocolType(node->getChild(0), depth + 1);
+
+    if ((node->getNumChildren() < 2 || node->getKind() != NodeKind::Protocol) &&
+        node->getKind() != NodeKind::ProtocolSymbolicReference &&
+        node->getKind() != NodeKind::ObjectiveCProtocolSymbolicReference)
       return BuiltProtocolDecl();
 
 #if SWIFT_OBJC_INTEROP
@@ -869,63 +1635,82 @@ private:
     return Builder.createProtocolDecl(node);
   }
 
-  bool decodeMangledFunctionInputType(
-      Demangle::NodePointer node,
-      SmallVectorImpl<FunctionParam<BuiltType>> &params,
+  llvm::Optional<TypeLookupError> decodeMangledFunctionInputType(
+      Demangle::NodePointer node, unsigned depth,
+      llvm::SmallVectorImpl<FunctionParam<BuiltType>> &params,
       bool &hasParamFlags) {
+    if (depth > TypeDecoder::MaxDepth)
+      return llvm::None;
+
     // Look through a couple of sugar nodes.
     if (node->getKind() == NodeKind::Type ||
         node->getKind() == NodeKind::ArgumentTuple) {
-      return decodeMangledFunctionInputType(node->getFirstChild(), params,
-                                            hasParamFlags);
+      return decodeMangledFunctionInputType(node->getFirstChild(), depth + 1,
+                                            params, hasParamFlags);
     }
 
     auto decodeParamTypeAndFlags =
         [&](Demangle::NodePointer typeNode,
-            FunctionParam<BuiltType> &param) -> bool {
+            FunctionParam<BuiltType> &param) -> llvm::Optional<TypeLookupError> {
       Demangle::NodePointer node = typeNode;
 
-      auto setOwnership = [&](ValueOwnership ownership) {
-        param.setValueOwnership(ownership);
-        node = node->getFirstChild();
-        hasParamFlags = true;
-      };
-      switch (node->getKind()) {
-      case NodeKind::InOut:
-        setOwnership(ValueOwnership::InOut);
-        break;
+      bool recurse = true;
+      while (recurse) {
+        switch (node->getKind()) {
+        case NodeKind::InOut:
+          param.setValueOwnership(ValueOwnership::InOut);
+          node = node->getFirstChild();
+          hasParamFlags = true;
+          break;
 
-      case NodeKind::Shared:
-        setOwnership(ValueOwnership::Shared);
-        break;
+        case NodeKind::Shared:
+          param.setValueOwnership(ValueOwnership::Shared);
+          node = node->getFirstChild();
+          hasParamFlags = true;
+          break;
 
-      case NodeKind::Owned:
-        setOwnership(ValueOwnership::Owned);
-        break;
+        case NodeKind::Owned:
+          param.setValueOwnership(ValueOwnership::Owned);
+          node = node->getFirstChild();
+          hasParamFlags = true;
+          break;
 
-      case NodeKind::AutoClosureType:
-      case NodeKind::EscapingAutoClosureType: {
-        param.setAutoClosure();
-        hasParamFlags = true;
-        break;
+        case NodeKind::NoDerivative:
+          param.setNoDerivative();
+          node = node->getFirstChild();
+          hasParamFlags = true;
+          break;
+
+        case NodeKind::Isolated:
+          param.setIsolated();
+          node = node->getFirstChild();
+          hasParamFlags = true;
+          break;
+
+        case NodeKind::AutoClosureType:
+        case NodeKind::EscapingAutoClosureType:
+          param.setAutoClosure();
+          hasParamFlags = true;
+          recurse = false;
+          break;
+
+        default:
+          recurse = false;
+          break;
+        }
       }
 
-      default:
-        break;
-      }
-
-      auto paramType = decodeMangledType(node);
-      if (!paramType)
-        return false;
-
-      param.setType(paramType);
-      return true;
+      return decodeTypeSequenceElement(node, depth + 1,
+                                       [&](BuiltType paramType) {
+                                         param.setType(paramType);
+                                         params.push_back(param);
+                                       });
     };
 
-    auto decodeParam = [&](NodePointer paramNode)
-        -> Optional<FunctionParam<BuiltType>> {
+    auto decodeParam =
+        [&](NodePointer paramNode) -> llvm::Optional<TypeLookupError> {
       if (paramNode->getKind() != NodeKind::TupleElement)
-        return None;
+        return llvm::None;
 
       FunctionParam<BuiltType> param;
       for (const auto &child : *paramNode) {
@@ -939,51 +1724,53 @@ private:
           hasParamFlags = true;
           break;
 
-        case NodeKind::Type:
-          if (!decodeParamTypeAndFlags(child->getFirstChild(), param))
-            return None;
+        case NodeKind::Type: {
+          auto optError = decodeParamTypeAndFlags(
+              child->getFirstChild(), param);
+          if (optError)
+            return optError;
           break;
+        }
 
         default:
-          return None;
+          return TYPE_LOOKUP_ERROR_FMT("unknown node");
         }
       }
 
-      return param;
+      return llvm::None;
     };
 
     // Expand a single level of tuple.
     if (node->getKind() == NodeKind::Tuple) {
       // Decode all the elements as separate arguments.
       for (const auto &elt : *node) {
-        auto param = decodeParam(elt);
-        if (!param)
-          return false;
-
-        params.push_back(std::move(*param));
+        auto optError = decodeParam(elt);
+        if (optError)
+          return *optError;
       }
 
-      return true;
+      return llvm::None;
     }
 
     // Otherwise, handle the type as a single argument.
     FunctionParam<BuiltType> param;
-    if (!decodeParamTypeAndFlags(node, param))
-      return false;
+    auto optError = decodeParamTypeAndFlags(node, param);
+    if (optError)
+      return *optError;
 
-    params.push_back(std::move(param));
-    return true;
+    return llvm::None;
   }
 };
 
-template<typename BuilderType>
-inline typename BuilderType::BuiltType
-decodeMangledType(BuilderType &Builder,
-                  NodePointer Node) {
-  return TypeDecoder<BuilderType>(Builder).decodeMangledType(Node);
+template <typename BuilderType>
+inline TypeLookupErrorOr<typename BuilderType::BuiltType>
+decodeMangledType(BuilderType &Builder, NodePointer Node,
+                  bool forRequirement = false) {
+  return TypeDecoder<BuilderType>(Builder)
+      .decodeMangledType(Node, forRequirement);
 }
 
-
+SWIFT_END_INLINE_NAMESPACE
 } // end namespace Demangle
 } // end namespace swift
 

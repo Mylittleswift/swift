@@ -21,6 +21,7 @@
 
 #include "Fulfillment.h"
 #include "GenericRequirement.h"
+#include "MetadataSource.h"
 
 namespace llvm {
   class Type;
@@ -40,12 +41,15 @@ namespace swift {
 namespace irgen {
   class Address;
   class DynamicMetadataRequest;
+  class EntryPointArgumentEmission;
   class Explosion;
   class FunctionPointer;
   class IRGenFunction;
   class IRGenModule;
   class MetadataPath;
   class MetadataResponse;
+  class NativeCCEntryPointArgumentEmission;
+  class PolymorphicSignatureExpandedTypeSource;
   class ProtocolInfo;
   class TypeInfo;
 
@@ -64,8 +68,7 @@ namespace irgen {
 
   /// Extract the method pointer from an archetype's witness table
   /// as a function value.
-  FunctionPointer emitWitnessMethodValue(IRGenFunction &IGF,
-                                         CanType baseTy,
+  FunctionPointer emitWitnessMethodValue(IRGenFunction &IGF, CanType baseTy,
                                          llvm::Value **baseMetadataCache,
                                          SILDeclRef member,
                                          ProtocolConformanceRef conformance);
@@ -96,11 +99,28 @@ namespace irgen {
     return -1 - (int)index;
   }
 
+  llvm::Value *loadParentProtocolWitnessTable(IRGenFunction &IGF,
+                                              llvm::Value *wtable,
+                                              WitnessIndex index);
+
+  llvm::Value *loadConditionalConformance(IRGenFunction &IGF,
+                                          llvm::Value *wtable,
+                                          WitnessIndex index);
+
+  struct ExpandedSignature {
+    unsigned numShapes;
+    unsigned numTypeMetadataPtrs;
+    unsigned numWitnessTablePtrs;
+  };
+
   /// Add the witness parameters necessary for calling a function with
   /// the given generics clause.
-  void expandPolymorphicSignature(IRGenModule &IGM,
-                                  CanSILFunctionType type,
-                                  SmallVectorImpl<llvm::Type*> &types);
+  /// Returns the number of lowered parameters of each kind.
+  ExpandedSignature expandPolymorphicSignature(
+      IRGenModule &IGM, CanSILFunctionType type,
+      SmallVectorImpl<llvm::Type *> &types,
+      SmallVectorImpl<PolymorphicSignatureExpandedTypeSource> *outReqs =
+          nullptr);
 
   /// Return the number of trailing arguments necessary for calling a
   /// witness method.
@@ -121,9 +141,10 @@ namespace irgen {
 
   /// Collect any required metadata for a witness method from the end
   /// of the given parameter list.
-  void collectTrailingWitnessMetadata(IRGenFunction &IGF, SILFunction &fn,
-                                      Explosion &params,
-                                      WitnessMetadata &metadata);
+  void
+  collectTrailingWitnessMetadata(IRGenFunction &IGF, SILFunction &fn,
+                                 NativeCCEntryPointArgumentEmission &params,
+                                 WitnessMetadata &metadata);
 
   using GetParameterFn = llvm::function_ref<llvm::Value*(unsigned)>;
 
@@ -132,12 +153,11 @@ namespace irgen {
   ///
   /// \param witnessMetadata - can be omitted if the function is
   ///   definitely not a witness method
-  void emitPolymorphicParameters(IRGenFunction &IGF,
-                                 SILFunction &Fn,
-                                 Explosion &args,
+  void emitPolymorphicParameters(IRGenFunction &IGF, SILFunction &Fn,
+                                 EntryPointArgumentEmission &emission,
                                  WitnessMetadata *witnessMetadata,
                                  const GetParameterFn &getParameter);
- 
+
   void emitPolymorphicParametersFromArray(IRGenFunction &IGF,
                                           NominalTypeDecl *typeDecl,
                                           Address array,
@@ -177,59 +197,8 @@ namespace irgen {
                                    CanType srcType,
                                    ProtocolConformanceRef conformance);
 
-  class MetadataSource {
-  public:
-    enum class Kind {
-      /// Metadata is derived from a source class pointer.
-      ClassPointer,
-
-      /// Metadata is derived from a type metadata pointer.
-      Metadata,
-
-      /// Metadata is derived from the origin type parameter.
-      GenericLValueMetadata,
-
-      /// Metadata is obtained directly from the from a Self metadata
-      /// parameter passed via the WitnessMethod convention.
-      SelfMetadata,
-
-      /// Metadata is derived from the Self witness table parameter
-      /// passed via the WitnessMethod convention.
-      SelfWitnessTable,
-    };
-
-    static bool requiresSourceIndex(Kind kind) {
-      return (kind == Kind::ClassPointer ||
-              kind == Kind::Metadata ||
-              kind == Kind::GenericLValueMetadata);
-    }
-
-    enum : unsigned { InvalidSourceIndex = ~0U };
-
-  private:
-    /// The kind of source this is.
-    Kind TheKind;
-
-    /// The parameter index, for ClassPointer and Metadata sources.
-    unsigned Index;
-
-  public:
-    CanType Type;
-
-    MetadataSource(Kind kind, unsigned index, CanType type)
-      : TheKind(kind), Index(index), Type(type) {
-      assert(index != InvalidSourceIndex || !requiresSourceIndex(kind));
-    }
-
-    Kind getKind() const { return TheKind; }
-    unsigned getParamIndex() const {
-      assert(requiresSourceIndex(getKind()));
-      return Index;
-    }
-  };
-
   using GenericParamFulfillmentCallback =
-    llvm::function_ref<void(CanType genericParamType,
+    llvm::function_ref<void(GenericRequirement req,
                             const MetadataSource &source,
                             const MetadataPath &path)>;
 

@@ -4,9 +4,9 @@
 // UNSUPPORTED: OS=watchos
 
 import StdlibUnittest
-#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+#if canImport(Darwin)
   import Darwin
-#elseif os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
+#elseif canImport(Glibc)
   import Glibc
 #elseif os(Windows)
   import MSVCRT
@@ -32,7 +32,7 @@ TestSuiteChildCrashes.test("passes") {
 // CHECK: [ RUN      ] TestSuiteChildCrashes.passes
 // CHECK: [       OK ] TestSuiteChildCrashes.passes
 // CHECK: TestSuiteChildCrashes: All tests passed
-// CHECK: stderr>>> Fatal error: Crash at exit:
+// CHECK: stderr>>> {{.*}}Fatal error: Crash at exit
 // CHECK: stderr>>> CRASHED: SIG
 // CHECK: The child process failed during shutdown, aborting.
 // CHECK: abort()

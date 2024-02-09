@@ -14,19 +14,18 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/AST/ASTContext.h"
 #include "swift/AST/Identifier.h"
+#include "swift/Parse/Lexer.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/ConvertUTF.h"
 #include "clang/Basic/CharInfo.h"
 using namespace swift;
 
-void *DeclBaseName::SubscriptIdentifierData =
-    &DeclBaseName::SubscriptIdentifierData;
-void *DeclBaseName::ConstructorIdentifierData =
-    &DeclBaseName::ConstructorIdentifierData;
-void *DeclBaseName::DestructorIdentifierData =
-    &DeclBaseName::DestructorIdentifierData;
+constexpr const Identifier::Aligner DeclBaseName::SubscriptIdentifierData{};
+constexpr const Identifier::Aligner DeclBaseName::ConstructorIdentifierData{};
+constexpr const Identifier::Aligner DeclBaseName::DestructorIdentifierData{};
 
 raw_ostream &llvm::operator<<(raw_ostream &OS, Identifier I) {
   if (I.get() == nullptr)
@@ -48,6 +47,19 @@ raw_ostream &llvm::operator<<(raw_ostream &OS, DeclName I) {
   }
   OS << ")";
   return OS;
+}
+
+void swift::simple_display(llvm::raw_ostream &out, DeclName name) {
+  out << "'" << name << "'";
+}
+
+raw_ostream &llvm::operator<<(raw_ostream &OS, DeclNameRef I) {
+  OS << I.getFullName();
+  return OS;
+}
+
+void swift::simple_display(llvm::raw_ostream &out, DeclNameRef name) {
+  out << "'" << name << "'";
 }
 
 raw_ostream &llvm::operator<<(raw_ostream &OS, swift::ObjCSelector S) {
@@ -188,6 +200,24 @@ llvm::raw_ostream &DeclName::printPretty(llvm::raw_ostream &os) const {
   return print(os, /*skipEmptyArgumentNames=*/!isSpecial());
 }
 
+void DeclNameRef::dump() const {
+  llvm::errs() << *this << "\n";
+}
+
+StringRef DeclNameRef::getString(llvm::SmallVectorImpl<char> &scratch,
+                             bool skipEmptyArgumentNames) const {
+  return FullName.getString(scratch, skipEmptyArgumentNames);
+}
+
+llvm::raw_ostream &DeclNameRef::print(llvm::raw_ostream &os,
+                                  bool skipEmptyArgumentNames) const {
+  return FullName.print(os, skipEmptyArgumentNames);
+}
+
+llvm::raw_ostream &DeclNameRef::printPretty(llvm::raw_ostream &os) const {
+  return FullName.printPretty(os);
+}
+
 ObjCSelector::ObjCSelector(ASTContext &ctx, unsigned numArgs,
                            ArrayRef<Identifier> pieces) {
   if (numArgs == 0) {
@@ -198,6 +228,42 @@ ObjCSelector::ObjCSelector(ASTContext &ctx, unsigned numArgs,
 
   assert(numArgs == pieces.size() && "Wrong number of selector pieces");
   Storage = DeclName(ctx, Identifier(), pieces);
+}
+
+llvm::Optional<ObjCSelector>
+ObjCSelector::parse(ASTContext &ctx, StringRef string) {
+  // Find the first colon.
+  auto colonPos = string.find(':');
+
+  // If there is no colon, we have a nullary selector.
+  if (colonPos == StringRef::npos) {
+    if (string.empty() || !Lexer::isIdentifier(string))
+      return llvm::None;
+    return ObjCSelector(ctx, 0, { ctx.getIdentifier(string) });
+  }
+
+  SmallVector<Identifier, 2> pieces;
+  do {
+    // Check whether we have a valid selector piece.
+    auto piece = string.substr(0, colonPos);
+    if (piece.empty()) {
+      pieces.push_back(Identifier());
+    } else {
+      if (!Lexer::isIdentifier(piece))
+        return llvm::None;
+      pieces.push_back(ctx.getIdentifier(piece));
+    }
+
+    // Move to the next piece.
+    string = string.substr(colonPos+1);
+    colonPos = string.find(':');
+  } while (colonPos != StringRef::npos);
+
+  // If anything remains of the string, it's not a selector.
+  if (!string.empty())
+    return llvm::None;
+
+  return ObjCSelector(ctx, pieces.size(), pieces);
 }
 
 ObjCSelectorFamily ObjCSelector::getSelectorFamily() const {

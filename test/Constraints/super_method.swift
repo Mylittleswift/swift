@@ -43,7 +43,7 @@ class X<T> {
 }
 
 class Y<U> : X<Int> {
-  func otherMethod<U>(_ x: Int, y: U) {
+  func otherMethod<V>(_ x: Int, y: V) {
     super.method(x, y: y)
   }
 }
@@ -58,4 +58,13 @@ func use_d(_ d: D) -> Int {
 
 func not_method() {
   super.foo() // expected-error{{'super' cannot be used outside of class members}}
+}
+
+// rdar://problem/50819554 - inability to properly resolve superclass shouldn't crash the solver
+func test_that_invalid_supertype_ref_doesnt_crash() {
+  final class Node: ManagedBuffer<AnyObject, Undefined> { // expected-error {{cannot find type 'Undefined' in scope}}
+    static func create() {
+      super.create()
+    }
+  }
 }

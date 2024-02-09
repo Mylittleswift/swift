@@ -12,7 +12,8 @@ struct S1 {}
 struct S2 {}
 
 // CHECK-LABEL: sil hidden [ossa] @$s21same_type_abstraction28callClosureWithConcreteTypes{{[_0-9a-zA-Z]*}}F
-// CHECK:         function_ref @$s{{.*}}TR :
+// CHECK-NOT:         function_ref @$s{{.*}}TR :
+// CHECK:             apply {{.*}} : ${{.*}}(@in_guaranteed
 func callClosureWithConcreteTypes<T: Associated, U: Associated>(x: Abstracted<T, U>, arg: S1) -> S2 where T.Assoc == S1, U.Assoc == S2 {
   return x.closure(arg)
 }
@@ -30,9 +31,9 @@ extension MyProtocol where Data == (ReadData, ReadData) {
   // CHECK-LABEL: sil hidden [ossa] @$s21same_type_abstraction10MyProtocolPAA8ReadDataQz_AEt0G0RtzrlE07currentG0AE_AEtyF : $@convention(method) <Self where Self : MyProtocol, Self.Data == (Self.ReadData, Self.ReadData)> (@in_guaranteed Self) -> (@out Self.ReadData, @out Self.ReadData)
   func currentData() -> Data {
     // CHECK: bb0(%0 : $*Self.ReadData, %1 : $*Self.ReadData, %2 : $*Self):
-    // CHECK:   [[READ_FN:%.*]] = witness_method $Self, #MyProtocol.readData!1 : {{.*}} : $@convention(witness_method: MyProtocol) <τ_0_0 where τ_0_0 : MyProtocol> (@in_guaranteed τ_0_0) -> @out τ_0_0.ReadData
+    // CHECK:   [[READ_FN:%.*]] = witness_method $Self, #MyProtocol.readData : {{.*}} : $@convention(witness_method: MyProtocol) <τ_0_0 where τ_0_0 : MyProtocol> (@in_guaranteed τ_0_0) -> @out τ_0_0.ReadData
     // CHECK:   apply [[READ_FN]]<Self>(%0, %2) : $@convention(witness_method: MyProtocol) <τ_0_0 where τ_0_0 : MyProtocol> (@in_guaranteed τ_0_0) -> @out τ_0_0.ReadData
-    // CHECK:   [[READ_FN:%.*]] = witness_method $Self, #MyProtocol.readData!1 : {{.*}} : $@convention(witness_method: MyProtocol) <τ_0_0 where τ_0_0 : MyProtocol> (@in_guaranteed τ_0_0) -> @out τ_0_0.ReadData
+    // CHECK:   [[READ_FN:%.*]] = witness_method $Self, #MyProtocol.readData : {{.*}} : $@convention(witness_method: MyProtocol) <τ_0_0 where τ_0_0 : MyProtocol> (@in_guaranteed τ_0_0) -> @out τ_0_0.ReadData
     // CHECK:   apply [[READ_FN]]<Self>(%1, %2) : $@convention(witness_method: MyProtocol) <τ_0_0 where τ_0_0 : MyProtocol> (@in_guaranteed τ_0_0) -> @out τ_0_0.ReadData
     // CHECK:   return
     return (readData(), readData())

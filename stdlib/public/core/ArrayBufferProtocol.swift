@@ -49,8 +49,8 @@ where Indices == Range<Int> {
     minimumCapacity: Int
   ) -> _ContiguousArrayBuffer<Element>?
 
-  /// Returns `true` iff this buffer is backed by a uniquely-referenced mutable
-  /// _ContiguousArrayBuffer.
+  /// Returns `true` if this buffer is backed by a uniquely-referenced mutable
+  /// _ContiguousArrayBuffer; otherwise, returns `false`.
   ///
   /// - Note: This function must remain mutating; otherwise the buffer
   ///   may acquire spurious extra references, which will cause
@@ -71,7 +71,7 @@ where Indices == Range<Int> {
     _ subrange: Range<Int>,
     with newCount: Int,
     elementsOf newValues: __owned C
-  ) where C : Collection, C.Element == Element
+  ) where C: Collection, C.Element == Element
 
   /// Returns a `_SliceBuffer` containing the elements in `bounds`.
   subscript(bounds: Range<Int>) -> _SliceBuffer<Element> { get }
@@ -97,6 +97,10 @@ where Indices == Range<Int> {
   /// The number of elements the buffer can store without reallocation.
   var capacity: Int { get }
 
+  #if $Embedded
+  typealias AnyObject = Builtin.NativeObject
+  #endif
+
   /// An object that keeps the elements stored in this buffer alive.
   var owner: AnyObject { get }
 
@@ -119,8 +123,7 @@ where Indices == Range<Int> {
   var identity: UnsafeRawPointer { get }
 }
 
-extension _ArrayBufferProtocol where Indices == Range<Int>{
-
+extension _ArrayBufferProtocol {
   @inlinable
   internal var subscriptBaseAddress: UnsafeMutablePointer<Element> {
     return firstElementAddress
@@ -144,13 +147,16 @@ extension _ArrayBufferProtocol where Indices == Range<Int>{
     _ subrange: Range<Int>,
     with newCount: Int,
     elementsOf newValues: __owned C
-  ) where C : Collection, C.Element == Element {
+  ) where C: Collection, C.Element == Element {
     _internalInvariant(startIndex == 0, "_SliceBuffer should override this function.")
     let oldCount = self.count
     let eraseCount = subrange.count
 
     let growth = newCount - eraseCount
-    self.count = oldCount + growth
+    // This check will prevent storing a 0 count to the empty array singleton.
+    if growth != 0 {
+      self.count = oldCount + growth
+    }
 
     let elements = self.subscriptBaseAddress
     let oldTailIndex = subrange.upperBound
@@ -164,7 +170,7 @@ extension _ArrayBufferProtocol where Indices == Range<Int>{
       // so as not to self-clobber.
       newTailStart.moveInitialize(from: oldTailStart, count: tailCount)
 
-      // Assign over the original subrange
+      // Update the original subrange
       var i = newValues.startIndex
       for j in subrange {
         elements[j] = newValues[i]
@@ -197,17 +203,17 @@ extension _ArrayBufferProtocol where Indices == Range<Int>{
       let shrinkage = -growth
       if tailCount > shrinkage {   // If the tail length exceeds the shrinkage
 
-        // Assign over the rest of the replaced range with the first
+        // Update the rest of the replaced range with the first
         // part of the tail.
-        newTailStart.moveAssign(from: oldTailStart, count: shrinkage)
+        newTailStart.moveUpdate(from: oldTailStart, count: shrinkage)
 
         // Slide the rest of the tail back
         oldTailStart.moveInitialize(
           from: oldTailStart + shrinkage, count: tailCount - shrinkage)
       }
       else {                      // Tail fits within erased elements
-        // Assign over the start of the replaced range with the tail
-        newTailStart.moveAssign(from: oldTailStart, count: tailCount)
+        // Update the start of the replaced range with the tail
+        newTailStart.moveUpdate(from: oldTailStart, count: tailCount)
 
         // Destroy elements remaining after the tail in subrange
         (newTailStart + tailCount).deinitialize(

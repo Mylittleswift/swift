@@ -27,9 +27,8 @@ func nonOptContext() -> Foo {
     // expected-error@-1 {{value of optional type 'Foo?' must be unwrapped to a value of type 'Foo'}}
     // expected-note@-2 {{coalesce}}
     // expected-note@-3 {{force-unwrap}}
-  // TODO
-  //case ():
-  //  return .someOptFunc()!
+  case (): // expected-warning {{case is already handled by previous patterns; consider removing it}}
+    return .someOptFunc()!
   }
 }
 
@@ -83,7 +82,7 @@ protocol Horse {
 func rideAHorse(_ horse: Horse?) {}
 
 rideAHorse(.palomino)
-// expected-error@-1 {{static member 'palomino' cannot be used on protocol metatype 'Horse.Protocol'}}
+// expected-error@-1 {{static member 'palomino' cannot be used on protocol metatype '(any Horse).Type'}}
 
 // FIXME: This should work if the static member is part of a class though
 class Donkey {
@@ -93,4 +92,4 @@ class Donkey {
 func rideAMule(_ mule: (Horse & Donkey)?) {}
 
 rideAMule(.mule)
-// expected-error@-1 {{static member 'mule' cannot be used on protocol metatype '(Donkey & Horse).Protocol'}}
+// expected-error@-1 {{static member 'mule' cannot be used on protocol metatype '(any Donkey & Horse).Type'}}

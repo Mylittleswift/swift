@@ -1,25 +1,40 @@
+
 add_swift_host_library(swiftFrontend STATIC
   ArgsToFrontendInputsConverter.cpp
   ArgsToFrontendOptionsConverter.cpp
   ArgsToFrontendOutputsConverter.cpp
+  CachedDiagnostics.cpp
+  CachingUtils.cpp
+  CASOutputBackends.cpp
+  CompileJobCacheKey.cpp
+  CompileJobCacheResult.cpp
   CompilerInvocation.cpp
+  DependencyVerifier.cpp
   DiagnosticVerifier.cpp
   Frontend.cpp
   FrontendInputsAndOutputs.cpp
   FrontendOptions.cpp
-  ParseableInterfaceModuleLoader.cpp
-  ParseableInterfaceSupport.cpp
+  ModuleInterfaceBuilder.cpp
+  ModuleInterfaceLoader.cpp
+  ModuleInterfaceSupport.cpp
   PrintingDiagnosticConsumer.cpp
-  SerializedDiagnosticConsumer.cpp
-  DEPENDS
-    SwiftOptions)
+  Serialization.cpp
+  SerializedDiagnosticConsumer.cpp)
+add_dependencies(swiftFrontend
+  SwiftOptions)
 target_link_libraries(swiftFrontend PRIVATE
+  swiftAPIDigester
+  swiftAST
+  swiftConstExtract
+  swiftIDE
   swiftSIL
-  swiftMigrator
   swiftOption
-  swiftParseSIL
   swiftSILGen
   swiftSILOptimizer
+  swiftIRGen
+  swiftLocalization
   swiftSema
-  swiftSerialization)
+  swiftSerialization
+  swiftSymbolGraphGen)
 
+set_swift_llvm_is_available(swiftFrontend)

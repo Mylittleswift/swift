@@ -33,16 +33,16 @@ namespace swift {
   /// \returns true if the diagnostic passes produced an error
   bool runSILDiagnosticPasses(SILModule &M);
 
-  /// Prepare SIL for the -O pipeline.
-  void runSILOptPreparePasses(SILModule &Module);
-
   /// Run all the SIL performance optimization passes on \p M.
   void runSILOptimizationPasses(SILModule &M);
 
   /// Run all SIL passes for -Onone on module \p M.
   void runSILPassesForOnone(SILModule &M);
 
-  /// Run the SIL ownership eliminator pass on \p M.
+  /// Run the SIL lower hop-to-actor pass on \p M.
+  bool runSILLowerHopToActorPass(SILModule &M);
+
+/// Run the SIL ownership eliminator pass on \p M.
   bool runSILOwnershipEliminatorPass(SILModule &M);
 
   void runSILOptimizationPassesWithFileSpecification(SILModule &Module,
@@ -74,7 +74,8 @@ namespace swift {
   StringRef PassKindID(PassKind Kind);
   StringRef PassKindTag(PassKind Kind);
 
-#define PASS(ID, TAG, NAME) SILTransform *create##ID();
+#define PASS(ID, TAG, NAME) \
+  SILTransform *create##ID();
 #define IRGEN_PASS(ID, TAG, NAME)
 #include "Passes.def"
 

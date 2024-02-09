@@ -803,7 +803,8 @@ func checkLiteralTuples() {
   }
 }
 
-func sr6975() {
+// https://github.com/apple/swift/issues/49523
+do {
   enum E {
     case a, b
   }
@@ -827,7 +828,7 @@ public enum NonExhaustivePayload {
   case a(Int), b(Bool)
 }
 
-@_frozen public enum TemporalProxy {
+@frozen public enum TemporalProxy {
   case seconds(Int)
   case milliseconds(Int)
   case microseconds(Int)
@@ -1119,7 +1120,7 @@ enum UnavailableCaseOSSpecific {
   case a
   case b
 
-#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+#if canImport(Darwin)
   @available(macOS, unavailable)
   @available(iOS, unavailable)
   @available(tvOS, unavailable)
@@ -1174,5 +1175,46 @@ extension Result where T == NoError {
     case .Ok(_):
       break // But it's okay to write one.
     }
+  }
+}
+
+// https://github.com/apple/swift/issues/52701
+do {
+  enum Enum<T,E> {
+    case value(T)
+    case error(E)
+  }
+  enum MyError: Error {
+    case bad
+  }
+
+  let foo: Enum<String, (Int, Error)>
+
+  switch foo {
+  case .value: break
+  case .error((_, MyError.bad)): break
+  case .error((_, let err)):
+    _ = err
+    break
+  }
+
+  // 'is'
+  switch foo {
+  case .value: break
+  case .error((_, is MyError)): break
+  case .error((_, let err)):
+    _ = err
+    break
+  }
+
+  // 'as'
+  switch foo {
+  case .value: break
+  case .error((_, let err as MyError)):
+    _ = err
+    break
+  case .error((_, let err)):
+    _ = err
+    break
   }
 }

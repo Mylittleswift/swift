@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/ABI/MetadataValues.h"
+#include "swift/AST/IRGenOptions.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -24,8 +25,13 @@
 #include "IRGenModule.h"
 #include "IRGenFunction.h"
 
+namespace clang {
+class PointerAuthSchema;
+}
+
 namespace swift {
 namespace irgen {
+class PointerAuthEntity;
 
 class ConstantAggregateBuilderBase;
 class ConstantStructBuilder;
@@ -72,6 +78,30 @@ public:
     addInt(IGM().Int32Ty, value);
   }
 
+  void addInt64(uint64_t value) { addInt(IGM().Int64Ty, value); }
+
+  void addSize(Size size) { addInt(IGM().SizeTy, size.getValue()); }
+
+  void addCompactFunctionReferenceOrNull(llvm::Function *function) {
+    if (function) {
+      addCompactFunctionReference(function);
+    } else {
+      addInt(IGM().RelativeAddressTy, 0);
+    }
+  }
+
+  /// Add a 32-bit function reference to the given function. The reference
+  /// is direct relative pointer whenever possible. Otherwise, it is a
+  /// absolute pointer assuming the function address is 32-bit.
+  void addCompactFunctionReference(llvm::Function *function) {
+    if (IGM().getOptions().CompactAbsoluteFunctionPointer) {
+      // Assume that the function address is 32-bit.
+      add(llvm::ConstantExpr::getPtrToInt(function, IGM().RelativeAddressTy));
+    } else {
+      addRelativeOffset(IGM().RelativeAddressTy, function);
+    }
+  }
+
   void addRelativeAddressOrNull(llvm::Constant *target) {
     if (target) {
       addRelativeAddress(target);
@@ -82,6 +112,8 @@ public:
 
   void addRelativeAddress(llvm::Constant *target) {
     assert(!isa<llvm::ConstantPointerNull>(target));
+    assert((!IGM().getOptions().CompactAbsoluteFunctionPointer ||
+           !isa<llvm::Function>(target)) && "use addCompactFunctionReference");
     addRelativeOffset(IGM().RelativeAddressTy, target);
   }
 
@@ -109,12 +141,25 @@ public:
   }
 
   void addAlignmentPadding(Alignment align) {
-    auto misalignment = getNextOffsetFromGlobal() % IGM().getPointerAlignment();
+    auto misalignment = getNextOffsetFromGlobal() % align;
     if (misalignment != Size(0))
       add(llvm::ConstantAggregateZero::get(
             llvm::ArrayType::get(IGM().Int8Ty,
                                  align.getValue() - misalignment.getValue())));
   }
+
+  using super::addSignedPointer;
+  void addSignedPointer(llvm::Constant *pointer,
+                        const clang::PointerAuthSchema &schema,
+                        const PointerAuthEntity &entity);
+
+  void addSignedPointer(llvm::Constant *pointer,
+                        const clang::PointerAuthSchema &schema,
+                        uint16_t otherDiscriminator);
+
+  /// Add a UniqueHash metadata structure to this builder which stores
+  /// a hash of the given string.
+  void addUniqueHash(StringRef ofString);
 };
 
 class ConstantArrayBuilder

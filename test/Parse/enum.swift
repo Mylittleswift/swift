@@ -1,10 +1,5 @@
 // RUN: %target-typecheck-verify-swift
 
-// FIXME: this test only passes on platforms which have Float80.
-// <rdar://problem/19508460> Floating point enum raw values are not portable
-
-// REQUIRES: CPU=i386 || CPU=x86_64
-
 enum Empty {}
 
 enum Boolish {
@@ -98,8 +93,8 @@ enum ImproperlyHasIVars {
 
 // We used to crash on this.  rdar://14678675
 enum rdar14678675 {
-  case U1,
-  case U2 // expected-error{{expected identifier after comma in enum 'case' declaration}}
+  case U1, // expected-error{{expected identifier after comma in enum 'case' declaration}}
+  case U2 
   case U3
 }
 
@@ -122,10 +117,10 @@ enum Recovery5 {
   // expected-error@-2{{extraneous '.' in enum 'case' declaration}} {{14-15=}}
 }
 enum Recovery6 {
-  case Snout, _; // expected-error {{expected identifier after comma in enum 'case' declaration}}
-  case _; // expected-error {{keyword '_' cannot be used as an identifier here}} expected-note {{if this name is unavoidable, use backticks to escape it}} {{8-9=`_`}}
-  case Tusk, // expected-error {{expected pattern}}
-} // expected-error {{expected identifier after comma in enum 'case' declaration}}
+  case Snout, _; // expected-error {{keyword '_' cannot be used as an identifier here}} expected-note {{if this name is unavoidable, use backticks to escape it}} {{15-16=`_`}} expected-note {{'_' previously declared here}}
+  case _; // expected-error {{keyword '_' cannot be used as an identifier here}} expected-note {{if this name is unavoidable, use backticks to escape it}} {{8-9=`_`}} expected-error {{invalid redeclaration of '_'}}
+  case Tusk, // expected-error {{expected identifier after comma in enum 'case' declaration}}
+} 
 
 enum RawTypeEmpty : Int {} // expected-error {{an enum with no cases cannot declare a raw type}}
 // expected-error@-1{{'RawTypeEmpty' declares raw type 'Int', but does not conform to RawRepresentable and conformance could not be synthesized}}
@@ -204,12 +199,6 @@ enum RawTypeWithCharacterValues_Error1 : Character { // expected-error {{'RawTyp
   case First = "abc" // expected-error {{cannot convert value of type 'String' to raw type 'Character'}}
 }
 
-enum RawTypeWithFloatValues : Float { // expected-error {{'RawTypeWithFloatValues' declares raw type 'Float', but does not conform to RawRepresentable and conformance could not be synthesized}}
-  case Northrup = 1.5
-  case Overton // expected-error {{enum case must declare a raw value when the preceding raw value is not an integer}}
-  case Pettygrove = 2.25
-}
-
 enum RawTypeWithStringValues : String {
   case Primrose // okay
   case Quimby = "Lucky Lab"
@@ -226,86 +215,22 @@ enum RawTypeWithRepeatValues : Int {
   case Wilson = 22 // expected-error {{raw value for enum case is not unique}}
 }
 
-enum RawTypeWithRepeatValues2 : Double {
-  case Vaughn = 22   // expected-note {{raw value previously used here}}
-  case Wilson = 22.0 // expected-error {{raw value for enum case is not unique}}
-}
-
-enum RawTypeWithRepeatValues3 : Double {
-  // 2^63-1
-  case Vaughn = 9223372036854775807   // expected-note {{raw value previously used here}}
-  case Wilson = 9223372036854775807.0 // expected-error {{raw value for enum case is not unique}}
-}
-
-enum RawTypeWithRepeatValues4 : Double {
-  // 2^64-1
-  case Vaughn = 18446744073709551615   // expected-note {{raw value previously used here}}
-  case Wilson = 18446744073709551615.0 // expected-error {{raw value for enum case is not unique}}
-}
-
-enum RawTypeWithRepeatValues5 : Double {
-  // FIXME: should reject.
-  // 2^65-1
-  case Vaughn = 36893488147419103231
-  case Wilson = 36893488147419103231.0
-}
-
-enum RawTypeWithRepeatValues6 : Double {
-  // FIXME: should reject.
-  // 2^127-1
-  case Vaughn = 170141183460469231731687303715884105727
-  case Wilson = 170141183460469231731687303715884105727.0
-}
-
-enum RawTypeWithRepeatValues7 : Double {
-  // FIXME: should reject.
-  // 2^128-1
-  case Vaughn = 340282366920938463463374607431768211455
-  case Wilson = 340282366920938463463374607431768211455.0
-}
-
-enum RawTypeWithRepeatValues8 : String {
+enum RawTypeWithRepeatValuesString : String {
   case Vaughn = "XYZ" // expected-note {{raw value previously used here}}
   case Wilson = "XYZ" // expected-error {{raw value for enum case is not unique}}
 }
 
-enum RawTypeWithNonRepeatValues : Double {
-  case SantaClara = 3.7
-  case SanFernando = 7.4
-  case SanAntonio = -3.7
-  case SanCarlos = -7.4
-}
-
-
-enum RawTypeWithRepeatValuesAutoInc : Double {
-  case Vaughn = 22 // expected-note {{raw value auto-incremented from here}}
-  case Wilson    // expected-note {{raw value previously used here}}
-  case Yeon = 23 // expected-error {{raw value for enum case is not unique}}
-}
-
-enum RawTypeWithRepeatValuesAutoInc2 : Double {
-  case Vaughn = 23 // expected-note {{raw value previously used here}}
-  case Wilson = 22 // expected-note {{raw value auto-incremented from here}}
-  case Yeon // expected-error {{raw value for enum case is not unique}}
-}
-
-enum RawTypeWithRepeatValuesAutoInc3 : Double {
-  case Vaughn // expected-note {{raw value implicitly auto-incremented from zero}}
-  case Wilson // expected-note {{raw value previously used here}}
-  case Yeon = 1 // expected-error {{raw value for enum case is not unique}}
-}
-
-enum RawTypeWithRepeatValuesAutoInc4 : String {
+enum RawTypeWithRepeatValuesAutoInc1 : String {
   case A = "B" // expected-note {{raw value previously used here}}
   case B // expected-error {{raw value for enum case is not unique}}
 }
 
-enum RawTypeWithRepeatValuesAutoInc5 : String {
+enum RawTypeWithRepeatValuesAutoInc2 : String {
   case A // expected-note {{raw value previously used here}}
   case B = "A" // expected-error {{raw value for enum case is not unique}}
 }
 
-enum RawTypeWithRepeatValuesAutoInc6 : String {
+enum RawTypeWithRepeatValuesAutoInc3 : String {
   case A
   case B // expected-note {{raw value previously used here}}
   case C = "B" // expected-error {{raw value for enum case is not unique}}
@@ -359,6 +284,25 @@ enum DuplicateMembers6 {
 enum DuplicateMembers7 : String { // expected-error {{'DuplicateMembers7' declares raw type 'String', but does not conform to RawRepresentable and conformance could not be synthesized}}
   case Foo // expected-note {{'Foo' previously declared here}}
   case Foo = "Bar" // expected-error {{invalid redeclaration of 'Foo'}}
+}
+
+enum DuplicateMembers8 : String { // expected-error {{'DuplicateMembers8' declares raw type 'String', but does not conform to RawRepresentable and conformance could not be synthesized}}
+  case Foo // expected-note {{'Foo' previously declared here}}
+  // expected-note@-1 {{raw value previously used here}}
+  case Foo // expected-error {{invalid redeclaration of 'Foo'}}
+  // expected-error@-1 {{raw value for enum case is not unique}}
+}
+
+enum DuplicateMembers9 : String { // expected-error {{'DuplicateMembers9' declares raw type 'String', but does not conform to RawRepresentable and conformance could not be synthesized}}
+  case Foo = "Foo" // expected-note {{'Foo' previously declared here}}
+  // expected-note@-1 {{raw value previously used here}}
+  case Foo = "Foo"// expected-error {{invalid redeclaration of 'Foo'}}
+  // expected-error@-1 {{raw value for enum case is not unique}}
+}
+
+enum DuplicateMembers10 : String {
+  case Foo // expected-note {{raw value previously used here}}
+  case Bar = "Foo" // expected-error {{raw value for enum case is not unique}}
 }
 
 // Refs to duplicated enum cases shouldn't crash the compiler.
@@ -418,25 +362,6 @@ enum ManyLiteralC : ManyLiteralable {
   case B = "0"
 }
 
-// rdar://problem/22476643
-public protocol RawValueA: RawRepresentable
-{
-  var rawValue: Double { get }
-}
-
-enum RawValueATest: Double, RawValueA {
-  case A, B
-}
-
-public protocol RawValueB
-{
-  var rawValue: Double { get }
-}
-
-enum RawValueBTest: Double, RawValueB {
-  case A, B
-}
-
 enum foo : String { // expected-error {{'foo' declares raw type 'String', but does not conform to RawRepresentable and conformance could not be synthesized}}
   case bar = nil // expected-error {{cannot convert 'nil' to raw type 'String'}}
 }
@@ -470,7 +395,7 @@ enum SE0036 {
 
   func staticReferenceInInstanceMethod() {
     _ = A // expected-error {{enum case 'A' cannot be used as an instance member}} {{9-9=SE0036.}}
-    _ = self.A // expected-error {{enum case 'A' cannot be used as an instance member}} {{9-9=SE0036.}}
+    _ = self.A // expected-error {{enum case 'A' cannot be used as an instance member}} {{9-13=SE0036}}
     _ = SE0036.A
   }
 
@@ -485,7 +410,7 @@ enum SE0036 {
   func staticReferenceInSwitchInInstanceMethod() {
     switch self {
     case A: break // expected-error {{enum case 'A' cannot be used as an instance member}} {{10-10=.}}
-    case B(_): break // expected-error {{enum case 'B' cannot be used as an instance member}} {{10-10=.}}
+    case B(_): break // expected-error {{'_' can only appear in a pattern or on the left side of an assignment}}
     case C(let x): _ = x; break // expected-error {{enum case 'C' cannot be used as an instance member}} {{10-10=.}}
     }
   }
@@ -529,7 +454,7 @@ enum SE0036_Generic<T> {
 
   func foo() {
     switch self {
-    case A(_): break // expected-error {{enum case 'A' cannot be used as an instance member}} {{10-10=.}} expected-error {{missing argument label 'x:' in call}}
+    case A(_): break // expected-error {{'_' can only appear in a pattern or on the left side of an assignment}}
     }
 
     switch self {
@@ -546,6 +471,56 @@ enum switch {} // expected-error {{keyword 'switch' cannot be used as an identif
 
 enum SE0155 {
   case emptyArgs() // expected-warning {{enum element with associated values must have at least one associated value}}
-  // expected-note@-1 {{did you mean to remove the empty associated value list?}} {{17-18=}}
-  // expected-note@-2 {{did you mean to explicitly add a 'Void' associated value?}} {{17-17=Void}}
+  // expected-note@-1 {{did you mean to remove the empty associated value list?}} {{17-19=}}
+  // expected-note@-2 {{did you mean to explicitly add a 'Void' associated value?}} {{18-18=Void}}
+}
+
+// https://github.com/apple/swift/issues/53662
+
+enum E_53662 {
+  case identifier
+  case operator // expected-error {{keyword 'operator' cannot be used as an identifier here}} expected-note {{if this name is unavoidable, use backticks to escape it}} {{8-16=`operator`}}
+  case identifier2
+}
+
+enum E_53662_var {
+  case identifier
+  case var // expected-error {{keyword 'var' cannot be used as an identifier here}} expected-note {{if this name is unavoidable, use backticks to escape it}} {{8-11=`var`}}
+  case identifier2
+}
+
+enum E_53662_underscore {
+  case identifier
+  case _ // expected-error {{keyword '_' cannot be used as an identifier here}} expected-note {{if this name is unavoidable, use backticks to escape it}} {{8-9=`_`}}
+  case identifier2
+}
+
+enum E_53662_Comma {
+  case a, b, c, func, d // expected-error {{keyword 'func' cannot be used as an identifier here}} expected-note {{if this name is unavoidable, use backticks to escape it}} {{17-21=`func`}}
+}
+
+enum E_53662_Newline {
+  case identifier1
+  case identifier2
+  case 
+  case identifier // expected-error {{keyword 'case' cannot be used as an identifier here}} expected-note {{if this name is unavoidable, use backticks to escape it}} {{3-7=`case`}}
+}
+
+enum E_53662_Newline2 {
+  case 
+  func foo() {} // expected-error {{keyword 'func' cannot be used as an identifier here}} expected-note {{if this name is unavoidable, use backticks to escape it}} {{3-7=`func`}}
+}
+
+enum E_53662_PatternMatching {
+  case let .foo(x, y): // expected-error {{'case' label can only appear inside a 'switch' statement}}
+}
+
+enum CasesWithMissingElement: Int {
+  // expected-error@-1 {{'CasesWithMissingElement' declares raw type 'Int', but does not conform to RawRepresentable and conformance could not be synthesized}}
+
+  case a = "hello", // expected-error{{expected identifier after comma in enum 'case' declaration}}
+  // expected-error@-1 {{cannot convert value of type 'String' to raw type 'Int'}}
+
+  case b = "hello", // expected-error{{expected identifier after comma in enum 'case' declaration}}
+  // expected-error@-1 {{cannot convert value of type 'String' to raw type 'Int'}}
 }

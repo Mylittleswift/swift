@@ -1,8 +1,9 @@
 // RUN: %target-run-simple-swift
 // REQUIRES: executable_test
-// REQUIRES: objc_interop
+// REQUIRES: foundation
 
-// SR-5958
+// https://github.com/apple/swift/issues/48517
+
 import Foundation
 
 public struct Property: Equatable, Hashable, Codable {

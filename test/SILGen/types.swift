@@ -11,7 +11,7 @@ class C {
     member = x
 
     // CHECK-NOT: copy_value
-    // CHECK: [[FN:%[0-9]+]] = class_method %1 : $C, #C.member!setter.1
+    // CHECK: [[FN:%[0-9]+]] = class_method %1 : $C, #C.member!setter
     // CHECK: apply [[FN]](%0, %1) : $@convention(method) (Int, @guaranteed C) -> ()
     // CHECK-NOT: destroy_value
   }
@@ -28,7 +28,8 @@ struct S {
     // CHECK: bb0([[X:%[0-9]+]] : $Int, [[THIS:%[0-9]+]] : $*S):
     member = x
     // CHECK: [[XBOX:%[0-9]+]] = alloc_box ${ var Int }
-    // CHECK: [[XADDR:%[0-9]+]] = project_box [[XBOX]]
+    // CHECK: [[XLIFETIME:%[0-9]+]] = begin_borrow [var_decl] [[XBOX]]
+    // CHECK: [[XADDR:%[0-9]+]] = project_box [[XLIFETIME]]
     // CHECK: [[READ:%.*]] = begin_access [read] [unknown] [[XADDR]] : $*Int
     // CHECK: [[X:%.*]] = load [trivial] [[READ]] : $*Int
     // CHECK: [[WRITE:%.*]] = begin_access [modify] [unknown] [[THIS]] : $*S

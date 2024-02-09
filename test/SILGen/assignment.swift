@@ -24,7 +24,7 @@ func test1() {
   // CHECK: [[T0:%.*]] = metatype $@thick C.Type
   // CHECK: [[CTOR:%.*]] = function_ref @$s10assignment1CC{{[_0-9a-zA-Z]*}}fC
   // CHECK: [[C:%.*]] = apply [[CTOR]]([[T0]]) : $@convention(method) (@thick C.Type) -> @owned C
-  // CHECK: [[SETTER:%.*]] = class_method [[D]] : $D,  #D.child!setter.1
+  // CHECK: [[SETTER:%.*]] = class_method [[D]] : $D,  #D.child!setter
   // CHECK: apply [[SETTER]]([[C]], [[D]])
   // CHECK: destroy_value [[D]]
   D().child = C()
@@ -38,19 +38,20 @@ protocol P {
 
 // Verify that the access to the LHS does not begin until after the
 // RHS is formally evaluated.
-// CHECK-LABEL: sil hidden [ossa] @$s10assignment15copyRightToLeft1pyAA1P_pz_tF : $@convention(thin) (@inout P) -> () {
+// CHECK-LABEL: sil hidden [ossa] @$s10assignment15copyRightToLeft1pyAA1P_pz_tF : $@convention(thin) (@inout any P) -> () {
 func copyRightToLeft(p: inout P) {
-  // CHECK: bb0(%0 : $*P):
-  // CHECK:   [[READ:%.*]] = begin_access [read] [unknown] %0 : $*P
+  // CHECK: bb0(%0 : $*any P):
+  // CHECK:   [[READ:%.*]] = begin_access [read] [unknown] %0 : $*any P
   // CHECK:   [[READ_OPEN:%.*]] = open_existential_addr immutable_access [[READ]]
-  // CHECK:   end_access [[READ]] : $*P
-  // CHECK:   [[WRITE:%.*]] = begin_access [modify] [unknown] %0 : $*P
+  // CHECK:   end_access [[READ]] : $*any P
+  // CHECK:   [[WRITE:%.*]] = begin_access [modify] [unknown] %0 : $*any P
   // CHECK:   [[WRITE_OPEN:%.*]] = open_existential_addr mutable_access [[WRITE]]
-  // CHECK:   end_access [[WRITE]] : $*P
+  // CHECK:   end_access [[WRITE]] : $*any P
   p.left = p.right
 }
 
-// SR-5919
+// https://github.com/apple/swift/issues/48478
+
 func stupidGames() -> ((), ()) {
   return ((), ())
 }
