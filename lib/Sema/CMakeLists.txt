@@ -2,6 +2,7 @@
 add_swift_host_library(swiftSema STATIC
   AssociatedTypeInference.cpp
   BuilderTransform.cpp
+  Comment.cpp
   CSApply.cpp
   CSBindings.cpp
   CSSyntacticElement.cpp
@@ -35,12 +36,12 @@ add_swift_host_library(swiftSema STATIC
   DerivedConformances.cpp
   ImportResolution.cpp
   InstrumenterSupport.cpp
-  LifetimeDependence.cpp
   LookupVisibleDecls.cpp
   MiscDiagnostics.cpp
+  OpenedExistentials.cpp
   PCMacro.cpp
   PlaygroundTransform.cpp
-  PreCheckExpr.cpp
+  PreCheckTarget.cpp
   ResilienceDiagnostics.cpp
   SourceLoader.cpp
   SyntacticElementTarget.cpp

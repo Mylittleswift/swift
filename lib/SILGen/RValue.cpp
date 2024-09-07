@@ -21,6 +21,7 @@
 #include "Initialization.h"
 #include "SILGenFunction.h"
 #include "swift/AST/CanTypeVisitor.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/STLExtras.h"
 #include "swift/SIL/AbstractionPattern.h"
@@ -406,7 +407,7 @@ static void verifyHelper(ArrayRef<ManagedValue> values,
 // This is a no-op in non-assert builds.
 #ifndef NDEBUG
   ValueOwnershipKind result = OwnershipKind::None;
-  llvm::Optional<bool> sameHaveCleanups;
+  std::optional<bool> sameHaveCleanups;
   for (ManagedValue v : values) {
     assert((!SGF || !v.getType().isLoadable(SGF.get()->F) ||
             v.getType().isObject()) &&
@@ -672,7 +673,7 @@ RValue RValue::extractElement(unsigned n) && {
     assert(n == 0);
     unsigned to = getRValueSize(type);
     assert(to == values.size());
-    RValue element(nullptr, llvm::makeArrayRef(values).slice(0, to), type);
+    RValue element(nullptr, llvm::ArrayRef(values).slice(0, to), type);
     makeUsed();
     return element;
   }
@@ -687,7 +688,8 @@ RValue RValue::extractElement(unsigned n) && {
   unsigned from = range.first, to = range.second;
 
   CanType eltType = tupleTy.getElementType(n);
-  RValue element(nullptr, llvm::makeArrayRef(values).slice(from, to - from), eltType);
+  RValue element(nullptr, llvm::ArrayRef(values).slice(from, to - from),
+                 eltType);
   makeUsed();
   return element;
 }
@@ -701,7 +703,7 @@ void RValue::extractElements(SmallVectorImpl<RValue> &elements) && {
     assert(to == values.size());
     // We use push_back instead of emplace_back since emplace_back can not
     // invoke the private constructor we are attempting to invoke.
-    elements.push_back({nullptr, llvm::makeArrayRef(values).slice(0, to), type});
+    elements.push_back({nullptr, llvm::ArrayRef(values).slice(0, to), type});
     makeUsed();
     return;
   }
@@ -717,8 +719,8 @@ void RValue::extractElements(SmallVectorImpl<RValue> &elements) && {
     unsigned to = from + getRValueSize(eltType);
     // We use push_back instead of emplace_back since emplace_back can not
     // invoke the private constructor we are attempting to invoke.
-    elements.push_back({nullptr, llvm::makeArrayRef(values).slice(from, to - from),
-                        eltType});
+    elements.push_back(
+        {nullptr, llvm::ArrayRef(values).slice(from, to - from), eltType});
     from = to;
   }
   assert(from == values.size());

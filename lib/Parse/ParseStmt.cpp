@@ -18,6 +18,7 @@
 #include "swift/AST/Attr.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/FileUnit.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/Version.h"
 #include "swift/Parse/IDEInspectionCallbacks.h"
@@ -214,7 +215,7 @@ ParserStatus Parser::parseExprOrStmt(ASTNode &Result) {
 /// given that we're in the middle of a switch already.
 static bool isAtStartOfSwitchCase(Parser &parser,
                                   bool needsToBacktrack = true) {
-  llvm::Optional<Parser::BacktrackingScope> backtrack;
+  std::optional<Parser::BacktrackingScope> backtrack;
 
   // Check for and consume attributes. The only valid attribute is `@unknown`
   // but that's a semantic restriction.
@@ -369,12 +370,14 @@ ParserStatus Parser::parseBraceItems(SmallVectorImpl<ASTNode> &Entries,
     PreviousHadSemi = false;
     if (Tok.is(tok::pound_if) && !isStartOfSwiftDecl()) {
       auto IfConfigResult = parseIfConfig(
-        [&](SmallVectorImpl<ASTNode> &Elements, bool IsActive) {
-          parseBraceItems(Elements, Kind, IsActive
-                            ? BraceItemListKind::ActiveConditionalBlock
-                            : BraceItemListKind::InactiveConditionalBlock,
-                          IsFollowingGuard);
-        });
+          IfConfigContext::BraceItems,
+          [&](SmallVectorImpl<ASTNode> &Elements, bool IsActive) {
+            parseBraceItems(Elements, Kind,
+                            IsActive
+                                ? BraceItemListKind::ActiveConditionalBlock
+                                : BraceItemListKind::InactiveConditionalBlock,
+                            IsFollowingGuard);
+          });
       if (IfConfigResult.hasCodeCompletion() && isIDEInspectionFirstPass()) {
         consumeDecl(BeginParserPosition, IsTopLevel);
         return IfConfigResult;
@@ -390,8 +393,6 @@ ParserStatus Parser::parseBraceItems(SmallVectorImpl<ASTNode> &Entries,
             // Don't hoist nested '#if'.
             continue;
           Entries.push_back(Entry);
-          if (Entry.is<Decl *>())
-            Entry.get<Decl *>()->setEscapedFromIfConfig(true);
         }
       } else {
         NeedParseErrorRecovery = true;
@@ -645,8 +646,8 @@ ParserResult<Stmt> Parser::parseStmt(bool fromASTGen) {
     if (LabelInfo) diagnose(LabelInfo.Loc, diag::invalid_label_on_stmt);
     if (tryLoc.isValid()) diagnose(tryLoc, diag::try_on_stmt, Tok.getText());
 
-    return makeParserResult(
-        new (Context) FallthroughStmt(consumeToken(tok::kw_fallthrough)));
+    auto loc = consumeToken(tok::kw_fallthrough);
+    return makeParserResult(FallthroughStmt::createParsed(loc, CurDeclContext));
   }
   case tok::pound_assert:
     if (LabelInfo) diagnose(LabelInfo.Loc, diag::invalid_label_on_stmt);
@@ -852,7 +853,7 @@ ParserResult<Stmt> Parser::parseStmtYield(SourceLoc tryLoc) {
     auto result = makeParserResult(
       YieldStmt::create(Context, yieldLoc, SourceLoc(), cce, SourceLoc()));
     if (CodeCompletionCallbacks) {
-      CodeCompletionCallbacks->completeYieldStmt(cce, /*index=*/llvm::None);
+      CodeCompletionCallbacks->completeYieldStmt(cce, /*index=*/std::nullopt);
     }
     result.setHasCodeCompletionAndIsError();
     consumeToken();
@@ -1088,7 +1089,7 @@ ParserResult<Stmt> Parser::parseStmtDefer() {
     // Change the DeclContext for any variables declared in the defer to be within
     // the defer closure.
     ParseFunctionBody cc(*this, tempDecl);
-    llvm::SaveAndRestore<llvm::Optional<StableHasher>> T(
+    llvm::SaveAndRestore<std::optional<StableHasher>> T(
         CurrentTokenHash, StableHasher::defaultHasher());
 
     ParserResult<BraceStmt> Body =
@@ -1295,7 +1296,7 @@ validateAvailabilitySpecList(Parser &P,
                              SmallVectorImpl<AvailabilitySpec *> &Specs,
                              Parser::AvailabilitySpecSource Source) {
   llvm::SmallSet<PlatformKind, 4> Platforms;
-  llvm::Optional<SourceLoc> OtherPlatformSpecLoc = llvm::None;
+  std::optional<SourceLoc> OtherPlatformSpecLoc = std::nullopt;
 
   if (Specs.size() == 1 &&
       isa<PlatformAgnosticVersionConstraintAvailabilitySpec>(Specs[0])) {
@@ -1345,7 +1346,7 @@ validateAvailabilitySpecList(Parser &P,
 
   switch (Source) {
   case Parser::AvailabilitySpecSource::Available: {
-    if (OtherPlatformSpecLoc == llvm::None) {
+    if (OtherPlatformSpecLoc == std::nullopt) {
       SourceLoc InsertWildcardLoc = P.PreviousLoc;
       P.diagnose(InsertWildcardLoc, diag::availability_query_wildcard_required)
         .fixItInsertAfter(InsertWildcardLoc, ", *");
@@ -1353,7 +1354,7 @@ validateAvailabilitySpecList(Parser &P,
     break;
   }
   case Parser::AvailabilitySpecSource::Unavailable: {
-    if (OtherPlatformSpecLoc != llvm::None) {
+    if (OtherPlatformSpecLoc != std::nullopt) {
       SourceLoc Loc = OtherPlatformSpecLoc.value();
       P.diagnose(Loc, diag::unavailability_query_wildcard_not_required)
         .fixItRemove(Loc);
@@ -1361,7 +1362,7 @@ validateAvailabilitySpecList(Parser &P,
     break;
   }
   case Parser::AvailabilitySpecSource::Macro: {
-    if (OtherPlatformSpecLoc != llvm::None) {
+    if (OtherPlatformSpecLoc != std::nullopt) {
       SourceLoc Loc = OtherPlatformSpecLoc.value();
       P.diagnose(Loc, diag::attr_availability_wildcard_in_macro);
     }
@@ -1519,6 +1520,10 @@ Parser::parseAvailabilitySpecList(SmallVectorImpl<AvailabilitySpec *> &Specs,
       consumeToken();
       Status.setIsParseError();
     } else if (consumeIf(tok::comma)) {
+      // End of unavailable spec list with a trailing comma.
+      if (Source == AvailabilitySpecSource::Unavailable && Tok.is(tok::r_paren)) {
+        break;
+      }
       // There is more to parse in this list.
 
       // Before continuing to parse the next specification, we check that it's
@@ -1793,8 +1798,12 @@ Parser::parseStmtConditionElement(SmallVectorImpl<StmtConditionElement> &result,
     auto declRefExpr = new (Context) UnresolvedDeclRefExpr(bindingName,
                                                            DeclRefKind::Ordinary,
                                                            loc);
-    
-    declRefExpr->setImplicit();
+    // We do NOT mark this declRefExpr as implicit because that'd avoid
+    // reporting errors if it were used in a synchronous context in
+    // 'diagnoseUnhandledAsyncSite'. There may be other ways to resolve the
+    // reporting issue that we could explore in the future.
+    //
+    // Even though implicit, the ast node has correct source location.
     Init = makeParserResult(declRefExpr);
   } else if (BindingKindStr != "case") {
     // If the pattern is present but isn't an identifier, the user wrote
@@ -1833,6 +1842,74 @@ Parser::parseStmtConditionElement(SmallVectorImpl<StmtConditionElement> &result,
   return Status;
 }
 
+/// Returns `true` if the current token represents the start of a conditional
+/// statement body.
+bool Parser::isStartOfConditionalStmtBody() {
+  if (!Tok.is(tok::l_brace)) {
+    // Statement bodies always start with a '{'. If there is no '{', we can't be
+    // at the statement body.
+    return false;
+  }
+
+  Parser::BacktrackingScope Backtrack(*this);
+
+  skipSingle();
+
+  if (Tok.is(tok::eof)) {
+    // There's nothing else in the source file that could be the statement body,
+    // so this must be it.
+    return true;
+  }
+
+  if (Tok.is(tok::semi)) {
+    // We can't have a semicolon between the condition and the statement body,
+    // so this must be the statement body.
+    return true;
+  }
+
+  if (Tok.is(tok::kw_else)) {
+    // If the current token is an `else` keyword, this must be the statement
+    // body of an `if` statement since conditions can't be followed by `else`.
+    return true;
+  }
+
+  if (Tok.is(tok::r_brace) || Tok.is(tok::r_paren)) {
+    // A right brace or parenthesis cannot start a statement body, nor can the
+    // condition list continue afterwards. So, this must be the statement body.
+    // This covers cases like `if true, { if true, { } }` or `( if true, {
+    // print(0) } )`. While the latter is not valid code, it improves
+    // diagnostics.
+    return true;
+  }
+
+  if (Tok.isAtStartOfLine()) {
+    // If the current token is at the start of a line, it is most likely a
+    // statement body. The only exceptions are:
+    if (Tok.is(tok::comma)) {
+      // If newline begins with ',' it must be a condition trailing comma, so
+      // this can't be the statement body, e.g. if true, { true } , true {
+      // print("body") }
+      return false;
+    }
+    if (Tok.is(tok::oper_binary_spaced) || Tok.is(tok::oper_binary_unspaced)) {
+      // If current token is a binary operator this can't be the statement body
+      // since an `if` expression can't be the left-hand side of an operator,
+      // e.g. if true, { true }
+      // != nil
+      // {
+      //   print("body")
+      // }
+      return false;
+    }
+    // Excluded the above exceptions, this must be the statement body.
+    return true;
+  } else {
+    // If the current token isn't at the start of a line and isn't `EOF`, `;`,
+    // `else`, `)` or `}` this can't be the statement body.
+    return false;
+  }
+}
+
 /// Parse the condition of an 'if' or 'while'.
 ///
 ///   condition:
@@ -1861,6 +1938,20 @@ ParserStatus Parser::parseStmtCondition(StmtCondition &Condition,
   // a variety of common errors situations (including migrating from Swift 2
   // syntax).
   while (true) {
+
+    if (Context.LangOpts.hasFeature(Feature::TrailingComma)) {
+      // Condition terminator is `else` for `guard` statements.
+      if (ParentKind == StmtKind::Guard && Tok.is(tok::kw_else)) {
+        break;
+      }
+      // Condition terminator is start of statement body for `if` or `while`
+      // statements. Missing `else` is a common mistake for `guard` statements
+      // so we fall back to lookahead for a body.
+      if (isStartOfConditionalStmtBody()) {
+        break;
+      }
+    }
+
     Status |= parseStmtConditionElement(result, DefaultID, ParentKind,
                                         BindingKindStr);
     if (Status.isErrorOrHasCompletion())
@@ -2202,16 +2293,20 @@ ParserResult<Stmt> Parser::parseStmtDo(LabeledStmtInfo labelInfo,
   if (Tok.is(tok::kw_catch)) {
     // Parse 'catch' clauses
     SmallVector<CaseStmt *, 4> allClauses;
+    ParserStatus catchClausesStatus;
     do {
       ParserResult<CaseStmt> clause = parseStmtCatch();
-      status |= clause;
-      if (status.hasCodeCompletion() && clause.isNull())
+      catchClausesStatus |= clause;
+      if (catchClausesStatus.hasCodeCompletion() && clause.isNull()) {
+        status |= catchClausesStatus;
         return makeParserResult<Stmt>(status, nullptr);
+      }
 
       // parseStmtCatch promises to return non-null unless we are
       // completing inside the catch's pattern.
       allClauses.push_back(clause.get());
-    } while (Tok.is(tok::kw_catch) && !status.hasCodeCompletion());
+    } while (Tok.is(tok::kw_catch) && !catchClausesStatus.hasCodeCompletion());
+    status |= catchClausesStatus;
 
     // Recover from all of the clauses failing to parse by returning a
     // normal do-statement.
@@ -2564,10 +2659,11 @@ Parser::parseStmtCases(SmallVectorImpl<ASTNode> &cases, bool IsActive) {
     } else if (Tok.is(tok::pound_if)) {
       // '#if' in 'case' position can enclose one or more 'case' or 'default'
       // clauses.
-      auto IfConfigResult = parseIfConfig(
-        [&](SmallVectorImpl<ASTNode> &Elements, bool IsActive) {
-          parseStmtCases(Elements, IsActive);
-        });
+      auto IfConfigResult =
+          parseIfConfig(IfConfigContext::SwitchStmt,
+                        [&](SmallVectorImpl<ASTNode> &Elements, bool IsActive) {
+                          parseStmtCases(Elements, IsActive);
+                        });
       Status |= IfConfigResult;
       if (auto ICD = IfConfigResult.getPtrOrNull()) {
         cases.emplace_back(ICD);
@@ -2629,6 +2725,17 @@ static ParserStatus parseStmtCase(Parser &P, SourceLoc &CaseLoc,
       isFirst = false;
       if (!P.consumeIf(tok::comma))
         break;
+
+      if (P.Context.LangOpts.hasFeature(Feature::TrailingComma) &&
+          P.Tok.is(tok::colon)) {
+        break;
+      }
+
+      if (P.Tok.is(tok::kw_case)) {
+        P.diagnose(P.Tok, diag::extra_case_keyword)
+          .fixItRemove(SourceRange(P.Tok.getLoc()));
+        P.consumeToken(tok::kw_case);
+      }
     }
   }
 
@@ -2773,9 +2880,8 @@ ParserResult<Stmt> Parser::parseStmtPoundAssert() {
       return makeParserError();
     }
 
-    auto messageOpt =
-        getStringLiteralIfNotInterpolated(Tok.getLoc(), "'#assert' message",
-                                          /*AllowMultiline=*/true);
+    auto messageOpt = getStringLiteralIfNotInterpolated(Tok.getLoc(),
+                                                        "'#assert' message");
     consumeToken();
     if (!messageOpt)
       return makeParserError();

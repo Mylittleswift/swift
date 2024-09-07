@@ -198,6 +198,7 @@
 #include "swift/AST/GenericSignature.h"
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/Requirement.h"
+#include "swift/Basic/Assertions.h"
 #include "RequirementLowering.h"
 #include "RuleBuilder.h"
 
@@ -449,7 +450,7 @@ RequirementMachine::computeCompletion(RewriteSystem::ValidityPolicy policy) {
       unsigned ruleCount = System.getRules().size();
 
       // First, run the Knuth-Bendix algorithm to resolve overlapping rules.
-      auto result = System.computeConfluentCompletion(MaxRuleCount, MaxRuleLength);
+      auto result = System.performKnuthBendix(MaxRuleCount, MaxRuleLength);
 
       unsigned rulesAdded = (System.getRules().size() - ruleCount);
 
@@ -492,7 +493,7 @@ RequirementMachine::computeCompletion(RewriteSystem::ValidityPolicy policy) {
           return std::make_pair(CompletionResult::MaxRuleLength,
                                 ruleCount + i);
         }
-        if (newRule.getNesting() > MaxConcreteNesting) {
+        if (newRule.getNesting() > MaxConcreteNesting + System.getDeepestInitialRule()) {
           return std::make_pair(CompletionResult::MaxConcreteNesting,
                                 ruleCount + i);
         }
@@ -509,7 +510,7 @@ RequirementMachine::computeCompletion(RewriteSystem::ValidityPolicy policy) {
     dump(llvm::dbgs());
   }
 
-  assert(!Complete);
+  ASSERT(!Complete);
   Complete = true;
 
   return std::make_pair(CompletionResult::Success, 0);
@@ -550,7 +551,7 @@ void RequirementMachine::dump(llvm::raw_ostream &out) const {
     for (auto paramTy : Params) {
       out << " " << Type(paramTy);
       if (paramTy->isParameterPack())
-        out << "…";
+        out << " " << paramTy;
     }
     out << " >";
   }

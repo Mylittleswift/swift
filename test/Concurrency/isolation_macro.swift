@@ -1,7 +1,11 @@
-// RUN: %target-swift-frontend -dump-ast %s -enable-experimental-feature OptionalIsolatedParameters | %FileCheck %s
+// RUN: %empty-directory(%t)
+// RUN: %target-swift-frontend -dump-ast %s | %FileCheck %s
+
+// Diagnostics testing
+// RUN: not %target-swift-frontend -swift-version 5 -typecheck -DTEST_DIAGNOSTICS %s > %t/diagnostics.txt 2>&1
+// RUN: %FileCheck %s --check-prefix CHECK-DIAGS < %t/diagnostics.txt
 
 // REQUIRES: concurrency
-// REQUIRES: asserts
 // REQUIRES: swift_swift_parser
 
 // CHECK-LABEL: nonisolatedFunc()
@@ -34,7 +38,7 @@ extension A {
     // CHECK: rewritten=current_context_isolation_expr
     // CHECK-NEXT: inject_into_optional
     // CHECK-NEXT: erasure_expr
-    // CHECK: declref_expr implicit type="A"{{.*}}self@
+    // CHECK: declref_expr type="A"{{.*}}self@
     _ = #isolation
   }
 }
@@ -46,7 +50,7 @@ func actorIsolationToParam(_ isolatedParam: isolated A) {
   // CHECK: rewritten=current_context_isolation_expr
   // CHECK-NEXT: inject_into_optional
   // CHECK-NEXT: erasure_expr
-  // CHECK: declref_expr implicit type="A"{{.*}}isolatedParam@
+  // CHECK: declref_expr type="A"{{.*}}isolatedParam@
   _ = #isolation
 }
 
@@ -58,8 +62,8 @@ func mainActorIsolated() {
   // CHECK: rewritten=current_context_isolation_expr
   // CHECK-NEXT: inject_into_optional
   // CHECK-NEXT: erasure_expr
-  // CHECK: member_ref_expr implicit type="MainActor" decl="_Concurrency.(file).MainActor.shared"
-  // CHECK-NEXT: type_expr implicit type="MainActor.Type"
+  // CHECK: member_ref_expr type="MainActor" location=@__swiftmacro_{{.*}} decl="_Concurrency.(file).MainActor.shared"
+  // CHECK-NEXT: type_expr type="MainActor.Type"
   _ = #isolation
 }
 
@@ -73,9 +77,52 @@ func closureIsolatedToOuterParam(_ isolatedParam: isolated A) {
   // CHECK: rewritten=current_context_isolation_expr
   // CHECK-NEXT: inject_into_optional
   // CHECK-NEXT: erasure_expr
-  // CHECK: declref_expr implicit type="A"{{.*}}isolatedParam@
+  // CHECK: declref_expr type="A"{{.*}}isolatedParam@
   acceptClosure {
     _ = #isolation
     print(isolatedParam)
   }
 }
+
+func acceptEscapingClosure(_ fn: @escaping () -> Void) { }
+
+@available(SwiftStdlib 5.1, *)
+extension A {
+  func f() {
+    // Make sure this doesn't diagnose a use of implicit 'self'
+    acceptEscapingClosure {
+      _ = #isolation
+      self.g()
+    }
+  }
+
+  func g() {}
+}
+
+#if TEST_DIAGNOSTICS
+@available(SwiftStdlib 5.1, *)
+actor ConcreteActor {}
+
+@available(SwiftStdlib 5.1, *)
+func concreteActorIsolation(
+  actor: isolated ConcreteActor = #isolation
+) async {}
+
+@available(SwiftStdlib 5.1, *)
+@MainActor
+func testContextualType() {
+  let _: any Actor = #isolation
+  let _: MainActor = #isolation
+  let _: MainActor? = #isolation
+
+  // CHECK-DIAGS: error: cannot convert value of type 'MainActor' to expected argument type 'Int'
+  // CHECK-DIAGS: note: in expansion of macro 'isolation' here
+  // CHECK-DIAGS: let _: Int = #isolation
+  let _: Int = #isolation
+
+  // CHECK-DIAGS: error: cannot convert value of type 'MainActor' to expected argument type 'ConcreteActor'
+  // CHECK-DIAGS: note: in expansion of macro 'isolation' here
+  // CHECK-DIAGS: await concreteActorIsolation()
+  await concreteActorIsolation()
+}
+#endif

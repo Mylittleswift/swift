@@ -8,6 +8,14 @@
 
 - (void)mainMethod:(int)param;
 
+- (void)asyncMethodWithCompletionHandler:(void (^ _Nullable)(void))completion;
+
+@end
+
+@interface ImplClass () <NSMutableCopying>
+
+- (void)extensionMethod:(int)param;
+
 @end
 
 
@@ -40,5 +48,12 @@ extern void implFuncCName(int param) __asm__("_implFuncAsmName");
 @property (strong, nonnull) NSString *s2;
 @property (readonly, strong, nonnull) NSString *s3;
 @property (strong, nonnull) NSString *s4;
+
+@end
+
+@interface ImplClassWithResilientStoredProperty : NSObject
+
+@property (assign) int beforeInt;
+@property (assign) int afterInt;
 
 @end

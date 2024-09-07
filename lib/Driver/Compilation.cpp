@@ -16,6 +16,7 @@
 #include "swift/AST/DiagnosticsDriver.h"
 #include "swift/AST/FineGrainedDependencies.h"
 #include "swift/AST/FineGrainedDependencyFormat.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/OutputFileMap.h"
 #include "swift/Basic/ParseableOutput.h"
 #include "swift/Basic/Program.h"
@@ -112,8 +113,8 @@ Compilation::Compilation(DiagnosticEngine &Diags,
                          size_t FilelistThreshold,
                          bool EnableBatchMode,
                          unsigned BatchSeed,
-                         llvm::Optional<unsigned> BatchCount,
-                         llvm::Optional<unsigned> BatchSizeLimit,
+                         std::optional<unsigned> BatchCount,
+                         std::optional<unsigned> BatchSizeLimit,
                          bool SaveTemps,
                          bool ShowDriverTimeCompilation,
                          std::unique_ptr<UnifiedStatsReporter> StatsReporter,
@@ -314,7 +315,7 @@ namespace driver {
       if (Comp.getShowJobLifecycle())
         llvm::outs() << "Added to TaskQueue: " << LogJob(Cmd) << "\n";
       TQ->addTask(Cmd->getExecutable(), Cmd->getArgumentsForTaskExecution(),
-                  llvm::None, (void *)Cmd);
+                  std::nullopt, (void *)Cmd);
     }
 
     /// When a task finishes, check other Jobs that may be blocked.
@@ -579,8 +580,7 @@ namespace driver {
 
     TaskFinishedResponse taskSignalled(ProcessId Pid, StringRef ErrorMsg,
                                        StringRef Output, StringRef Errors,
-                                       void *Context,
-                                       llvm::Optional<int> Signal,
+                                       void *Context, std::optional<int> Signal,
                                        TaskProcessInformation ProcInfo) {
       const Job *SignalledCmd = (const Job *)Context;
 

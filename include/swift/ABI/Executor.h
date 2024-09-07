@@ -124,6 +124,12 @@ public:
     return Identity;
   }
 
+  const char* getIdentityDebugName() const {
+    return isMainExecutor() ? " (MainActorExecutor)"
+           : isGeneric()    ? " (GenericExecutor)"
+                            : "";
+  }
+
   /// Is this the generic executor reference?
   bool isGeneric() const {
     return Identity == 0;
@@ -155,8 +161,12 @@ public:
     return reinterpret_cast<DefaultActor*>(Identity);
   }
 
+  bool hasSerialExecutorWitnessTable() const {
+    return !isGeneric() && !isDefaultActor();
+  }
+
   const SerialExecutorWitnessTable *getSerialExecutorWitnessTable() const {
-    assert(!isGeneric() && !isDefaultActor());
+    assert(hasSerialExecutorWitnessTable());
     auto table = Implementation & WitnessTableMask;
     return reinterpret_cast<const SerialExecutorWitnessTable*>(table);
   }
@@ -229,6 +239,10 @@ public:
     return TaskExecutorRef(identity, wtable);
   }
 
+  /// If the job is an 'AsyncTask' return its task executor preference,
+  /// otherwise return 'undefined', meaning "no preference".
+  static TaskExecutorRef fromTaskExecutorPreference(Job *job);
+
   HeapObject *getIdentity() const {
     return Identity;
   }
@@ -255,12 +269,6 @@ public:
     auto table = Implementation & WitnessTableMask;
     return reinterpret_cast<const TaskExecutorWitnessTable*>(table);
   }
-
-//  /// Do we have to do any work to start running as the requested
-//  /// executor?
-//  bool mustSwitchToRun(TaskExecutorRef newExecutor) const {
-//    return Identity != newExecutor.Identity;
-//  }
 
   /// Get the raw value of the Implementation field, for tracing.
   uintptr_t getRawImplementation() const {

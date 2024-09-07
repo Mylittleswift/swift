@@ -52,7 +52,7 @@ struct InstallNameStore {
   std::string InstallName;
   // The install name specific to the platform id. This takes precedence over
   // the default install name.
-  std::map<uint8_t, std::string> PlatformInstallName;
+  std::map<LinkerPlatformId, std::string> PlatformInstallName;
   StringRef getInstallName(LinkerPlatformId Id) const;
 };
 
@@ -93,7 +93,7 @@ class TBDGenVisitor : public IRSymbolVisitor {
   llvm::StringSet<> DuplicateSymbolChecker;
 #endif
 
-  llvm::Optional<llvm::DataLayout> DataLayout = llvm::None;
+  std::optional<llvm::DataLayout> DataLayout = std::nullopt;
   const StringRef DataLayoutDescription;
 
   UniversalLinkageInfo UniversalLinkInfo;

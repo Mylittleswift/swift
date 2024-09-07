@@ -54,6 +54,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/AST/Type.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Range.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -169,7 +170,7 @@ void RewriteSystem::computeRecursiveRules() {
 /// 3) Finally, redundant conformance rules are deleted, with
 /// \p redundantConformances equal to the set of conformance rules that are
 ///    not minimal conformances.
-llvm::Optional<std::pair<unsigned, unsigned>>
+std::optional<std::pair<unsigned, unsigned>>
 RewriteSystem::findRuleToDelete(EliminationPredicate isRedundantRuleFn) {
   SmallVector<std::pair<unsigned, unsigned>, 2> redundancyCandidates;
   for (unsigned loopID : indices(Loops)) {
@@ -195,7 +196,7 @@ RewriteSystem::findRuleToDelete(EliminationPredicate isRedundantRuleFn) {
     }
   }
 
-  llvm::Optional<std::pair<unsigned, unsigned>> found;
+  std::optional<std::pair<unsigned, unsigned>> found;
 
   if (Debug.contains(DebugFlags::HomotopyReduction)) {
     llvm::dbgs() << "\n";
@@ -211,7 +212,7 @@ RewriteSystem::findRuleToDelete(EliminationPredicate isRedundantRuleFn) {
     // We should not find a rule that has already been marked redundant
     // here; it should have already been replaced with a rewrite path
     // in all homotopy generators.
-    assert(!rule.isRedundant());
+    ASSERT(!rule.isRedundant());
 
     // Associated type introduction rules are 'permanent'. They're
     // not worth eliminating since they are re-added every time; it
@@ -303,7 +304,7 @@ RewriteSystem::findRuleToDelete(EliminationPredicate isRedundantRuleFn) {
 
     {
       // Otherwise, perform a shortlex comparison on (LHS, RHS).
-      llvm::Optional<int> comparison = rule.compare(otherRule, Context);
+      std::optional<int> comparison = rule.compare(otherRule, Context);
 
       if (!comparison.has_value()) {
         // Two rules (T.[C] => T) and (T.[C'] => T) are incomparable if
@@ -435,9 +436,9 @@ void RewriteSystem::minimizeRewriteSystem(const PropertyMap &map) {
     llvm::dbgs() << "-----------------------------\n";
   }
 
-  assert(Complete);
-  assert(!Minimized);
-  assert(!Frozen);
+  ASSERT(Complete);
+  ASSERT(!Minimized);
+  ASSERT(!Frozen);
   Minimized = 1;
 
   propagateExplicitBits();
@@ -590,15 +591,23 @@ void RewriteSystem::minimizeRewriteSystem(const PropertyMap &map) {
 /// after minimization. Instead, we will rebuild a new rewrite system
 /// from the minimized requirements.
 GenericSignatureErrors RewriteSystem::getErrors() const {
-  assert(Complete);
-  assert(Minimized);
+  ASSERT(Complete);
+  ASSERT(Minimized);
 
   GenericSignatureErrors result;
+
+  if (!ConflictingRules.empty())
+    result |= GenericSignatureErrorFlags::HasInvalidRequirements;
 
   for (const auto &rule : getLocalRules()) {
     if (rule.isPermanent())
       continue;
 
+    // The conditional requirement inference feature imports new protocol
+    // components after the basic rewrite system is already built, so that's
+    // why we end up with imported rules that appear to be in the local rules
+    // slice. Those rules are well-formed, but their isRedundant() bit isn't
+    // set, so we must ignore them here.
     if (!isInMinimizationDomain(rule.getLHS().getRootProtocol()))
       continue;
 
@@ -607,7 +616,7 @@ GenericSignatureErrors RewriteSystem::getErrors() const {
         rule.containsUnresolvedSymbols())
       result |= GenericSignatureErrorFlags::HasInvalidRequirements;
 
-    if (rule.isConflicting() || rule.isRecursive())
+    if (rule.isRecursive())
       result |= GenericSignatureErrorFlags::HasInvalidRequirements;
 
     if (!rule.isRedundant()) {
@@ -635,8 +644,8 @@ GenericSignatureErrors RewriteSystem::getErrors() const {
 /// These rules form the requirement signatures of these protocols.
 llvm::DenseMap<const ProtocolDecl *, RewriteSystem::MinimizedProtocolRules>
 RewriteSystem::getMinimizedProtocolRules() const {
-  assert(Minimized);
-  assert(!Protos.empty());
+  ASSERT(Minimized);
+  ASSERT(!Protos.empty());
 
   llvm::DenseMap<const ProtocolDecl *, MinimizedProtocolRules> rules;
   for (unsigned ruleID = FirstLocalRule, e = Rules.size();
@@ -667,8 +676,8 @@ RewriteSystem::getMinimizedProtocolRules() const {
 /// These rules form the top-level generic signature for this rewrite system.
 std::vector<unsigned>
 RewriteSystem::getMinimizedGenericSignatureRules() const {
-  assert(Minimized);
-  assert(Protos.empty());
+  ASSERT(Minimized);
+  ASSERT(Protos.empty());
 
   std::vector<unsigned> rules;
   for (unsigned ruleID = FirstLocalRule, e = Rules.size();
@@ -682,7 +691,8 @@ RewriteSystem::getMinimizedGenericSignatureRules() const {
       continue;
     }
 
-    if (rule.getLHS()[0].getKind() != Symbol::Kind::GenericParam)
+    if (rule.getLHS()[0].getKind() != Symbol::Kind::PackElement &&
+        rule.getLHS()[0].getKind() != Symbol::Kind::GenericParam)
       continue;
 
     rules.push_back(ruleID);
@@ -704,11 +714,11 @@ void RewriteSystem::verifyRedundantConformances(
     const llvm::DenseSet<unsigned> &redundantConformances) const {
   for (unsigned ruleID : redundantConformances) {
     const auto &rule = getRule(ruleID);
-    assert(!rule.isPermanent() &&
+    ASSERT(!rule.isPermanent() &&
            "Permanent rule cannot be redundant");
-    assert(!rule.isIdentityConformanceRule() &&
+    ASSERT(!rule.isIdentityConformanceRule() &&
            "Identity conformance cannot be redundant");
-    assert(rule.isAnyConformanceRule() &&
+    ASSERT(rule.isAnyConformanceRule() &&
            "Redundant conformance is not a conformance rule?");
 
     if (!rule.isRedundant()) {

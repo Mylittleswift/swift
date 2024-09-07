@@ -1,4 +1,5 @@
 // RUN: %target-run-simple-swift | %FileCheck %s
+
 // REQUIRES: executable_test
 
 // UNSUPPORTED: use_os_stdlib
@@ -147,4 +148,17 @@ do {
 
   // CHECK: 5
   print(Test(obj: "Hello").utf8.count)
+}
+
+do {
+  struct S1: Hashable {}
+  struct S2 {
+    subscript(param: S1) -> String { "Subscript with private type" }
+  }
+
+  let kp = \S2[S1()]
+  // CHECK: Subscript with private type
+  print(S2()[keyPath: kp])
+  // CHECK: {{\\S2\.subscript\(_: S1 #[0-9]+\)|\S2\.<computed 0x.* \(String\)>}}
+  print(kp)
 }

@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/SIL/SILInstruction.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/AssertImplements.h"
 #include "swift/Basic/Unicode.h"
 #include "swift/Basic/type_traits.h"
@@ -85,6 +86,9 @@ transferNodesFromList(llvm::ilist_traits<SILInstruction> &L2,
       for (SILValue result : first->getResults()) {
         result->resetBitfields();
       }
+      for (Operand &op : first->getAllOperands()) {
+        op.resetBitfields();
+      }
       first->asSILNode()->resetBitfields();
     }
   }
@@ -122,7 +126,7 @@ void SILInstruction::moveBefore(SILInstruction *Later) {
 }
 
 namespace swift::test {
-FunctionTest MoveBeforeTest("instruction-move-before",
+FunctionTest MoveBeforeTest("instruction_move_before",
                             [](auto &function, auto &arguments, auto &test) {
                               auto *inst = arguments.takeInstruction();
                               auto *other = arguments.takeInstruction();
@@ -534,7 +538,7 @@ namespace {
     bool visitStringLiteralInst(const StringLiteralInst *RHS) {
       auto LHS_ = cast<StringLiteralInst>(LHS);
       return LHS_->getEncoding() == RHS->getEncoding()
-        && LHS_->getValue().equals(RHS->getValue());
+        && LHS_->getValue() == RHS->getValue();
     }
 
     bool visitStructInst(const StructInst *RHS) {
@@ -1414,8 +1418,10 @@ bool SILInstruction::isTriviallyDuplicatable() const {
 
   if (isa<OpenExistentialAddrInst>(this) || isa<OpenExistentialRefInst>(this) ||
       isa<OpenExistentialMetatypeInst>(this) ||
-      isa<OpenExistentialValueInst>(this) || isa<OpenExistentialBoxInst>(this) ||
-      isa<OpenExistentialBoxValueInst>(this)) {
+      isa<OpenExistentialValueInst>(this) ||
+      isa<OpenExistentialBoxInst>(this) ||
+      isa<OpenExistentialBoxValueInst>(this) ||
+      isa<OpenPackElementInst>(this)) {
     // Don't know how to duplicate these properly yet. Inst.clone() per
     // instruction does not work. Because the follow-up instructions need to
     // reuse the same archetype uuid which would only work if we used a
@@ -1475,9 +1481,8 @@ bool SILInstruction::mayTrap() const {
 }
 
 bool SILInstruction::isMetaInstruction() const {
-  // Every instruction that implements getVarInfo() should be in this list.
+  // Every instruction that doesn't generate code should be in this list.
   switch (getKind()) {
-  case SILInstructionKind::AllocBoxInst:
   case SILInstructionKind::AllocStackInst:
   case SILInstructionKind::DebugValueInst:
     return true;
@@ -1671,22 +1676,21 @@ const ValueBase *SILInstructionResultArray::back() const {
 
 bool SILInstruction::definesLocalArchetypes() const {
   bool definesAny = false;
-  forEachDefinedLocalArchetype([&](CanLocalArchetypeType type,
-                                   SILValue dependency) {
+  forEachDefinedLocalEnvironment([&](GenericEnvironment *genericEnv,
+                                     SILValue dependency) {
     definesAny = true;
   });
   return definesAny;
 }
 
-void SILInstruction::forEachDefinedLocalArchetype(
-      llvm::function_ref<void(CanLocalArchetypeType, SILValue)> fn) const {
+void SILInstruction::forEachDefinedLocalEnvironment(
+      llvm::function_ref<void(GenericEnvironment *, SILValue)> fn) const {
   switch (getKind()) {
 #define SINGLE_VALUE_SINGLE_OPEN(TYPE)                                    \
   case SILInstructionKind::TYPE: {                                        \
     auto I = cast<TYPE>(this);                                            \
     auto archetype = I->getDefinedOpenedArchetype();                      \
-    assert(archetype);                                                    \
-    return fn(archetype, I);                                              \
+    return fn(archetype->getGenericEnvironment(), I);                     \
   }
   SINGLE_VALUE_SINGLE_OPEN(OpenExistentialAddrInst)
   SINGLE_VALUE_SINGLE_OPEN(OpenExistentialRefInst)
@@ -1695,32 +1699,25 @@ void SILInstruction::forEachDefinedLocalArchetype(
   SINGLE_VALUE_SINGLE_OPEN(OpenExistentialMetatypeInst)
   SINGLE_VALUE_SINGLE_OPEN(OpenExistentialValueInst)
 #undef SINGLE_VALUE_SINGLE_OPEN
-  case SILInstructionKind::OpenPackElementInst:
-    return cast<OpenPackElementInst>(this)->forEachDefinedLocalArchetype(fn);
+  case SILInstructionKind::OpenPackElementInst: {
+    auto I = cast<OpenPackElementInst>(this);
+    return fn(I->getOpenedGenericEnvironment(), I);
+  }
   default:
     return;
   }
-}
-
-void OpenPackElementInst::forEachDefinedLocalArchetype(
-      llvm::function_ref<void(CanLocalArchetypeType, SILValue)> fn) const {
-  getOpenedGenericEnvironment()->forEachPackElementBinding(
-                                  [&](ElementArchetypeType *elementType,
-                                      PackType *packSubstitution) {
-    fn(CanElementArchetypeType(elementType), this);
-  });
 }
 
 //===----------------------------------------------------------------------===//
 //                         Multiple Value Instruction
 //===----------------------------------------------------------------------===//
 
-llvm::Optional<unsigned>
+std::optional<unsigned>
 MultipleValueInstruction::getIndexOfResult(SILValue Target) const {
   // First make sure we actually have one of our instruction results.
   auto *MVIR = dyn_cast<MultipleValueInstructionResult>(Target);
   if (!MVIR || MVIR->getParent() != this)
-    return llvm::None;
+    return std::nullopt;
   return MVIR->getIndex();
 }
 
@@ -1792,19 +1789,29 @@ bool SILInstruction::maySuspend() const {
   return false;
 }
 
-static bool visitRecursivelyLifetimeEndingUses(
-  SILValue i,
-  bool &noUsers,
-  llvm::function_ref<bool(Operand *)> func)
-{
+static bool
+visitRecursivelyLifetimeEndingUses(
+  SILValue i, bool &noUsers,
+  llvm::function_ref<bool(Operand *)> visitScopeEnd,
+  llvm::function_ref<bool(Operand *)> visitUnknownUse) {
+
   for (Operand *use : i->getConsumingUses()) {
     noUsers = false;
     if (isa<DestroyValueInst>(use->getUser())) {
-      if (!func(use)) {
+      if (!visitScopeEnd(use)) {
         return false;
       }
       continue;
     }
+    if (auto *ret = dyn_cast<ReturnInst>(use->getUser())) {
+      auto fnTy = ret->getFunction()->getLoweredFunctionType();
+      assert(!fnTy->getLifetimeDependencies().empty());
+      if (!visitScopeEnd(use)) {
+        return false;
+      }
+      continue;
+    }
+    // FIXME: Handle store to indirect result
     
     // There shouldn't be any dead-end consumptions of a nonescaping
     // partial_apply that don't forward it along, aside from destroy_value.
@@ -1816,18 +1823,14 @@ static bool visitRecursivelyLifetimeEndingUses(
     // separately checked in the verifier. It is the only check that verifies
     // the structural requirements of on-stack partial_apply uses.
     auto *user = use->getUser();
-    if (user->getNumResults() != 1) {
-      llvm::errs() << "partial_apply [on_stack] use:\n";
-      user->printInContext(llvm::errs());
-      if (isa<BranchInst>(user)) {
-        llvm::report_fatal_error("partial_apply [on_stack] cannot be cloned");
-      }
-      llvm::report_fatal_error("partial_apply [on_stack] must be directly "
-                               "forwarded to a destroy_value");
+    if (user->getNumResults() == 0) {
+      return visitUnknownUse(use);
     }
-    if (!visitRecursivelyLifetimeEndingUses(use->getUser()->getResult(0),
-                                            noUsers, func)) {
-      return false;
+    for (auto res : use->getUser()->getResults()) {
+      if (!visitRecursivelyLifetimeEndingUses(res, noUsers, visitScopeEnd,
+                                              visitUnknownUse)) {
+        return false;
+      }
     }
   }
   return true;
@@ -1841,22 +1844,43 @@ PartialApplyInst::visitOnStackLifetimeEnds(
          && "only meaningful for OSSA stack closures");
   bool noUsers = true;
 
-  if (!visitRecursivelyLifetimeEndingUses(this, noUsers, func)) {
+  auto visitUnknownUse = [](Operand *unknownUse){
+    llvm::errs() << "partial_apply [on_stack] use:\n";
+    auto *user = unknownUse->getUser();
+    user->printInContext(llvm::errs());
+    if (isa<BranchInst>(user)) {
+      llvm::report_fatal_error("partial_apply [on_stack] cannot be cloned");
+    }
+    llvm::report_fatal_error("partial_apply [on_stack] must be directly "
+                             "forwarded to a destroy_value");
+    return false;
+  };
+  if (!visitRecursivelyLifetimeEndingUses(this, noUsers, func,
+                                          visitUnknownUse)) {
     return false;
   }
   return !noUsers;
 }
 
-bool MarkDependenceInst::
-visitNonEscapingLifetimeEnds(llvm::function_ref<bool (Operand *)> func) const {
+// FIXME: Rather than recursing through all results, this should only recurse
+// through ForwardingInstruction and OwnershipTransitionInstruction and the
+// client should prove that any other uses cannot be upstream from a consume of
+// the dependent value.
+bool MarkDependenceInst::visitNonEscapingLifetimeEnds(
+  llvm::function_ref<bool (Operand *)> visitScopeEnd,
+  llvm::function_ref<bool (Operand *)> visitUnknownUse) const {
   assert(getFunction()->hasOwnership() && isNonEscaping()
          && "only meaningful for nonescaping dependencies");
   bool noUsers = true;
-
-  if (!visitRecursivelyLifetimeEndingUses(this, noUsers, func)) {
+  if (!visitRecursivelyLifetimeEndingUses(this, noUsers, visitScopeEnd,
+                                          visitUnknownUse)) {
     return false;
   }
   return !noUsers;
+}
+
+bool DestroyValueInst::isFullDeinitialization() {
+  return !isa<DropDeinitInst>(lookThroughOwnershipInsts(getOperand()));
 }
 
 PartialApplyInst *

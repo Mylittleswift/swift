@@ -37,11 +37,13 @@
 #include "IRGenModule.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/CanTypeVisitor.h"
+#include "swift/AST/ConformanceLookup.h"
 #include "swift/AST/DiagnosticsIRGen.h"
 #include "swift/AST/ExistentialLayout.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/IRGenOptions.h"
 #include "swift/AST/SubstitutionMap.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/ClangImporter/ClangModule.h"
 #include "swift/IRGen/Linking.h"
 #include "swift/SIL/FormalLinkage.h"
@@ -273,7 +275,7 @@ static bool usesExtendedExistentialMetadata(CanType type) {
   return layout.containsParameterized;
 }
 
-static llvm::Optional<std::pair<CanExistentialType, /*depth*/ unsigned>>
+static std::optional<std::pair<CanExistentialType, /*depth*/ unsigned>>
 usesExtendedExistentialMetadata(CanExistentialMetatypeType type) {
   unsigned depth = 1;
   auto cur = type.getInstanceType();
@@ -294,7 +296,7 @@ usesExtendedExistentialMetadata(CanExistentialMetatypeType type) {
     }
     return std::make_pair(cast<ExistentialType>(cur), depth);
   }
-  return llvm::None;
+  return std::nullopt;
 }
 
 llvm::Constant *IRGenModule::getAddrOfStringForMetadataRef(
@@ -516,11 +518,11 @@ static llvm::Value *emitObjCMetadataRef(IRGenFunction &IGF,
 CanType IRGenModule::getRuntimeReifiedType(CanType type) {
   // Leave type-erased ObjC generics with their generic arguments unbound, since
   // the arguments do not exist at runtime.
-  return CanType(type.transform([&](Type t) -> Type {
+  return CanType(type.transformRec([&](TypeBase *t) -> std::optional<Type> {
     if (CanType(t).isTypeErasedGenericClassType()) {
       return t->getAnyNominal()->getDeclaredType()->getCanonicalType();
     }
-    return t;
+    return std::nullopt;
   }));
 }
 
@@ -528,13 +530,8 @@ CanType IRGenModule::substOpaqueTypesWithUnderlyingTypes(CanType type) {
   // Substitute away opaque types whose underlying types we're allowed to
   // assume are constant.
   if (type->hasOpaqueArchetype()) {
-    ReplaceOpaqueTypesWithUnderlyingTypes replacer(
-        getSwiftModule(), ResilienceExpansion::Maximal,
-        getSILModule().isWholeModule());
-    auto underlyingTy =
-        type.subst(replacer, replacer, SubstFlags::SubstituteOpaqueArchetypes)
-            ->getCanonicalType();
-    return underlyingTy;
+    auto context = getMaximalTypeExpansionContext();
+    return swift::substOpaqueTypesWithUnderlyingTypes(type, context);
   }
 
   return type;
@@ -545,13 +542,10 @@ SILType IRGenModule::substOpaqueTypesWithUnderlyingTypes(
   // Substitute away opaque types whose underlying types we're allowed to
   // assume are constant.
   if (type.getASTType()->hasOpaqueArchetype()) {
-    ReplaceOpaqueTypesWithUnderlyingTypes replacer(
-        getSwiftModule(), ResilienceExpansion::Maximal,
-        getSILModule().isWholeModule());
-    auto underlyingTy =
-        type.subst(getSILModule(), replacer, replacer, genericSig,
-                   SubstFlags::SubstituteOpaqueArchetypes);
-    return underlyingTy;
+    auto context = getMaximalTypeExpansionContext();
+    return SILType::getPrimitiveType(
+      swift::substOpaqueTypesWithUnderlyingTypes(type.getASTType(), context),
+      type.getCategory());
   }
 
   return type;
@@ -563,15 +557,10 @@ IRGenModule::substOpaqueTypesWithUnderlyingTypes(CanType type,
   // Substitute away opaque types whose underlying types we're allowed to
   // assume are constant.
   if (type->hasOpaqueArchetype()) {
-    ReplaceOpaqueTypesWithUnderlyingTypes replacer(
-        getSwiftModule(), ResilienceExpansion::Maximal,
-        getSILModule().isWholeModule());
-    auto substConformance = conformance.subst(
-        type, replacer, replacer, SubstFlags::SubstituteOpaqueArchetypes);
-    auto underlyingTy =
-        type.subst(replacer, replacer, SubstFlags::SubstituteOpaqueArchetypes)
-            ->getCanonicalType();
-    return std::make_pair(underlyingTy, substConformance);
+    auto context = getMaximalTypeExpansionContext();
+    return std::make_pair(
+       swift::substOpaqueTypesWithUnderlyingTypes(type, context),
+       swift::substOpaqueTypesWithUnderlyingTypes(conformance, type, context));
   }
 
   return std::make_pair(type, conformance);
@@ -879,8 +868,7 @@ bool irgen::isSpecializedNominalTypeMetadataStaticallyAddressable(
 
   // Analyze the substitution map to determine if everything can be referenced
   // statically.
-  auto substitutions =
-      type->getContextSubstitutionMap(IGM.getSwiftModule(), nominal);
+  auto substitutions = type->getContextSubstitutionMap();
 
   // If we cannot statically reference type metadata for our replacement types,
   // we cannot specialize.
@@ -925,6 +913,15 @@ bool irgen::isCompleteSpecializedNominalTypeMetadataStaticallyAddressable(
     IRGenModule &IGM, CanType type,
     SpecializedMetadataCanonicality canonicality) {
   if (isa<ClassType>(type) || isa<BoundGenericClassType>(type)) {
+    if (IGM.Context.LangOpts.hasFeature(Feature::Embedded)) {
+      if (type->hasArchetype()) {
+        llvm::errs() << "Cannot get metadata of generic class for type "
+                     << type << "\n";
+        llvm::report_fatal_error("cannot get metadata");
+      }
+      return true;
+    }
+
     // TODO: On platforms without ObjC interop, we can do direct access to
     // class metadata.
     return false;
@@ -1112,9 +1109,6 @@ MetadataAccessStrategy irgen::getTypeMetadataAccessStrategy(CanType type) {
       assert(type->hasUnboundGenericType());
     }
 
-    if (type->isForeignReferenceType())
-      return MetadataAccessStrategy::PublicUniqueAccessor;
-
     if (requiresForeignTypeMetadata(nominal))
       return MetadataAccessStrategy::ForeignAccessor;
 
@@ -1215,8 +1209,8 @@ static MetadataResponse emitDynamicTupleTypeMetadataRef(IRGenFunction &IGF,
   {
     ConditionalDominanceScope scope(IGF);
 
-    llvm::Optional<StackAddress> labelString = emitDynamicTupleTypeLabels(
-        IGF, type, packType, shapeExpression);
+    std::optional<StackAddress> labelString =
+        emitDynamicTupleTypeLabels(IGF, type, packType, shapeExpression);
 
     // Otherwise, we know that either statically or dynamically, we have more than
     // one element. Emit the pack.
@@ -1379,11 +1373,12 @@ static llvm::Value *getFunctionParameterRef(IRGenFunction &IGF,
 /// Mapping type-level parameter flags to ABI parameter flags.
 ParameterFlags irgen::getABIParameterFlags(ParameterTypeFlags flags) {
   return ParameterFlags()
-        .withValueOwnership(flags.getValueOwnership())
-        .withVariadic(flags.isVariadic())
-        .withAutoClosure(flags.isAutoClosure())
-        .withNoDerivative(flags.isNoDerivative())
-        .withIsolated(flags.isIsolated());
+      .withOwnership(asParameterOwnership(flags.getValueOwnership()))
+      .withVariadic(flags.isVariadic())
+      .withAutoClosure(flags.isAutoClosure())
+      .withNoDerivative(flags.isNoDerivative())
+      .withIsolated(flags.isIsolated())
+      .withSending(flags.isSending());
 }
 
 static std::pair<FunctionTypeFlags, ExtendedFunctionTypeFlags>
@@ -1415,18 +1410,47 @@ getFunctionTypeFlags(CanFunctionType type) {
     break;
   }
 
+  // Compute the set of suppressed protocols.
+  InvertibleProtocolSet InvertedProtocols;
+  for (auto invertibleKind : InvertibleProtocolSet::allKnown()) {
+    switch (invertibleKind) {
+    case InvertibleProtocolKind::Copyable: {
+      // If the function type is noncopyable, note that in the suppressed
+      // protocols.
+      auto proto =
+        type->getASTContext().getProtocol(KnownProtocolKind::Copyable);
+      if (proto && lookupConformance(type, proto).isInvalid())
+        InvertedProtocols.insert(invertibleKind);
+      break;
+    }
+
+    case InvertibleProtocolKind::Escapable:
+      // We intentionally do not record the "escapable" bit here, because it's
+      // already in the normal function type flags. The runtime will
+      // introduce it as necessary.
+      break;
+    }
+  }
+
+  auto isolation = type->getIsolation();
+
   auto extFlags = ExtendedFunctionTypeFlags()
-      .withTypedThrows(!type->getThrownError().isNull());
-  
+                      .withTypedThrows(!type->getThrownError().isNull())
+                      .withSendingResult(type->hasSendingResult())
+                      .withInvertedProtocols(InvertedProtocols);
+
+  if (isolation.isErased())
+    extFlags = extFlags.withIsolatedAny();
+
   auto flags = FunctionTypeFlags()
       .withConvention(metadataConvention)
       .withAsync(type->isAsync())
-      .withConcurrent(type->isSendable())
+      .withSendable(type->isSendable())
       .withThrows(type->isThrowing())
       .withParameterFlags(hasParameterFlags)
       .withEscaping(isEscaping)
       .withDifferentiable(type->isDifferentiable())
-      .withGlobalActor(!type->getGlobalActor().isNull())
+      .withGlobalActor(isolation.isGlobalActor())
       .withExtendedFlags(extFlags.getIntValue() != 0);
 
   return std::make_pair(flags, extFlags);
@@ -1630,7 +1654,8 @@ static MetadataResponse emitFunctionTypeMetadataRef(IRGenFunction &IGF,
 
   default:
     assert((!params.empty() || type->isDifferentiable() ||
-            type->getGlobalActor() || type->getThrownError()) &&
+            !type->getIsolation().isNonIsolated() ||
+            type->getThrownError()) &&
            "0 parameter case should be specialized unless it is a "
            "differentiable function or has a global actor");
 
@@ -1957,6 +1982,16 @@ namespace {
       
     MetadataResponse visitExistentialType(CanExistentialType type,
                                           DynamicMetadataRequest request) {
+      if (auto *PCT =
+              type->getConstraintType()->getAs<ProtocolCompositionType>()) {
+        auto constraintTy = PCT->withoutMarkerProtocols();
+        if (constraintTy->getClassOrBoundGenericClass()) {
+          auto response = IGF.emitTypeMetadataRef(
+              constraintTy->getCanonicalType(), request);
+          return setLocal(type, response);
+        }
+      }
+
       if (auto metadata = tryGetLocal(type, request))
         return metadata;
 
@@ -2179,6 +2214,11 @@ namespace {
     MetadataResponse visitErrorType(CanErrorType type,
                                     DynamicMetadataRequest request) {
       llvm_unreachable("error type should not appear in IRGen");
+    }
+
+    MetadataResponse visitIntegerType(CanIntegerType type,
+                                      DynamicMetadataRequest request) {
+      llvm_unreachable("integer type should not appear in IRGen");
     }
 
     // These types are artificial types used for internal purposes and
@@ -2681,8 +2721,7 @@ irgen::emitCanonicalSpecializedGenericTypeMetadataAccessFunction(
   assert(!theType->hasUnboundGenericType());
 
   auto requirements = GenericTypeRequirements(IGF.IGM, nominal);
-  auto substitutions =
-      theType->getContextSubstitutionMap(IGF.IGM.getSwiftModule(), nominal);
+  auto substitutions = theType->getContextSubstitutionMap();
   for (auto requirement : requirements.getRequirements()) {
     if (requirement.isAnyWitnessTable()) {
       continue;
@@ -3545,6 +3584,15 @@ IRGenFunction::emitTypeMetadataRefForLayout(SILType ty,
   auto response = emitTypeMetadataRef(layoutEquivalentType, request);
   setScopedLocalTypeMetadataForLayout(ty.getObjectType(), response);
   return response.getMetadata();
+}
+
+llvm::Value *IRGenFunction::emitValueGenericRef(CanType type) {
+  if (auto integer = type->getAs<IntegerType>()) {
+    return llvm::ConstantInt::get(IGM.SizeTy,
+                    integer->getValue().zextOrTrunc(IGM.SizeTy->getBitWidth()));
+  }
+
+  return tryGetLocalTypeData(type, LocalTypeDataKind::forValue());
 }
 
 namespace {

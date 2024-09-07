@@ -19,8 +19,10 @@
 #include "swift/AST/ASTMangler.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/ParameterList.h"
+#include "swift/AST/SwiftNameTranslation.h"
 #include "swift/AST/Type.h"
 #include "swift/AST/TypeVisitor.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/ClangImporter/ClangImporter.h"
 #include "swift/IRGen/IRABIDetailsProvider.h"
 #include "swift/IRGen/Linking.h"
@@ -179,7 +181,7 @@ void ClangValueTypePrinter::printValueTypeDecl(
     const NominalTypeDecl *typeDecl, llvm::function_ref<void(void)> bodyPrinter,
     DeclAndTypePrinter &declAndTypePrinter) {
   // FIXME: Add support for generic structs.
-  llvm::Optional<IRABIDetailsProvider::SizeAndAlignment> typeSizeAlign;
+  std::optional<IRABIDetailsProvider::SizeAndAlignment> typeSizeAlign;
   GenericSignature genericSignature;
   auto printGenericSignature = [&](raw_ostream &os) {
     if (!genericSignature)
@@ -193,13 +195,7 @@ void ClangValueTypePrinter::printValueTypeDecl(
   };
   if (typeDecl->isGeneric()) {
     genericSignature = typeDecl->getGenericSignature();
-
-    // FIXME: Support generic requirements.
-    SmallVector<Requirement, 2> reqs;
-    SmallVector<InverseRequirement, 2> inverseReqs;
-    genericSignature->getRequirementsWithInverses(reqs, inverseReqs);
-    assert(inverseReqs.empty() && "Non-copyable generics not supported here!");
-    assert(reqs.empty());
+    assert(cxx_translation::isExposableToCxx(genericSignature));
 
     // FIXME: Can we make some better layout than opaque layout for generic
     // types.
@@ -590,7 +586,7 @@ void ClangValueTypePrinter::printTypePrecedingGenericTraits(
 
   if (printer.printNominalTypeOutsideMemberDeclTemplateSpecifiers(typeDecl))
     os << "template<>\n";
-  os << "static inline const constexpr bool isUsableInGenericContext<";
+  os << "inline const constexpr bool isUsableInGenericContext<";
   printer.printNominalTypeReference(typeDecl,
                                     /*moduleContext=*/nullptr);
   os << "> = ";
@@ -626,7 +622,7 @@ void ClangValueTypePrinter::printTypeGenericTraits(
   os << "namespace swift SWIFT_PRIVATE_ATTR {\n";
 
   if (typeDecl->hasClangNode()) {
-    /// Print a reference to the type metadata fucntion for a C++ type.
+    /// Print a reference to the type metadata function for a C++ type.
     ClangSyntaxPrinter(os).printNamespace(
         cxx_synthesis::getCxxImplNamespaceName(), [&](raw_ostream &os) {
           ClangSyntaxPrinter(os).printCTypeMetadataTypeFunction(
@@ -639,7 +635,7 @@ void ClangValueTypePrinter::printTypeGenericTraits(
   if (typeDecl->hasClangNode()) {
     // FIXME: share the code.
     os << "template<>\n";
-    os << "static inline const constexpr bool isUsableInGenericContext<";
+    os << "inline const constexpr bool isUsableInGenericContext<";
     printer.printClangTypeReference(typeDecl->getClangDecl());
     os << "> = true;\n";
   }
@@ -674,19 +670,19 @@ void ClangValueTypePrinter::printTypeGenericTraits(
 
   if (typeDecl->hasClangNode()) {
     os << "template<>\n";
-    os << "static inline const constexpr bool isSwiftBridgedCxxRecord<";
+    os << "inline const constexpr bool isSwiftBridgedCxxRecord<";
     printer.printClangTypeReference(typeDecl->getClangDecl());
     os << "> = true;\n";
   }
 
-  if (!isa<ClassDecl>(typeDecl) && !typeDecl->hasClangNode() &&
-      typeMetadataFuncRequirements.empty()) {
-    // FIXME: generic support.
-    os << "template<>\n";
-    os << "static inline const constexpr bool isValueType<";
+  if (!isa<ClassDecl>(typeDecl) && !typeDecl->hasClangNode()) {
+    assert(NTD && "not a nominal type?");
+    if (printer.printNominalTypeOutsideMemberDeclTemplateSpecifiers(NTD))
+      os << "template<>\n";
+    os << "inline const constexpr bool isValueType<";
     printer.printBaseName(typeDecl->getModuleContext());
     os << "::";
-    printer.printBaseName(typeDecl);
+    printer.printNominalTypeReference(NTD, moduleContext);
     os << "> = true;\n";
   }
   if (isOpaqueLayout) {
@@ -694,26 +690,29 @@ void ClangValueTypePrinter::printTypeGenericTraits(
     assert(!isa<ClassDecl>(typeDecl) && !typeDecl->hasClangNode());
     if (printer.printNominalTypeOutsideMemberDeclTemplateSpecifiers(NTD))
       os << "template<>\n";
-    os << "static inline const constexpr bool isOpaqueLayout<";
+    os << "inline const constexpr bool isOpaqueLayout<";
     printer.printNominalTypeReference(NTD,
                                       /*moduleContext=*/nullptr);
     os << "> = true;\n";
   }
 
-  // FIXME: generic support.
-  if (!typeDecl->hasClangNode() && typeMetadataFuncRequirements.empty()) {
+  if (!typeDecl->hasClangNode()) {
     assert(NTD);
-    os << "template<>\n";
+    if (printer.printNominalTypeOutsideMemberDeclTemplateSpecifiers(NTD))
+      os << "template<>\n";
     os << "struct";
     declAndTypePrinter.printAvailability(os, typeDecl);
     os << " implClassFor<";
     printer.printBaseName(typeDecl->getModuleContext());
     os << "::";
-    printer.printBaseName(typeDecl);
+    printer.printNominalTypeReference(NTD, moduleContext);
     os << "> { using type = ";
     printer.printBaseName(typeDecl->getModuleContext());
     os << "::" << cxx_synthesis::getCxxImplNamespaceName() << "::";
     printCxxImplClassName(os, NTD);
+    if (NTD->isGeneric())
+      printer.printGenericSignatureParams(
+          NTD->getGenericSignature().getCanonicalSignature());
     os << "; };\n";
   }
   os << "} // namespace\n";

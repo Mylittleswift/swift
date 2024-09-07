@@ -13,6 +13,7 @@
 #define DEBUG_TYPE "definite-init"
 #include "PMOMemoryUseCollector.h"
 #include "swift/AST/Expr.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/InstructionUtils.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBuilder.h"
@@ -364,7 +365,8 @@ bool ElementUseCollector::collectUses(SILValue Pointer) {
       unsigned ArgumentNumber = UI->getOperandNumber() - 1;
 
       // If this is an out-parameter, it is like a store.
-      unsigned NumIndirectResults = substConv.getNumIndirectSILResults();
+      unsigned NumIndirectResults = substConv.getNumIndirectSILResults() +
+                                    substConv.getNumIndirectSILErrorResults();
       if (ArgumentNumber < NumIndirectResults) {
         // We do not support initializing sub members. This is an old
         // restriction from when this code was used by Definite
@@ -394,6 +396,7 @@ bool ElementUseCollector::collectUses(SILValue Pointer) {
         llvm_unreachable("address value passed to indirect parameter");
 
       // If this is an in-parameter, it is like a load.
+      case ParameterConvention::Indirect_In_CXX:
       case ParameterConvention::Indirect_In:
       case ParameterConvention::Indirect_In_Guaranteed:
         Uses.emplace_back(User, PMOUseKind::IndirectIn);

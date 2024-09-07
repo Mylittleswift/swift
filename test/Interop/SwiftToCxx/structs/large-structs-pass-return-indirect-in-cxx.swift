@@ -2,7 +2,7 @@
 // RUN: %target-swift-frontend %s -typecheck -module-name Structs -clang-header-expose-decls=all-public -emit-clang-header-path %t/structs.h
 // RUN: %FileCheck %s < %t/structs.h
 
-// RUN: %check-interop-cxx-header-in-clang(%t/structs.h)
+// RUN: %check-interop-cxx-header-in-clang(%t/structs.h -DSWIFT_CXX_INTEROP_HIDE_STL_OVERLAY)
 
 public struct StructSeveralI64 {
     var x1, x2, x3, x4, x5: Int64
@@ -32,7 +32,7 @@ public func inoutStructSeveralI64(_ s: inout StructSeveralI64) {
 }
 
 // CHECK:      SWIFT_INLINE_THUNK void inoutStructSeveralI64(StructSeveralI64& s) noexcept SWIFT_SYMBOL("s:7Structs21inoutStructSeveralI64yyAA0cdE0VzF") {
-// CHECK-NEXT:   return _impl::$s7Structs21inoutStructSeveralI64yyAA0cdE0VzF(_impl::_impl_StructSeveralI64::getOpaquePointer(s));
+// CHECK-NEXT:   _impl::$s7Structs21inoutStructSeveralI64yyAA0cdE0VzF(_impl::_impl_StructSeveralI64::getOpaquePointer(s));
 // CHECK-NEXT: }
 
 
@@ -44,7 +44,7 @@ public func inoutStructSeveralI64(_ s: inout StructSeveralI64) {
 
 
 // CHECK: SWIFT_INLINE_THUNK void printStructSeveralI64(const StructSeveralI64& x) noexcept SWIFT_SYMBOL("s:7Structs21printStructSeveralI64yyAA0cdE0VF") {
-// CHECK-NEXT:  return _impl::$s7Structs21printStructSeveralI64yyAA0cdE0VF(_impl::_impl_StructSeveralI64::getOpaquePointer(x));
+// CHECK-NEXT:  _impl::$s7Structs21printStructSeveralI64yyAA0cdE0VF(_impl::_impl_StructSeveralI64::getOpaquePointer(x));
 // CHECK-NEXT: }
 
 

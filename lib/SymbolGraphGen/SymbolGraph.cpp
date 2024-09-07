@@ -17,6 +17,7 @@
 #include "swift/AST/Module.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/USRGeneration.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Version.h"
 #include "swift/Sema/IDETypeChecking.h"
 #include "swift/SymbolGraphGen/DocumentationCategory.h"
@@ -31,9 +32,9 @@ using namespace swift;
 using namespace symbolgraphgen;
 
 SymbolGraph::SymbolGraph(SymbolGraphASTWalker &Walker, ModuleDecl &M,
-                         llvm::Optional<ModuleDecl *> ExtendedModule,
+                         std::optional<ModuleDecl *> ExtendedModule,
                          markup::MarkupContext &Ctx,
-                         llvm::Optional<llvm::VersionTuple> ModuleVersion,
+                         std::optional<llvm::VersionTuple> ModuleVersion,
                          bool IsForSingleNode)
     : Walker(Walker), M(M), ExtendedModule(ExtendedModule), Ctx(Ctx),
       ModuleVersion(ModuleVersion), IsForSingleNode(IsForSingleNode) {
@@ -63,8 +64,9 @@ PrintOptions SymbolGraph::getDeclarationFragmentsPrintOptions() const {
   Opts.PrintFunctionRepresentationAttrs =
     PrintOptions::FunctionRepresentationMode::None;
   Opts.PrintUserInaccessibleAttrs = false;
-  Opts.SkipPrivateStdlibDecls = !Walker.Options.PrintPrivateStdlibSymbols;
-  Opts.SkipUnderscoredStdlibProtocols = !Walker.Options.PrintPrivateStdlibSymbols;
+  Opts.SkipPrivateSystemDecls = !Walker.Options.PrintPrivateSystemSymbols;
+  Opts.SkipUnderscoredSystemProtocols =
+      !Walker.Options.PrintPrivateSystemSymbols;
   Opts.PrintGenericRequirements = true;
   Opts.PrintInherited = false;
   Opts.ExplodeEnumCaseDecls = true;
@@ -164,7 +166,7 @@ SymbolGraph::isRequirementOrDefaultImplementation(const ValueDecl *VD) const {
   // or a freestanding implementation from a protocol extension without
   // a corresponding requirement.
 
-  auto *Proto = dyn_cast_or_null<ProtocolDecl>(DC->getSelfNominalTypeDecl());
+  auto *Proto = DC->getSelfProtocolDecl();
   if (!Proto) {
     return false;
   }
@@ -185,7 +187,8 @@ SymbolGraph::isRequirementOrDefaultImplementation(const ValueDecl *VD) const {
   if (FoundRequirementMemberNamed(VD->getName(), Proto)) {
     return true;
   }
-  for (auto *Inherited : Proto->getInheritedProtocols()) {
+
+  for (auto *Inherited : Proto->getAllInheritedProtocols()) {
     if (FoundRequirementMemberNamed(VD->getName(), Inherited)) {
       return true;
     }
@@ -321,8 +324,7 @@ void SymbolGraph::recordConformanceSynthesizedMemberRelationships(Symbol S) {
     OwningNominal = ThisNominal;
   } else if (const auto *Extension = dyn_cast<ExtensionDecl>(D)) {
     if (const auto *ExtendedNominal = Extension->getExtendedNominal()) {
-      if (!ExtendedNominal->getModuleContext()->getNameStr()
-          .equals(M.getNameStr())) {
+      if (ExtendedNominal->getModuleContext()->getNameStr() != M.getNameStr()) {
         OwningNominal = ExtendedNominal;
       } else {
         return;
@@ -396,23 +398,18 @@ void SymbolGraph::recordConformanceSynthesizedMemberRelationships(Symbol S) {
 
 void
 SymbolGraph::recordInheritanceRelationships(Symbol S) {
-  const auto VD = S.getLocalSymbolDecl();
-  if (const auto *NTD = dyn_cast<NominalTypeDecl>(VD)) {
-    for (const auto &InheritanceLoc : NTD->getInherited().getEntries()) {
-      auto Ty = InheritanceLoc.getType();
-      if (!Ty) {
-        continue;
-      }
-      auto *InheritedTypeDecl =
-          dyn_cast_or_null<ClassDecl>(Ty->getAnyNominal());
-      if (!InheritedTypeDecl) {
-        continue;
-      }
+  const auto D = S.getLocalSymbolDecl();
 
-      recordEdge(Symbol(this, NTD, nullptr),
-                 Symbol(this, InheritedTypeDecl, nullptr),
-                 RelationshipKind::InheritsFrom());
-    }
+  ClassDecl *Super = nullptr;
+  if (auto *CD = dyn_cast<ClassDecl>(D))
+    Super = CD->getSuperclassDecl();
+  else if (auto *PD = dyn_cast<ProtocolDecl>(D))
+    Super = PD->getSuperclassDecl();
+
+  if (Super) {
+    recordEdge(Symbol(this, cast<ValueDecl>(D), nullptr),
+               Symbol(this, Super, nullptr),
+               RelationshipKind::InheritsFrom());
   }
 }
 
@@ -457,7 +454,7 @@ void SymbolGraph::recordDefaultImplementationRelationships(Symbol S) {
   if (const auto *Extension = dyn_cast<ExtensionDecl>(VD->getDeclContext())) {
     if (const auto *ExtendedProtocol = Extension->getExtendedProtocolDecl()) {
       HandleProtocol(ExtendedProtocol);
-      for (const auto *Inherited : ExtendedProtocol->getInheritedProtocols()) {
+      for (const auto *Inherited : ExtendedProtocol->getAllInheritedProtocols()) {
         HandleProtocol(Inherited);
       }
     }
@@ -492,16 +489,20 @@ void SymbolGraph::recordConformanceRelationships(Symbol S) {
   const auto D = S.getLocalSymbolDecl();
   if (const auto *NTD = dyn_cast<NominalTypeDecl>(D)) {
     if (auto *PD = dyn_cast<ProtocolDecl>(NTD)) {
-      PD->walkInheritedProtocols([&](ProtocolDecl *inherited) {
-        if (inherited != PD) {
-          recordEdge(S, Symbol(this, inherited, nullptr),
-                     RelationshipKind::ConformsTo(), nullptr);
-        }
+      for (auto *inherited : PD->getAllInheritedProtocols()) {
+        // FIXME(noncopyable_generics): Figure out what we want here.
+        if (inherited->getInvertibleProtocolKind())
+          continue;
 
-        return TypeWalker::Action::Continue;
-      });
+        recordEdge(S, Symbol(this, inherited, nullptr),
+                   RelationshipKind::ConformsTo(), nullptr);
+      }
     } else {
       for (const auto *Conformance : NTD->getAllConformances()) {
+        // FIXME(noncopyable_generics): Figure out what we want here.
+        if (Conformance->getProtocol()->getInvertibleProtocolKind())
+          continue;
+
         // Check to make sure that this conformance wasn't declared via an
         // unconditionally-unavailable extension. If so, don't add that to the graph.
         if (const auto *ED = dyn_cast_or_null<ExtensionDecl>(Conformance->getDeclContext())) {
@@ -666,7 +667,7 @@ const ValueDecl *getProtocolRequirement(const ValueDecl *VD) {
 bool SymbolGraph::isImplicitlyPrivate(const Decl *D,
                                       bool IgnoreContext) const {
   // Don't record unconditionally private declarations
-  if (D->isPrivateStdlibDecl(/*treatNonBuiltinProtocolsAsPublic=*/false)) {
+  if (D->isPrivateSystemDecl(/*treatNonBuiltinProtocolsAsPublic=*/false)) {
     return true;
   }
 
@@ -725,11 +726,17 @@ bool SymbolGraph::isImplicitlyPrivate(const Decl *D,
     // Special cases below.
 
     // If we've been asked to skip protocol implementations, filter them out here.
-    if (Walker.Options.SkipProtocolImplementations && getProtocolRequirement(VD)) {
-      // Allow them to stay if they have their own doc comment
-      const auto *DocCommentProvidingDecl = getDocCommentProvidingDecl(VD);
-      if (DocCommentProvidingDecl != VD)
-        return true;
+    if (Walker.Options.SkipProtocolImplementations) {
+      if (const auto *ProtocolRequirement = getProtocolRequirement(VD)) {
+        if (const auto *Protocol = ProtocolRequirement->getDeclContext()->getSelfProtocolDecl()) {
+          if (!Protocol->hasUnderscoredNaming()) {
+            // Allow them to stay if they have their own doc comment
+            const auto *DocCommentProvidingDecl = VD->getDocCommentProvidingDecl();
+            if (DocCommentProvidingDecl != VD)
+              return true;
+          }
+        }
+      }
     }
 
     // Symbols from exported-imported modules should only be included if they
@@ -747,7 +754,7 @@ bool SymbolGraph::isImplicitlyPrivate(const Decl *D,
     // ${MODULE}Version{Number,String} in ${Module}.h
     SmallString<32> VersionNameIdentPrefix { M.getName().str() };
     VersionNameIdentPrefix.append("Version");
-    if (BaseName.startswith(VersionNameIdentPrefix.str())) {
+    if (BaseName.starts_with(VersionNameIdentPrefix.str())) {
       return true;
     }
 
@@ -782,6 +789,7 @@ bool SymbolGraph::isImplicitlyPrivate(const Decl *D,
   return false;
 }
 
+/// FIXME: This should use AvailableAttr::isUnavailable() or similar.
 bool SymbolGraph::isUnconditionallyUnavailableOnAllPlatforms(const Decl *D) const {
   return llvm::any_of(D->getAttrs(), [](const auto *Attr) { 
     if (const auto *AvAttr = dyn_cast<AvailableAttr>(Attr)) {

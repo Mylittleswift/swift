@@ -19,6 +19,7 @@
 #include "clang/AST/DeclObjC.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ClangModuleLoader.h"
+#include "swift/AST/ConformanceLookup.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/GenericSignature.h"
 #include "swift/AST/ImportCache.h"
@@ -29,6 +30,7 @@
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/PropertyWrappers.h"
 #include "swift/AST/SourceFile.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/Basic/STLExtras.h"
 #include "swift/ClangImporter/ClangImporterRequests.h"
@@ -271,6 +273,11 @@ static void lookupTypeMembers(Type BaseType, NominalTypeDecl *LookupType,
   assert(!BaseType->hasTypeParameter());
   assert(LookupType && "should have a nominal type");
 
+  // Skip lookup on invertible protocols. They have no members.
+  if (auto *proto = dyn_cast<ProtocolDecl>(LookupType))
+    if (proto->getInvertibleProtocolKind())
+      return;
+
   Consumer.onLookupNominalTypeMembers(LookupType, Reason);
 
   SmallVector<ValueDecl*, 2> FoundDecls;
@@ -440,10 +447,13 @@ static void lookupDeclsFromProtocolsBeingConformedTo(
   NominalTypeDecl *CurrNominal = BaseTy->getAnyNominal();
   if (!CurrNominal)
     return;
-  ModuleDecl *Module = FromContext->getParentModule();
 
   for (auto Conformance : CurrNominal->getAllConformances()) {
     auto Proto = Conformance->getProtocol();
+    // Skip conformances to invertible protocols. They have no members.
+    if (Proto->getInvertibleProtocolKind())
+      continue;
+
     if (!Proto->isAccessibleFrom(FromContext))
       continue;
 
@@ -452,7 +462,7 @@ static void lookupDeclsFromProtocolsBeingConformedTo(
     // couldn't be computed, so assume they conform in such cases.
     if (!BaseTy->hasUnboundGenericType()) {
       if (auto res = Conformance->getConditionalRequirementsIfAvailable()) {
-        if (!res->empty() && !Module->checkConformance(BaseTy, Proto))
+        if (!res->empty() && !checkConformance(BaseTy, Proto))
           continue;
       }
     }
@@ -818,11 +828,11 @@ template <> struct DenseMapInfo<FoundDeclTy> {
 // If a class 'Base' conforms to 'Proto', and my base type is a subclass
 // 'Derived' of 'Base', use 'Base' not 'Derived' as the 'Self' type in the
 // substitution map.
-static Type getBaseTypeForMember(ModuleDecl *M, const ValueDecl *OtherVD,
+static Type getBaseTypeForMember(const ValueDecl *OtherVD,
                                  Type BaseTy) {
   if (auto *Proto = OtherVD->getDeclContext()->getSelfProtocolDecl()) {
     if (BaseTy->getClassOrBoundGenericClass()) {
-      if (auto Conformance = M->lookupConformance(BaseTy, Proto)) {
+      if (auto Conformance = lookupConformance(BaseTy, Proto)) {
         auto *Superclass = Conformance.getConcrete()
                                ->getRootConformance()
                                ->getType()
@@ -943,7 +953,7 @@ public:
           } else {
             GenEnv = DC->getGenericEnvironmentOfContext();
           }
-          auto subs = BaseTy->getMemberSubstitutionMap(M, VD, GenEnv);
+          auto subs = BaseTy->getMemberSubstitutionMap(VD, GenEnv);
           auto CT = GenFuncSignature->substGenericArgs(subs);
           if (!CT->hasError()) {
             return CT->getCanonicalType();
@@ -967,7 +977,7 @@ public:
           continue;
 
         auto OtherSignature = OtherVD->getOverloadSignature();
-        auto ActualBaseTy = getBaseTypeForMember(M, OtherVD, BaseTy);
+        auto ActualBaseTy = getBaseTypeForMember(OtherVD, BaseTy);
         auto OtherSignatureType = substGenericArgs(
             OtherVD->getOverloadSignatureType(), OtherVD, ActualBaseTy);
 
@@ -1130,7 +1140,7 @@ static void lookupVisibleDynamicMemberLookupDecls(
       continue;
 
     auto subs =
-        baseType->getMemberSubstitutionMap(dc->getParentModule(), subscript);
+        baseType->getMemberSubstitutionMap(subscript);
     auto memberType = rootType.subst(subs);
     if (!memberType->mayHaveMembers())
       continue;

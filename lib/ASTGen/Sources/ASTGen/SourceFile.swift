@@ -12,6 +12,7 @@
 
 import ASTBridging
 import SwiftDiagnostics
+import SwiftIfConfig
 @_spi(ExperimentalLanguageFeatures) import SwiftParser
 import SwiftParserDiagnostics
 import SwiftSyntax
@@ -37,12 +38,23 @@ public struct ExportedSourceFile {
   /// Cached so we don't need to re-build the line table every time we need to convert a position.
   let sourceLocationConverter: SourceLocationConverter
 
+  /// Configured regions for this source file.
+  ///
+  /// This is a cached value; access via configuredRegions(astContext:).
+  var _configuredRegions: ConfiguredRegions? = nil
+
   public func position(of location: BridgedSourceLoc) -> AbsolutePosition? {
     let sourceFileBaseAddress = UnsafeRawPointer(buffer.baseAddress!)
     guard let opaqueValue = location.getOpaquePointerValue() else {
       return nil
     }
     return AbsolutePosition(utf8Offset: opaqueValue - sourceFileBaseAddress)
+  }
+
+  /// Retrieve a bridged source location for the given absolute position in
+  /// this source file.
+  public func sourceLoc(at position: AbsolutePosition) -> BridgedSourceLoc {
+    BridgedSourceLoc(at: position, in: buffer)
   }
 }
 
@@ -56,10 +68,25 @@ extension Parser.ExperimentalFeatures {
         insert(feature)
       }
     }
+
     mapFeature(.ThenStatements, to: .thenStatements)
     mapFeature(.DoExpressions, to: .doExpressions)
     mapFeature(.NonescapableTypes, to: .nonescapableTypes)
-    mapFeature(.TransferringArgsAndResults, to: .transferringArgsAndResults)
+    mapFeature(.TrailingComma, to: .trailingComma)
+  }
+}
+
+extension Parser.SwiftVersion {
+  init?(from context: BridgedASTContext?) {
+    guard let context else {
+      return nil
+    }
+    switch context.majorLanguageVersion {
+    case 1, 2, 3, 4: self = .v4
+    case 5: self = .v5
+    case 6: self = .v6
+    default: self = .v6
+    }
   }
 }
 
@@ -76,7 +103,11 @@ public func parseSourceFile(
   let buffer = UnsafeBufferPointer(start: buffer, count: bufferLength)
 
   let ctx = ctxPtr.map { BridgedASTContext(raw: $0) }
-  let sourceFile = Parser.parse(source: buffer, experimentalFeatures: .init(from: ctx))
+  let sourceFile = Parser.parse(
+    source: buffer,
+    swiftVersion: Parser.SwiftVersion(from: ctx),
+    experimentalFeatures: .init(from: ctx)
+  )
 
   let exportedPtr = UnsafeMutablePointer<ExportedSourceFile>.allocate(capacity: 1)
   let moduleName = String(cString: moduleName)
@@ -116,20 +147,10 @@ public func roundTripCheck(
   }
 }
 
-extension Syntax {
-  /// Whether this syntax node is or is enclosed within a #if.
-  fileprivate var isInIfConfig: Bool {
-    if self.is(IfConfigDeclSyntax.self) {
-      return true
-    }
-
-    return parent?.isInIfConfig ?? false
-  }
-}
-
 /// Emit diagnostics within the given source file.
 @_cdecl("swift_ASTGen_emitParserDiagnostics")
 public func emitParserDiagnostics(
+  ctx: BridgedASTContext,
   diagEnginePtr: UnsafeMutableRawPointer,
   sourceFilePtr: UnsafeMutablePointer<UInt8>,
   emitOnlyErrors: CInt,
@@ -141,16 +162,14 @@ public func emitParserDiagnostics(
   ) { sourceFile in
     var anyDiags = false
 
-    let diags = ParseDiagnosticsGenerator.diagnostics(
-      for: sourceFile.pointee.syntax
-    )
+    let sourceFileSyntax = sourceFile.pointee.syntax
+    let diags = ParseDiagnosticsGenerator.diagnostics(for: sourceFileSyntax)
 
     let diagnosticEngine = BridgedDiagnosticEngine(raw: diagEnginePtr)
+    let configuredRegions = sourceFile.pointee.configuredRegions(astContext: ctx)
     for diag in diags {
-      // Skip over diagnostics within #if, because we don't know whether
-      // we are in an active region or not.
-      // FIXME: This heuristic could be improved.
-      if diag.node.isInIfConfig {
+      // If the diagnostic is in an unparsed #if region, don't emit it.
+      if configuredRegions.isActive(diag.node) == .unparsed {
         continue
       }
 

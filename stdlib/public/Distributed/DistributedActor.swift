@@ -197,7 +197,7 @@ import _Concurrency
 /// - SeeAlso: ``Actor``
 /// - SeeAlso: ``AnyActor``
 @available(SwiftStdlib 5.7, *)
-public protocol DistributedActor: AnyActor, Identifiable, Hashable
+public protocol DistributedActor: AnyObject, Sendable, Identifiable, Hashable
   where ID == ActorSystem.ActorID,
         SerializationRequirement == ActorSystem.SerializationRequirement {
   
@@ -325,7 +325,7 @@ extension DistributedActor /*: implicitly Decodable */ where Self.ID: Decodable 
   /// on, in order to obtain the instance this initializer should return.
   ///
   /// - Parameter decoder: used to decode the ``ID`` of this distributed actor.
-  /// - Throws: If the actor system value in `decoder.userInfo` is missing or mis-typed;
+  /// - Throws: If the actor system value in `decoder.userInfo` is missing or mistyped;
   ///           the `ID` fails to decode from the passed `decoder`;
   //            or if the ``DistributedActor/resolve(id:using:)`` method invoked by this initializer throws.
   nonisolated public init(from decoder: Decoder) throws {
@@ -362,15 +362,39 @@ extension DistributedActor {
   /// state.
   ///
   /// When the actor is remote, the closure won't be executed and this function will return nil.
-  public nonisolated func whenLocal<T: Sendable>(
-    _ body: @Sendable (isolated Self) async throws -> T
-  ) async rethrows -> T? {
+  @_alwaysEmitIntoClient
+  // we need to silgen_name here because the signature is the same as __abi_whenLocal,
+  // and even though this is @AEIC, the symbol name would conflict.
+  @_silgen_name("$s11Distributed0A5ActorPAAE20whenLocalTypedThrowsyqd__Sgqd__xYiYaYbqd_0_YKXEYaqd_0_YKs8SendableRd__s5ErrorRd_0_r0_lF")
+  public nonisolated func whenLocal<T: Sendable, E>(
+    _ body: @Sendable (isolated Self) async throws(E) -> T
+  ) async throws(E) -> T? {
     if __isLocalActor(self) {
        _local let localSelf = self
        return try await body(localSelf)
     } else {
       return nil
     }
+  }
+
+  // ABI: This is a workaround when in Swift 6 this method was introduced
+  // in order to support typed-throws, but missed to add @_aeic.
+  // In practice, this method should not ever be used by anyone, ever.
+  @usableFromInline
+  @_silgen_name("$s11Distributed0A5ActorPAAE9whenLocalyqd__Sgqd__xYiYaYbqd_0_YKXEYaqd_0_YKs8SendableRd__s5ErrorRd_0_r0_lF")
+  internal nonisolated func __abi_whenLocal<T: Sendable, E>(
+    _ body: @Sendable (isolated Self) async throws(E) -> T
+  ) async throws(E) -> T? {
+    try await whenLocal(body)
+  }
+
+  // ABI: Historical whenLocal, rethrows was changed to typed throws `throws(E)`
+  @_silgen_name("$s11Distributed0A5ActorPAAE9whenLocalyqd__Sgqd__xYiYaYbKXEYaKs8SendableRd__lF")
+  @usableFromInline
+  nonisolated func __abi_whenLocal<T: Sendable>(
+    _ body: @Sendable (isolated Self) async throws -> T
+  ) async rethrows -> T? {
+    try await whenLocal(body)
   }
 }
 
@@ -399,7 +423,7 @@ extension DistributedActor {
   /// as only a local distributed actor can be isolated on and may be automatically
   /// erased to such `any Actor` when calling methods implicitly accepting the
   /// caller's actor isolation, e.g. by using the `#isolation` macro.
-  @backDeployed(before: SwiftStdlib 5.11)
+  @backDeployed(before: SwiftStdlib 6.0)
   public var asLocalActor: any Actor {
     Builtin.distributedActorAsAnyActor(self)
   }
@@ -430,3 +454,13 @@ public func __isLocalActor(_ actor: AnyObject) -> Bool {
 
 @_silgen_name("swift_distributedActor_remote_initialize")
 func _distributedActorRemoteInitialize(_ actorType: Builtin.RawPointer) -> Any
+
+// ==== Distributed Actor Stubs ------------------------------------------------
+
+@available(SwiftStdlib 6.0, *)
+public protocol _DistributedActorStub where Self: DistributedActor {}
+
+@available(SwiftStdlib 6.0, *)
+public func _distributedStubFatalError(function: String = #function) -> Never {
+  fatalError("Unexpected invocation of distributed method '\(function)' stub!")
+}

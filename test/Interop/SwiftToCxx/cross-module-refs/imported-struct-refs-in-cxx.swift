@@ -4,10 +4,10 @@
 // RUN: %target-swift-frontend %s -typecheck -module-name UsesStructs -I %t -clang-header-expose-decls=all-public -emit-clang-header-path %t/uses-structs.h -clang-header-expose-module Structs=structs.h
 
 // RUN: %FileCheck %s < %t/uses-structs.h
-// RUN: %check-interop-cxx-header-in-clang(-I %t %t/uses-structs.h)
+// RUN: %check-interop-cxx-header-in-clang(-I %t %t/uses-structs.h -DSWIFT_CXX_INTEROP_HIDE_STL_OVERLAY)
 
 // RUN: %target-swift-frontend %s -typecheck -module-name UsesStructs -I %t -cxx-interoperability-mode=default -emit-clang-header-path %t/uses-structs-default.h -clang-header-expose-module Structs=structs.h
-// RUN: %check-interop-cxx-header-in-clang(-I %t %t/uses-structs-default.h)
+// RUN: %check-interop-cxx-header-in-clang(-I %t %t/uses-structs-default.h -DSWIFT_CXX_INTEROP_HIDE_STL_OVERLAY)
 
 import Structs
 
@@ -38,7 +38,7 @@ public func passThroughStructSmallDirect(_ x: SmallStructDirectPassing) -> Small
 }
 
 // CHECK:      SWIFT_INLINE_THUNK void inoutStructSeveralI64(Structs::StructSeveralI64& s) noexcept SWIFT_SYMBOL("s:11UsesStructs21inoutStructSeveralI64yy0B00deF0VzF") {
-// CHECK-NEXT:   return _impl::$s11UsesStructs21inoutStructSeveralI64yy0B00deF0VzF(Structs::_impl::_impl_StructSeveralI64::getOpaquePointer(s));
+// CHECK-NEXT:   _impl::$s11UsesStructs21inoutStructSeveralI64yy0B00deF0VzF(Structs::_impl::_impl_StructSeveralI64::getOpaquePointer(s));
 // CHECK-NEXT: }
 
 

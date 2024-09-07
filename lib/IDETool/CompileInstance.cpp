@@ -19,6 +19,7 @@
 #include "swift/AST/PluginLoader.h"
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/SourceFile.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/LangOptions.h"
 #include "swift/Basic/PrettyStackTrace.h"
@@ -125,11 +126,13 @@ getModifiedFunctionDeclList(const SourceFile &SF, SourceManager &tmpSM,
   SearchPathOptions searchPathOpts = ctx.SearchPathOpts;
   ClangImporterOptions clangOpts = ctx.ClangImporterOpts;
   SILOptions silOpts = ctx.SILOpts;
+  CASOptions casOpts = ctx.CASOpts;
   symbolgraphgen::SymbolGraphOptions symbolOpts = ctx.SymbolGraphOpts;
 
   DiagnosticEngine tmpDiags(tmpSM);
-  auto &tmpCtx = *ASTContext::get(langOpts, typeckOpts, silOpts, searchPathOpts,
-                                  clangOpts, symbolOpts, tmpSM, tmpDiags);
+  auto &tmpCtx =
+      *ASTContext::get(langOpts, typeckOpts, silOpts, searchPathOpts, clangOpts,
+                       symbolOpts, casOpts, tmpSM, tmpDiags);
   registerParseRequestFunctions(tmpCtx.evaluator);
   registerTypeCheckerRequestFunctions(tmpCtx.evaluator);
 
@@ -219,7 +222,7 @@ bool CompileInstance::performCachedSemaIfPossible(DiagnosticConsumer *DiagC) {
 
   if (shouldCheckDependencies()) {
     if (areAnyDependentFilesInvalidated(
-            *CI, *FS, /*excludeBufferID=*/llvm::None,
+            *CI, *FS, /*excludeBufferID=*/std::nullopt,
             DependencyCheckedTimestamp, InMemoryDependencyHash)) {
       return true;
     }
@@ -345,7 +348,7 @@ bool CompileInstance::performSema(
   CachedArgHash = ArgsHash;
   CachedReuseCount = 0;
   InMemoryDependencyHash.clear();
-  cacheDependencyHashIfNeeded(*CI, /*excludeBufferID=*/llvm::None,
+  cacheDependencyHashIfNeeded(*CI, /*excludeBufferID=*/std::nullopt,
                               InMemoryDependencyHash);
 
   // Perform!

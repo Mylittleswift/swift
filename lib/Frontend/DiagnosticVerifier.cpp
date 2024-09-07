@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/Frontend/DiagnosticVerifier.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/ColorUtils.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/Parse/Lexer.h"
@@ -38,28 +39,28 @@ struct ExpectedCheckMatchStartParser {
       : MatchStart(MatchStart) {}
 
   bool tryParseClassification() {
-    if (MatchStart.startswith("note")) {
+    if (MatchStart.starts_with("note")) {
       ClassificationStartLoc = MatchStart.data();
       ExpectedClassification = DiagnosticKind::Note;
       MatchStart = MatchStart.substr(strlen("note"));
       return true;
     }
 
-    if (MatchStart.startswith("warning")) {
+    if (MatchStart.starts_with("warning")) {
       ClassificationStartLoc = MatchStart.data();
       ExpectedClassification = DiagnosticKind::Warning;
       MatchStart = MatchStart.substr(strlen("warning"));
       return true;
     }
 
-    if (MatchStart.startswith("error")) {
+    if (MatchStart.starts_with("error")) {
       ClassificationStartLoc = MatchStart.data();
       ExpectedClassification = DiagnosticKind::Error;
       MatchStart = MatchStart.substr(strlen("error"));
       return true;
     }
 
-    if (MatchStart.startswith("remark")) {
+    if (MatchStart.starts_with("remark")) {
       ClassificationStartLoc = MatchStart.data();
       ExpectedClassification = DiagnosticKind::Remark;
       MatchStart = MatchStart.substr(strlen("remark"));
@@ -162,7 +163,7 @@ struct ExpectedDiagnosticInfo {
   // This is the message string with escapes expanded.
   std::string MessageStr;
   unsigned LineNo = ~0U;
-  llvm::Optional<unsigned> ColumnNo;
+  std::optional<unsigned> ColumnNo;
 
   using AlternativeExpectedFixIts = std::vector<ExpectedFixIt>;
   std::vector<AlternativeExpectedFixIts> Fixits = {};
@@ -179,7 +180,7 @@ struct ExpectedDiagnosticInfo {
                              llvm::SmallVector<StringRef, 1> Names)
         : StartLoc(StartLoc), EndLoc(EndLoc), Names(Names) {}
   };
-  llvm::Optional<ExpectedEducationalNotes> EducationalNotes;
+  std::optional<ExpectedEducationalNotes> EducationalNotes;
 
   ExpectedDiagnosticInfo(const char *ExpectedStart,
                          const char *ClassificationStart,
@@ -428,17 +429,17 @@ DiagnosticVerifier::renderFixits(ArrayRef<CapturedFixItInfo> ActualFixIts,
 ///
 /// \param DiagnosticLineNo The line number of the associated expected
 /// diagnostic; used to turn line offsets into line numbers.
-static llvm::Optional<LineColumnRange> parseExpectedFixItRange(
+static std::optional<LineColumnRange> parseExpectedFixItRange(
     StringRef &Str, unsigned DiagnosticLineNo,
     llvm::function_ref<void(const char *, const Twine &)> diagnoseError) {
   assert(!Str.empty());
 
   struct ParsedLineAndColumn {
-    llvm::Optional<unsigned> Line;
+    std::optional<unsigned> Line;
     unsigned Column;
   };
 
-  const auto parseLineAndColumn = [&]() -> llvm::Optional<ParsedLineAndColumn> {
+  const auto parseLineAndColumn = [&]() -> std::optional<ParsedLineAndColumn> {
     enum class OffsetKind : uint8_t { None, Plus, Minus };
 
     OffsetKind LineOffsetKind = OffsetKind::None;
@@ -467,20 +468,20 @@ static llvm::Optional<LineColumnRange> parseExpectedFixItRange(
                       "expected line offset after leading '+' or '-' in fix-it "
                       "verification");
       }
-      return llvm::None;
+      return std::nullopt;
     }
 
     // If the first value is not followed by a colon, it is either a column or a
     // line offset that is missing a column.
     if (Str.empty() || Str.front() != ':') {
       if (LineOffsetKind == OffsetKind::None) {
-        return ParsedLineAndColumn{llvm::None, FirstVal};
+        return ParsedLineAndColumn{std::nullopt, FirstVal};
       }
 
       diagnoseError(Str.data(),
                     "expected colon-separated column number after line offset "
                     "in fix-it verification");
-      return llvm::None;
+      return std::nullopt;
     }
 
     unsigned Column = 0;
@@ -488,7 +489,7 @@ static llvm::Optional<LineColumnRange> parseExpectedFixItRange(
     if (Str.consumeInteger(10, Column)) {
       diagnoseError(Str.data(),
                     "expected column number after ':' in fix-it verification");
-      return llvm::None;
+      return std::nullopt;
     }
 
     // Apply the offset relative to the line of the expected diagnostic.
@@ -513,7 +514,7 @@ static llvm::Optional<LineColumnRange> parseExpectedFixItRange(
     Range.StartLine = LineAndCol->Line.value_or(DiagnosticLineNo);
     Range.StartCol = LineAndCol->Column;
   } else {
-    return llvm::None;
+    return std::nullopt;
   }
 
   if (!Str.empty() && Str.front() == '-') {
@@ -521,7 +522,7 @@ static llvm::Optional<LineColumnRange> parseExpectedFixItRange(
   } else {
     diagnoseError(Str.data(),
                   "expected '-' range separator in fix-it verification");
-    return llvm::None;
+    return std::nullopt;
   }
 
   if (const auto LineAndCol = parseLineAndColumn()) {
@@ -529,7 +530,7 @@ static llvm::Optional<LineColumnRange> parseExpectedFixItRange(
     Range.EndLine = LineAndCol->Line.value_or(Range.StartLine);
     Range.EndCol = LineAndCol->Column;
   } else {
-    return llvm::None;
+    return std::nullopt;
   }
 
   return Range;
@@ -718,7 +719,7 @@ DiagnosticVerifier::Result DiagnosticVerifier::verifyFile(unsigned BufferID) {
     // Check if the next expected diagnostic should be in the same line.
     StringRef AfterEnd = MatchStart.substr(End + strlen("}}"));
     AfterEnd = AfterEnd.substr(AfterEnd.find_first_not_of(" \t"));
-    if (AfterEnd.startswith("\\"))
+    if (AfterEnd.starts_with("\\"))
       PrevExpectedContinuationLine = Expected.LineNo;
     else
       PrevExpectedContinuationLine = 0;
@@ -727,7 +728,7 @@ DiagnosticVerifier::Result DiagnosticVerifier::verifyFile(unsigned BufferID) {
     // Scan for fix-its: {{10-14=replacement text}}
     bool startNewAlternatives = true;
     StringRef ExtraChecks = MatchStart.substr(End+2).ltrim(" \t");
-    while (ExtraChecks.startswith("{{")) {
+    while (ExtraChecks.starts_with("{{")) {
       // First make sure we have a closing "}}".
       size_t EndIndex = ExtraChecks.find("}}");
       if (EndIndex == StringRef::npos) {
@@ -765,7 +766,7 @@ DiagnosticVerifier::Result DiagnosticVerifier::verifyFile(unsigned BufferID) {
           (Expected.Fixits.empty() || !Expected.Fixits.back().empty()))
         Expected.Fixits.push_back({});
 
-      if (ExtraChecks.startswith("||")) {
+      if (ExtraChecks.starts_with("||")) {
         startNewAlternatives = false;
         ExtraChecks = ExtraChecks.substr(2).ltrim(" \t");
       } else {
@@ -774,7 +775,7 @@ DiagnosticVerifier::Result DiagnosticVerifier::verifyFile(unsigned BufferID) {
 
       // If this check starts with 'educational-notes=', check for one or more
       // educational notes instead of a fix-it.
-      if (CheckStr.startswith(educationalNotesSpecifier)) {
+      if (CheckStr.starts_with(educationalNotesSpecifier)) {
         if (Expected.EducationalNotes.has_value()) {
           addError(CheckStr.data(),
                    "each verified diagnostic may only have one "
@@ -1032,7 +1033,7 @@ DiagnosticVerifier::Result DiagnosticVerifier::verifyFile(unsigned BufferID) {
       // Verify educational notes
       for (auto &foundName : FoundDiagnostic.EducationalNotes) {
         llvm::erase_if(expectedNotes->Names,
-                       [&](StringRef item) { return item.equals(foundName); });
+                       [&](StringRef item) { return item == foundName; });
       }
 
       if (!expectedNotes->Names.empty()) {

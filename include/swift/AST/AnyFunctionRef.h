@@ -21,9 +21,8 @@
 #include "swift/Basic/Debug.h"
 #include "swift/Basic/LLVM.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/None.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/PointerUnion.h"
+#include <optional>
 
 namespace swift {
 class CaptureInfo;
@@ -58,7 +57,7 @@ public:
 
   /// Construct an AnyFunctionRef from a decl context that might be
   /// some sort of function.
-  static llvm::Optional<AnyFunctionRef> fromDeclContext(DeclContext *dc) {
+  static std::optional<AnyFunctionRef> fromDeclContext(DeclContext *dc) {
     if (auto fn = dyn_cast<AbstractFunctionDecl>(dc)) {
       return AnyFunctionRef(fn);
     }
@@ -67,31 +66,13 @@ public:
       return AnyFunctionRef(ace);
     }
 
-    return llvm::None;
+    return std::nullopt;
   }
 
   CaptureInfo getCaptureInfo() const {
     if (auto *AFD = TheFunction.dyn_cast<AbstractFunctionDecl *>())
       return AFD->getCaptureInfo();
     return TheFunction.get<AbstractClosureExpr *>()->getCaptureInfo();
-  }
-
-  void setCaptureInfo(CaptureInfo captures) const {
-    if (auto *AFD = TheFunction.dyn_cast<AbstractFunctionDecl *>()) {
-      AFD->setCaptureInfo(captures);
-      return;
-    }
-    TheFunction.get<AbstractClosureExpr *>()->setCaptureInfo(captures);
-  }
-
-  void getLocalCaptures(SmallVectorImpl<CapturedValue> &Result) const {
-    getCaptureInfo().getLocalCaptures(Result);
-  }
-
-  bool hasType() const {
-    if (auto *AFD = TheFunction.dyn_cast<AbstractFunctionDecl *>())
-      return AFD->hasInterfaceType();
-    return !TheFunction.get<AbstractClosureExpr *>()->getType().isNull();
   }
 
   ParameterList *getParameters() const {
@@ -116,11 +97,6 @@ public:
     if (auto *AFD = TheFunction.dyn_cast<AbstractFunctionDecl *>()) {
       if (auto *FD = dyn_cast<FuncDecl>(AFD))
         return FD->mapTypeIntoContext(FD->getResultInterfaceType());
-      if (auto *CD = dyn_cast<ConstructorDecl>(AFD)) {
-        if (CD->hasLifetimeDependentReturn()) {
-          return CD->getResultInterfaceType();
-        }
-      }
       return TupleType::getEmpty(AFD->getASTContext());
     }
     return TheFunction.get<AbstractClosureExpr *>()->getResultType();
@@ -191,20 +167,8 @@ public:
     return TheFunction.dyn_cast<AbstractClosureExpr*>();
   }
 
-  /// Return true if this closure is passed as an argument to a function and is
-  /// known not to escape from that function.  In this case, captures can be
-  /// more efficient.
-  bool isKnownNoEscape() const {
-    if (hasType() && !getType()->hasError())
-      return getType()->castTo<AnyFunctionType>()->isNoEscape();
-    return false;
-  }
-
   /// Whether this function is @Sendable.
   bool isSendable() const {
-    if (!hasType())
-      return false;
-
     if (auto *fnType = getType()->getAs<AnyFunctionType>())
       return fnType->isSendable();
 

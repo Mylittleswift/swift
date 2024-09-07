@@ -26,7 +26,7 @@
 ///
 ///     numbers.moveSubranges(negativeSubranges, to: 0)
 ///     // numbers == [-5, -3, -9, 10, 12, 14, 15]
-@available(SwiftStdlib 5.11, *)
+@available(SwiftStdlib 6.0, *)
 public struct RangeSet<Bound: Comparable> {
   @usableFromInline
   internal var _ranges: Ranges
@@ -149,26 +149,26 @@ public struct RangeSet<Bound: Comparable> {
   }
 }
 
-@available(SwiftStdlib 5.11, *)
+@available(SwiftStdlib 6.0, *)
 extension RangeSet: Equatable {
   public static func == (left: Self, right: Self) -> Bool {
     left._ranges == right._ranges
   }
 }
 
-@available(SwiftStdlib 5.11, *)
+@available(SwiftStdlib 6.0, *)
 extension RangeSet: Hashable where Bound: Hashable {
   public func hash(into hasher: inout Hasher) {
     hasher.combine(self._ranges)
   }
 }
 
-@available(SwiftStdlib 5.11, *)
+@available(SwiftStdlib 6.0, *)
 extension RangeSet: Sendable where Bound: Sendable {}
 
 // MARK: - Collection APIs
 
-@available(SwiftStdlib 5.11, *)
+@available(SwiftStdlib 6.0, *)
 extension RangeSet {
   /// Creates a new range set containing ranges that contain only the
   /// specified indices in the given collection.
@@ -246,15 +246,16 @@ extension RangeSet {
 
 // These methods only depend on the ranges that comprise the range set, so
 // we can provide them even when we can't provide `SetAlgebra` conformance.
-@available(SwiftStdlib 5.11, *)
+@available(SwiftStdlib 6.0, *)
 extension RangeSet {
   /// Adds the contents of the given range set to this range set.
   ///
   /// - Parameter other: A range set to merge with this one.
+  ///
+  /// - Complexity: O(*m* + *n*), where *m* and *n* are the number of ranges in
+  ///   this and the other range set.
   public mutating func formUnion(_ other: __owned RangeSet<Bound>) {
-    for range in other._ranges {
-      insert(contentsOf: range)
-    }
+    self = self.union(other)
   }
   
   /// Removes the contents of this range set that aren't also in the given
@@ -293,9 +294,7 @@ extension RangeSet {
   public __consuming func union(
     _ other: __owned RangeSet<Bound>
   ) -> RangeSet<Bound> {
-    var result = self
-    result.formUnion(other)
-    return result
+    return RangeSet(_ranges: _ranges._union(other._ranges))
   }
   
   /// Returns a new range set containing the contents of both this set and the
@@ -398,7 +397,7 @@ extension RangeSet {
   }
 }
 
-@available(SwiftStdlib 5.11, *)
+@available(SwiftStdlib 6.0, *)
 extension RangeSet: CustomStringConvertible {
   public var description: String {
     return _ranges.description

@@ -159,6 +159,10 @@ public:
     return isAnyOperator() && Text == "~";
   }
 
+  bool isMinus() const {
+    return isAnyOperator() && Text == "-";
+  }
+
   /// Determine whether this token occurred at the start of a line.
   bool isAtStartOfLine() const { return AtStartOfLine; }
 
@@ -265,11 +269,6 @@ public:
   /// True if the string literal token is multiline.
   bool isMultilineString() const {
     return MultilineString;
-  }
-
-  bool isLifetimeDependenceToken() const {
-    return isContextualKeyword("_copy") || isContextualKeyword("_consume") ||
-           isContextualKeyword("_borrow") || isContextualKeyword("_mutate");
   }
 
   /// Count of extending escaping '#'.

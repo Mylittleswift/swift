@@ -1,10 +1,13 @@
 // RUN: %empty-directory(%t)
-// RUN: %target-build-swift -Xfrontend -disable-availability-checking -enable-experimental-feature OptionalIsolatedParameters %s -o %t/main
+// RUN: %target-build-swift -Xfrontend -disable-availability-checking %s -o %t/main
 // RUN: %target-codesign %t/main
 // RUN: %target-run %t/main | %FileCheck %s
 
 // REQUIRES: executable_test
 // REQUIRES: concurrency
+
+// rdar://124277662
+// XFAIL: freestanding
 
 actor MyActor: CustomStringConvertible {
   let description = "MyActor"

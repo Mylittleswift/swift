@@ -20,6 +20,7 @@
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/DiagnosticsIRGen.h"
 #include "swift/ABI/MetadataValues.h"
+#include "swift/Basic/Assertions.h"
 
 #include "BitPatternBuilder.h"
 #include "Field.h"
@@ -42,10 +43,8 @@ static bool requiresHeapHeader(LayoutKind kind) {
 }
 
 /// Perform structure layout on the given types.
-StructLayout::StructLayout(IRGenModule &IGM,
-                           llvm::Optional<CanType> type,
-                           LayoutKind layoutKind,
-                           LayoutStrategy strategy,
+StructLayout::StructLayout(IRGenModule &IGM, std::optional<CanType> type,
+                           LayoutKind layoutKind, LayoutStrategy strategy,
                            ArrayRef<const TypeInfo *> types,
                            llvm::StructType *typeToFill) {
   NominalTypeDecl *decl = nullptr;
@@ -69,10 +68,16 @@ StructLayout::StructLayout(IRGenModule &IGM,
     builder.addHeapHeader();
   }
 
-  auto deinit = (decl && decl->getValueTypeDestructor())
+  auto triviallyDestroyable = (decl && decl->getValueTypeDestructor())
     ? IsNotTriviallyDestroyable : IsTriviallyDestroyable;
   auto copyable = (decl && !decl->canBeCopyable())
     ? IsNotCopyable : IsCopyable;
+  IsBitwiseTakable_t bitwiseTakable = IsBitwiseTakable;
+
+  if (decl && decl->getAttrs().hasAttribute<SensitiveAttr>()) {
+    triviallyDestroyable = IsNotTriviallyDestroyable;
+    bitwiseTakable = IsNotBitwiseTakable;
+  }
 
   // Handle a raw layout specification on a struct.
   RawLayoutAttr *rawLayout = nullptr;
@@ -81,8 +86,8 @@ StructLayout::StructLayout(IRGenModule &IGM,
   }
   if (rawLayout && type) {
     auto sd = cast<StructDecl>(decl);
-    IsKnownTriviallyDestroyable = deinit;
-    IsKnownBitwiseTakable = IsBitwiseTakable;
+    IsKnownTriviallyDestroyable = triviallyDestroyable;
+    IsKnownBitwiseTakable = bitwiseTakable;
     SpareBits.clear();
     assert(!copyable);
     IsKnownCopyable = copyable;
@@ -106,50 +111,78 @@ StructLayout::StructLayout(IRGenModule &IGM,
       SpareBits.extendWithClearBits(MinimumSize.getValueInBits());
       IsFixedLayout = true;
       IsKnownAlwaysFixedSize = IsFixedSize;
-    } else if (auto likeType = rawLayout->getResolvedScalarLikeType(sd)) {
+    } else {
+      std::optional<Type> likeType = std::nullopt;
+      std::optional<Type> countType = std::nullopt;
+
+      if (auto like = rawLayout->getResolvedScalarLikeType(sd)) {
+        likeType = like;
+      }
+
+      if (auto like = rawLayout->getResolvedArrayLikeTypeAndCount(sd)) {
+        likeType = like->first;
+        countType = like->second;
+      }
+
       // If our likeType is dependent, then all calls to try and lay it out will
       // be non-fixed, but in a concrete case we want a fixed layout, so try to
       // substitute it out.
-      auto subs = (*type)->getContextSubstitutionMap(IGM.getSwiftModule(), decl);
+      auto subs = (*type)->getContextSubstitutionMap();
       auto loweredLikeType = IGM.getLoweredType(likeType->subst(subs));
-      const TypeInfo &likeTypeInfo = IGM.getTypeInfo(loweredLikeType);
-                                      
+      auto &likeTypeInfo = IGM.getTypeInfo(loweredLikeType);
+      auto likeFixedType = dyn_cast<FixedTypeInfo>(&likeTypeInfo);
+
+      // Substitute our count type if we have one.
+      if (countType) {
+        countType = countType->subst(subs);
+      }
+
       // Take layout attributes from the like type.
-      if (const FixedTypeInfo *likeFixedType = dyn_cast<FixedTypeInfo>(&likeTypeInfo)) {
-        MinimumSize = likeFixedType->getFixedSize();
+      //
+      // We can only fixup the type's layout when either this is a scalar and
+      // the like type is a fixed type or if we're an array and both the like
+      // type and count are statically known. Otherwise this is opaque.
+      if (likeFixedType && (!countType || countType.value()->is<IntegerType>())) {
+        // If we have a count type, then we're the array variant so
+        // 'stride * count'. Otherwise we're a scalar which is just 'size'.
+        if (countType) {
+          auto integer = countType.value()->getAs<IntegerType>();
+
+          if (integer->isNegative()) {
+            MinimumSize = Size(0);
+          } else {
+            MinimumSize = likeFixedType->getFixedStride() *
+                integer->getValue().getZExtValue();
+          }
+        } else {
+          MinimumSize = likeFixedType->getFixedSize();
+        }
+
         SpareBits.extendWithClearBits(MinimumSize.getValueInBits());
         MinimumAlign = likeFixedType->getFixedAlignment();
         IsFixedLayout = true;
         IsKnownAlwaysFixedSize = IsFixedSize;
+
+        // @_rawLayout has an optional `movesAsLike` which enforces that a value
+        // of this raw layout type should have the same move semantics as the
+        // type its like.
+        if (rawLayout->shouldMoveAsLikeType()) {
+          IsKnownTriviallyDestroyable = likeFixedType->isTriviallyDestroyable(ResilienceExpansion::Maximal);
+          IsKnownBitwiseTakable = likeFixedType->isBitwiseTakable(ResilienceExpansion::Maximal);
+        }
       } else {
         MinimumSize = Size(0);
         MinimumAlign = Alignment(1);
         IsFixedLayout = false;
         IsKnownAlwaysFixedSize = IsNotFixedSize;
+
+        // We don't know our like type, so assume we're not known to be bitwise
+        // takable.
+        if (rawLayout->shouldMoveAsLikeType()) {
+          IsKnownTriviallyDestroyable = IsNotTriviallyDestroyable;
+          IsKnownBitwiseTakable = IsNotBitwiseTakable;
+        }
       }
-    } else if (auto likeArray = rawLayout->getResolvedArrayLikeTypeAndCount(sd)) {
-      auto elementType = likeArray->first;
-      unsigned count = likeArray->second;
-      
-      auto subs = (*type)->getContextSubstitutionMap(IGM.getSwiftModule(), decl);
-      auto loweredElementType = IGM.getLoweredType(elementType.subst(subs));
-      const TypeInfo &likeTypeInfo = IGM.getTypeInfo(loweredElementType);
-      
-      // Take layout attributes from the like type.
-      if (const FixedTypeInfo *likeFixedType = dyn_cast<FixedTypeInfo>(&likeTypeInfo)) {
-        MinimumSize = likeFixedType->getFixedStride() * count;
-        SpareBits.extendWithClearBits(MinimumSize.getValueInBits());
-        MinimumAlign = likeFixedType->getFixedAlignment();
-        IsFixedLayout = true;
-        IsKnownAlwaysFixedSize = IsFixedSize;
-      } else {
-        MinimumSize = Size(0);
-        MinimumAlign = Alignment(1);
-        IsFixedLayout = false;
-        IsKnownAlwaysFixedSize = IsNotFixedSize;
-      }
-    } else {
-      llvm_unreachable("unhandled raw layout variant?");
     }
     
     // Set the LLVM struct type for a fixed layout according to the stride and
@@ -180,10 +213,10 @@ StructLayout::StructLayout(IRGenModule &IGM,
       SpareBits.clear();
       IsFixedLayout = true;
       IsLoadable = true;
-      IsKnownTriviallyDestroyable = deinit;
-      IsKnownBitwiseTakable = IsBitwiseTakable;
-      IsKnownAlwaysFixedSize = IsFixedSize;
-      IsKnownCopyable = copyable;
+      IsKnownTriviallyDestroyable = triviallyDestroyable & builder.isTriviallyDestroyable();
+      IsKnownBitwiseTakable = builder.isBitwiseTakable();
+      IsKnownAlwaysFixedSize = builder.isAlwaysFixedSize();
+      IsKnownCopyable = copyable & builder.isCopyable();
       Ty = (typeToFill ? typeToFill : IGM.OpaqueTy);
     } else {
       MinimumAlign = builder.getAlignment();
@@ -192,8 +225,8 @@ StructLayout::StructLayout(IRGenModule &IGM,
       SpareBits = builder.getSpareBits();
       IsFixedLayout = builder.isFixedLayout();
       IsLoadable = builder.isLoadable();
-      IsKnownTriviallyDestroyable = deinit & builder.isTriviallyDestroyable();
-      IsKnownBitwiseTakable = builder.isBitwiseTakable();
+      IsKnownTriviallyDestroyable = triviallyDestroyable & builder.isTriviallyDestroyable();
+      IsKnownBitwiseTakable = bitwiseTakable & builder.isBitwiseTakable();
       IsKnownAlwaysFixedSize = builder.isAlwaysFixedSize();
       IsKnownCopyable = copyable & builder.isCopyable();
       if (typeToFill) {
@@ -387,6 +420,7 @@ bool StructLayoutBuilder::addField(ElementLayout &elt,
   IsKnownBitwiseTakable &= eltTI.isBitwiseTakable(ResilienceExpansion::Maximal);
   IsKnownAlwaysFixedSize &= eltTI.isFixedSize(ResilienceExpansion::Minimal);
   IsLoadable &= eltTI.isLoadable();
+  IsKnownCopyable &= eltTI.isCopyable(ResilienceExpansion::Maximal);
 
   if (eltTI.isKnownEmpty(ResilienceExpansion::Maximal)) {
     addEmptyElement(elt);

@@ -192,6 +192,25 @@ public:
   }
 };
 
+class TypeRefInverseRequirement {
+  llvm::PointerIntPair<const TypeRef *, 3, InvertibleProtocolKind> Storage;
+
+public:
+  TypeRefInverseRequirement(const TypeRef *first, InvertibleProtocolKind proto)
+      : Storage(first, proto) {
+    assert(first);
+  }
+
+  /// Retrieve the first type.
+  const TypeRef *getFirstType() const {
+    return Storage.getPointer();
+  }
+
+  /// Determine the kind of requirement.
+  InvertibleProtocolKind getKind() const { return Storage.getInt(); }
+};
+
+
 // On 32-bit systems this needs more than just pointer alignment to fit the
 // extra bits needed by TypeRefRequirement.
 class alignas(8) TypeRef {
@@ -211,7 +230,7 @@ public:
   Demangle::NodePointer getDemangling(Demangle::Demangler &Dem) const;
 
   /// Build the mangled name from this TypeRef.
-  llvm::Optional<std::string> mangle(Demangle::Demangler &Dem) const;
+  std::optional<std::string> mangle(Demangle::Demangler &Dem) const;
 
   bool isConcrete() const;
   bool isConcreteAfterSubstitutions(const GenericArgumentMap &Subs) const;
@@ -223,7 +242,7 @@ public:
                        const GenericArgumentMap &Subs,
                        bool &DidSubstitute) const;
 
-  llvm::Optional<GenericArgumentMap> getSubstMap() const;
+  std::optional<GenericArgumentMap> getSubstMap() const;
 
   virtual ~TypeRef() = default;
 

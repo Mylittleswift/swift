@@ -16,6 +16,7 @@
 
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsDriver.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/LLVMInitialize.h"
 #include "swift/Basic/InitializeSwiftModules.h"
 #include "swift/Basic/PrettyStackTrace.h"
@@ -49,6 +50,7 @@
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
 
+#include <csignal>
 #include <memory>
 #include <stdlib.h>
 
@@ -104,10 +106,6 @@ void *MainAddr);
 extern int swift_api_digester_main(ArrayRef<const char *> Args,
                                    const char *Argv0, void *MainAddr);
 
-/// Run 'swift-api-extract'
-extern int swift_api_extract_main(ArrayRef<const char *> Args,
-                                  const char *Argv0, void *MainAddr);
-
 /// Run 'swift-cache-tool'
 extern int swift_cache_tool_main(ArrayRef<const char *> Args, const char *Argv0,
                                  void *MainAddr);
@@ -144,7 +142,7 @@ static bool shouldRunAsSubcommand(StringRef ExecName,
   // Otherwise, we have a program argument. If it looks like an option or a
   // path, then invoke in interactive mode with the arguments as given.
   StringRef FirstArg(Args[1]);
-  if (FirstArg.startswith("-") || FirstArg.contains('.') ||
+  if (FirstArg.starts_with("-") || FirstArg.contains('.') ||
       FirstArg.contains('/'))
     return false;
 
@@ -253,14 +251,14 @@ static int run_driver(StringRef ExecName,
     StringRef FirstArg(argv[1]);
 
     if (FirstArg == "-frontend") {
-      return performFrontend(llvm::makeArrayRef(argv.data()+2,
-                                                argv.data()+argv.size()),
-                             argv[0], (void *)(intptr_t)getExecutablePath);
+      return performFrontend(
+          llvm::ArrayRef(argv.data() + 2, argv.data() + argv.size()), argv[0],
+          (void *)(intptr_t)getExecutablePath);
     }
     if (FirstArg == "-modulewrap") {
-      return modulewrap_main(llvm::makeArrayRef(argv.data()+2,
-                                                argv.data()+argv.size()),
-                             argv[0], (void *)(intptr_t)getExecutablePath);
+      return modulewrap_main(
+          llvm::ArrayRef(argv.data() + 2, argv.data() + argv.size()), argv[0],
+          (void *)(intptr_t)getExecutablePath);
     }
     if (FirstArg == "-sil-opt") {
       return sil_opt_main(eraseFirstArg(argv),
@@ -293,17 +291,17 @@ static int run_driver(StringRef ExecName,
 
     // Run the integrated Swift frontend when called as "swift-frontend" but
     // without a leading "-frontend".
-    if (!FirstArg.startswith("--driver-mode=")
+    if (!FirstArg.starts_with("--driver-mode=")
         && ExecName == "swift-frontend") {
-      return performFrontend(llvm::makeArrayRef(argv.data()+1,
-                                                argv.data()+argv.size()),
-                             argv[0], (void *)(intptr_t)getExecutablePath);
+      return performFrontend(
+          llvm::ArrayRef(argv.data() + 1, argv.data() + argv.size()), argv[0],
+          (void *)(intptr_t)getExecutablePath);
     }
 
     if (FirstArg == "repl") {
       isRepl = true;
       argv = argv.drop_front();
-    } else if (FirstArg.startswith("--driver-mode=")) {
+    } else if (FirstArg.starts_with("--driver-mode=")) {
       DriverModeArg = FirstArg;
     }
   }
@@ -397,10 +395,6 @@ static int run_driver(StringRef ExecName,
       argv[0], (void *)(intptr_t)getExecutablePath);
   case Driver::DriverKind::SymbolGraph:
       return swift_symbolgraph_extract_main(TheDriver.getArgsWithoutProgramNameAndDriverMode(argv), argv[0], (void *)(intptr_t)getExecutablePath);
-  case Driver::DriverKind::APIExtract:
-    return swift_api_extract_main(
-        TheDriver.getArgsWithoutProgramNameAndDriverMode(argv), argv[0],
-        (void *)(intptr_t)getExecutablePath);
   case Driver::DriverKind::APIDigester:
     return swift_api_digester_main(
         TheDriver.getArgsWithoutProgramNameAndDriverMode(argv), argv[0],
@@ -467,6 +461,11 @@ int swift::mainEntry(int argc_, const char **argv_) {
   llvm::transform(utf8Args, std::back_inserter(utf8CStrs),
                   std::mem_fn(&std::string::c_str));
   argv_ = utf8CStrs.data();
+#else
+  // Set SIGINT to the default handler, ensuring we exit. This needs to be set
+  // before PROGRAM_START/INITIALIZE_LLVM since LLVM will set its own signal
+  // handler that does some cleanup before delegating to the original handler.
+  std::signal(SIGINT, SIG_DFL);
 #endif
   // Expand any response files in the command line argument vector - arguments
   // may be passed through response files in the event of command line length

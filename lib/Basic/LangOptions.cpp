@@ -23,11 +23,11 @@
 #include "swift/Basic/Range.h"
 #include "swift/Config.h"
 #include "llvm/ADT/Hashing.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/raw_ostream.h"
 #include <limits.h>
+#include <optional>
 
 using namespace swift;
 
@@ -47,12 +47,9 @@ LangOptions::LangOptions() {
 #endif
 
   // Note: Introduce default-on language options here.
-
-  // Default-on NoncopyableGenerics when the build-script setting is enabled.
-  if (SWIFT_ENABLE_EXPERIMENTAL_NONCOPYABLE_GENERICS) {
-    Features.insert(Feature::NoncopyableGenerics);
-    EnableExperimentalAssociatedTypeInference = true;
-  }
+  Features.insert(Feature::NoncopyableGenerics);
+  Features.insert(Feature::BorrowingSwitch);
+  Features.insert(Feature::MoveOnlyPartialConsumption);
 
   // Enable any playground options that are enabled by default.
 #define PLAYGROUND_OPTION(OptionName, Description, DefaultOn, HighPerfOn) \
@@ -78,6 +75,8 @@ static const SupportedConditionalValue SupportedConditionalCompilationOSs[] = {
   "tvOS",
   "watchOS",
   "iOS",
+  "visionOS",
+  "xrOS",
   "Linux",
   "FreeBSD",
   "OpenBSD",
@@ -102,6 +101,7 @@ static const SupportedConditionalValue SupportedConditionalCompilationArches[] =
   "s390x",
   "wasm32",
   "riscv64",
+  "avr"
 };
 
 static const SupportedConditionalValue SupportedConditionalCompilationEndianness[] = {
@@ -110,6 +110,7 @@ static const SupportedConditionalValue SupportedConditionalCompilationEndianness
 };
 
 static const SupportedConditionalValue SupportedConditionalCompilationPointerBitWidths[] = {
+  "_16",
   "_32",
   "_64"
 };
@@ -117,6 +118,7 @@ static const SupportedConditionalValue SupportedConditionalCompilationPointerBit
 static const SupportedConditionalValue SupportedConditionalCompilationRuntimes[] = {
   "_ObjC",
   "_Native",
+  "_multithreaded",
 };
 
 static const SupportedConditionalValue SupportedConditionalCompilationTargetEnvironments[] = {
@@ -297,11 +299,11 @@ bool LangOptions::hasFeature(Feature feature) const {
 }
 
 bool LangOptions::hasFeature(llvm::StringRef featureName) const {
-  auto feature = llvm::StringSwitch<llvm::Optional<Feature>>(featureName)
+  auto feature = llvm::StringSwitch<std::optional<Feature>>(featureName)
 #define LANGUAGE_FEATURE(FeatureName, SENumber, Description)                   \
   .Case(#FeatureName, Feature::FeatureName)
 #include "swift/Basic/Features.def"
-                     .Default(llvm::None);
+                     .Default(std::nullopt);
   if (feature)
     return hasFeature(*feature);
 
@@ -406,6 +408,16 @@ void LangOptions::setHasAtomicBitWidth(llvm::Triple triple) {
   }
 }
 
+static bool isMultiThreadedRuntime(llvm::Triple triple) {
+  if (triple.getOS() == llvm::Triple::WASI) {
+    return triple.getEnvironmentName() == "threads";
+  }
+  if (triple.getOSName() == "none") {
+    return false;
+  }
+  return true;
+}
+
 std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
   clearAllPlatformConditionValues();
   clearAtomicBitWidths();
@@ -445,6 +457,10 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
     break;
   case llvm::Triple::IOS:
     addPlatformConditionValue(PlatformConditionKind::OS, "iOS");
+    break;
+  case llvm::Triple::XROS:
+    addPlatformConditionValue(PlatformConditionKind::OS, "xrOS");
+    addPlatformConditionValue(PlatformConditionKind::OS, "visionOS");
     break;
   case llvm::Triple::Linux:
     if (Target.getEnvironment() == llvm::Triple::Android)
@@ -527,6 +543,9 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
   case llvm::Triple::ArchType::riscv64:
     addPlatformConditionValue(PlatformConditionKind::Arch, "riscv64");
     break;
+  case llvm::Triple::ArchType::avr:
+    addPlatformConditionValue(PlatformConditionKind::Arch, "avr");
+    break;
   default:
     UnsupportedArch = true;
 
@@ -550,7 +569,9 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
   }
 
   // Set the "_pointerBitWidth" platform condition.
-  if (Target.isArch32Bit()) {
+  if (Target.isArch16Bit()) {
+    addPlatformConditionValue(PlatformConditionKind::PointerBitWidth, "_16");
+  } else if (Target.isArch32Bit()) {
     addPlatformConditionValue(PlatformConditionKind::PointerBitWidth, "_32");
   } else if (Target.isArch64Bit()) {
     addPlatformConditionValue(PlatformConditionKind::PointerBitWidth, "_64");
@@ -578,6 +599,11 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
     addPlatformConditionValue(PlatformConditionKind::TargetEnvironment,
                               "macabi");
 
+  if (isMultiThreadedRuntime(Target)) {
+    addPlatformConditionValue(PlatformConditionKind::Runtime,
+                              "_multithreaded");
+  }
+
   // Set the "_hasHasAtomicBitWidth" platform condition.
   setHasAtomicBitWidth(triple);
 
@@ -598,19 +624,6 @@ llvm::StringRef swift::getFeatureName(Feature feature) {
   llvm_unreachable("covered switch");
 }
 
-bool swift::isSuppressibleFeature(Feature feature) {
-  switch (feature) {
-#define LANGUAGE_FEATURE(FeatureName, SENumber, Description)                   \
-  case Feature::FeatureName:                                                   \
-    return false;
-#define SUPPRESSIBLE_LANGUAGE_FEATURE(FeatureName, SENumber, Description)      \
-  case Feature::FeatureName:                                                   \
-    return true;
-#include "swift/Basic/Features.def"
-  }
-  llvm_unreachable("covered switch");
-}
-
 bool swift::isFeatureAvailableInProduction(Feature feature) {
   switch (feature) {
 #define LANGUAGE_FEATURE(FeatureName, SENumber, Description)                   \
@@ -623,32 +636,32 @@ bool swift::isFeatureAvailableInProduction(Feature feature) {
   llvm_unreachable("covered switch");
 }
 
-llvm::Optional<Feature> swift::getUpcomingFeature(llvm::StringRef name) {
-  return llvm::StringSwitch<llvm::Optional<Feature>>(name)
+std::optional<Feature> swift::getUpcomingFeature(llvm::StringRef name) {
+  return llvm::StringSwitch<std::optional<Feature>>(name)
 #define LANGUAGE_FEATURE(FeatureName, SENumber, Description)
 #define UPCOMING_FEATURE(FeatureName, SENumber, Version) \
                    .Case(#FeatureName, Feature::FeatureName)
 #include "swift/Basic/Features.def"
-      .Default(llvm::None);
+      .Default(std::nullopt);
 }
 
-llvm::Optional<Feature> swift::getExperimentalFeature(llvm::StringRef name) {
-  return llvm::StringSwitch<llvm::Optional<Feature>>(name)
+std::optional<Feature> swift::getExperimentalFeature(llvm::StringRef name) {
+  return llvm::StringSwitch<std::optional<Feature>>(name)
 #define LANGUAGE_FEATURE(FeatureName, SENumber, Description)
 #define EXPERIMENTAL_FEATURE(FeatureName, AvailableInProd) \
                    .Case(#FeatureName, Feature::FeatureName)
 #include "swift/Basic/Features.def"
-      .Default(llvm::None);
+      .Default(std::nullopt);
 }
 
-llvm::Optional<unsigned> swift::getFeatureLanguageVersion(Feature feature) {
+std::optional<unsigned> swift::getFeatureLanguageVersion(Feature feature) {
   switch (feature) {
 #define LANGUAGE_FEATURE(FeatureName, SENumber, Description)
 #define UPCOMING_FEATURE(FeatureName, SENumber, Version) \
   case Feature::FeatureName: return Version;
 #include "swift/Basic/Features.def"
   default:
-    return llvm::None;
+    return std::nullopt;
   }
 }
 
@@ -673,12 +686,13 @@ llvm::StringRef swift::getPlaygroundOptionName(PlaygroundOption option) {
   llvm_unreachable("covered switch");
 }
 
-llvm::Optional<PlaygroundOption> swift::getPlaygroundOption(llvm::StringRef name) {
-  return llvm::StringSwitch<llvm::Optional<PlaygroundOption>>(name)
+std::optional<PlaygroundOption>
+swift::getPlaygroundOption(llvm::StringRef name) {
+  return llvm::StringSwitch<std::optional<PlaygroundOption>>(name)
 #define PLAYGROUND_OPTION(OptionName, Description, DefaultOn, HighPerfOn) \
   .Case(#OptionName, PlaygroundOption::OptionName)
 #include "swift/Basic/PlaygroundOptions.def"
-  .Default(llvm::None);
+      .Default(std::nullopt);
 }
 
 DiagnosticBehavior LangOptions::getAccessNoteFailureLimit() const {
@@ -697,7 +711,7 @@ DiagnosticBehavior LangOptions::getAccessNoteFailureLimit() const {
 }
 
 namespace {
-  static constexpr std::array<std::string_view, 16> knownSearchPathPrefiexes =
+  constexpr std::array<std::string_view, 16> knownSearchPathPrefiexes =
        {"-I",
         "-F",
         "-fmodule-map-file=",
@@ -714,6 +728,23 @@ namespace {
         "-ivfsoverlay",
         "-working-directory=",
         "-working-directory"};
+
+  constexpr std::array<std::string_view, 15>
+      knownClangDependencyIgnorablePrefiexes = {"-I",
+                                                "-F",
+                                                "-fmodule-map-file=",
+                                                "-iquote",
+                                                "-idirafter",
+                                                "-iframeworkwithsysroot",
+                                                "-iframework",
+                                                "-iprefix",
+                                                "-iwithprefixbefore",
+                                                "-iwithprefix",
+                                                "-isystemafter",
+                                                "-isystem",
+                                                "-isysroot",
+                                                "-working-directory=",
+                                                "-working-directory"};
 }
 
 std::vector<std::string> ClangImporterOptions::getRemappedExtraArgs(
@@ -756,7 +787,7 @@ std::vector<std::string> ClangImporterOptions::getRemappedExtraArgs(
 std::vector<std::string>
 ClangImporterOptions::getReducedExtraArgsForSwiftModuleDependency() const {
   auto matchIncludeOption = [](StringRef &arg) {
-    for (const auto &option : knownSearchPathPrefiexes)
+    for (const auto &option : knownClangDependencyIgnorablePrefiexes)
       if (arg.consume_front(option))
         return true;
     return false;

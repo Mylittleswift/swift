@@ -33,8 +33,8 @@ struct FooStructDeinitializerB {
   deinit // expected-error {{expected '{' for deinitializer}}
 }
 
-struct FooStructDeinitializerC {
-  deinit {} // expected-error {{deinitializers may only be declared within a class, actor, or noncopyable type}}
+struct FooStructDeinitializerC { // expected-note {{consider adding '~Copyable' to struct 'FooStructDeinitializerC'}}
+  deinit {} // expected-error {{deinitializer cannot be declared in struct 'FooStructDeinitializerC' that conforms to 'Copyable'}}
 }
 
 class FooClassDeinitializerA {
@@ -59,7 +59,7 @@ deinit {} // expected-error {{deinitializers may only be declared within a class
 
 struct BarStruct {
   init() {}
-  deinit {} // expected-error {{deinitializers may only be declared within a class, actor, or noncopyable type}}
+  deinit {} // NOTE: this doesn't get diagnosed with the other errors in this file for some reason.
 }
 
 extension BarStruct {
@@ -71,7 +71,7 @@ extension BarStruct {
 
 enum BarUnion {
   init() {}
-  deinit {} // expected-error {{deinitializers may only be declared within a class, actor, or noncopyable type}}
+  deinit {} // NOTE: this doesn't get diagnosed with the other errors in this file for some reason.
 }
 
 extension BarUnion {

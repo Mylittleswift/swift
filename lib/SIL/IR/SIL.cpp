@@ -23,6 +23,7 @@
 #include "swift/AST/Pattern.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/ProtocolConformance.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/ClangImporter/ClangModule.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
@@ -255,6 +256,24 @@ static bool isTypeMetadataForLayoutAccessible(SILModule &M, SILType type) {
   //   - metatypes
   if (type.is<AnyMetatypeType>())
     return true;
+
+  //   - pack expansion types
+  if (auto expansionType = type.getAs<PackExpansionType>()) {
+    auto patternType = SILType::getPrimitiveType(expansionType.getPatternType(),
+                                                 type.getCategory());
+    return isTypeMetadataForLayoutAccessible(M, patternType);
+  }
+
+  //   - lowered pack types
+  if (auto packType = type.getAs<SILPackType>()) {
+    for (auto eltType : packType.getElementTypes()) {
+      if (!isTypeMetadataForLayoutAccessible(
+              M, SILType::getPrimitiveAddressType(eltType)))
+        return false;
+    }
+
+    return true;
+  }
 
   // Otherwise, check that we can fetch the type metadata.
   return M.isTypeMetadataAccessible(type.getASTType());

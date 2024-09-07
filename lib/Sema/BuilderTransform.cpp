@@ -25,6 +25,7 @@
 #include "swift/AST/NameLookupRequests.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/TypeCheckRequests.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Sema/ConstraintSystem.h"
 #include "swift/Sema/IDETypeChecking.h"
 #include "swift/Sema/SolutionResult.h"
@@ -72,6 +73,9 @@ class ResultBuilderTransform
   DeclContext *dc;
   ResultBuilder builder;
 
+  /// The source range of the body.
+  SourceRange bodyRange;
+
   /// The result type of this result builder body.
   Type ResultType;
 
@@ -80,9 +84,9 @@ class ResultBuilderTransform
 
 public:
   ResultBuilderTransform(ConstraintSystem &cs, DeclContext *dc,
-                         Type builderType, Type resultTy)
+                         SourceRange bodyRange, Type builderType, Type resultTy)
       : ctx(cs.getASTContext()), dc(dc), builder(cs, dc, builderType),
-        ResultType(resultTy) {}
+        bodyRange(bodyRange), ResultType(resultTy) {}
 
   UnsupportedElt getUnsupportedElement() const { return FirstUnsupported; }
 
@@ -156,7 +160,7 @@ protected:
   /// Visit the element of a brace statement, returning \c None if the element
   /// was transformed successfully, or an unsupported element if the element
   /// cannot be handled.
-  llvm::Optional<UnsupportedElt>
+  std::optional<UnsupportedElt>
   transformBraceElement(ASTNode element, SmallVectorImpl<ASTNode> &newBody,
                         SmallVectorImpl<Expr *> &buildBlockArguments) {
     if (auto *returnStmt = getAsStmt<ReturnStmt>(element)) {
@@ -182,7 +186,7 @@ protected:
       case DeclKind::Var:
       case DeclKind::Param:
         newBody.push_back(element);
-        return llvm::None;
+        return std::nullopt;
 
       default:
         return UnsupportedElt(decl);
@@ -194,11 +198,8 @@ protected:
       // Throw is allowed as is.
       if (auto *throwStmt = dyn_cast<ThrowStmt>(stmt)) {
         newBody.push_back(throwStmt);
-        return llvm::None;
+        return std::nullopt;
       }
-
-      // Allocate variable with a placeholder type
-      auto *resultVar = buildPlaceholderVar(stmt->getStartLoc(), newBody);
 
       if (ctx.CompletionCallback && stmt->getSourceRange().isValid() &&
           !containsIDEInspectionTarget(stmt->getSourceRange(), ctx.SourceMgr) &&
@@ -206,8 +207,11 @@ protected:
         // A statement that doesn't contain the code completion expression can't
         // influence the type of the code completion expression, so we can skip
         // it to improve performance.
-        return llvm::None;
+        return std::nullopt;
       }
+
+      // Allocate variable with a placeholder type
+      auto *resultVar = buildPlaceholderVar(stmt->getStartLoc(), newBody);
 
       auto result = visit(stmt, resultVar);
       if (!result)
@@ -216,7 +220,7 @@ protected:
       newBody.push_back(result.get());
       buildBlockArguments.push_back(
           builder.buildVarRef(resultVar, stmt->getStartLoc()));
-      return llvm::None;
+      return std::nullopt;
     }
 
     auto *expr = element.get<Expr *>();
@@ -238,12 +242,14 @@ protected:
       // buildBlock higher.
       buildBlockArguments.push_back(expr);
     } else if (ctx.CompletionCallback && expr->getSourceRange().isValid() &&
+               containsIDEInspectionTarget(bodyRange, ctx.SourceMgr) &&
                !containsIDEInspectionTarget(expr->getSourceRange(),
                                             ctx.SourceMgr)) {
-      // A statement that doesn't contain the code completion expression can't
-      // influence the type of the code completion expression. Add a variable
-      // for it that we can put into the buildBlock call but don't add the
-      // expression itself into the transformed body to improve performance.
+      // A top-level expression that doesn't contain the code completion
+      // expression can't influence the type of the code completion expression
+      // if they're in the same result builder. Add a variable for it that we
+      // can put into the buildBlock call but don't add the expression itself
+      // into the transformed body to improve performance.
       auto *resultVar = buildPlaceholderVar(expr->getStartLoc(), newBody);
       buildBlockArguments.push_back(
           builder.buildVarRef(resultVar, expr->getStartLoc()));
@@ -255,10 +261,10 @@ protected:
           builder.buildVarRef(capture, element.getStartLoc()));
     }
 
-    return llvm::None;
+    return std::nullopt;
   }
 
-  std::pair<NullablePtr<Expr>, llvm::Optional<UnsupportedElt>>
+  std::pair<NullablePtr<Expr>, std::optional<UnsupportedElt>>
   transform(BraceStmt *braceStmt, SmallVectorImpl<ASTNode> &newBody) {
     SmallVector<Expr *, 4> buildBlockArguments;
 
@@ -306,7 +312,7 @@ protected:
 
         return std::make_pair(
             builder.buildVarRef(buildBlockVar, braceStmt->getStartLoc()),
-            llvm::None);
+            std::nullopt);
       }
       // If `buildBlock` does not exist at this point, it could be the case that
       // `buildPartialBlock` did not have the sufficient availability for this
@@ -324,7 +330,7 @@ protected:
       auto *buildBlock = builder.buildCall(
           braceStmt->getStartLoc(), ctx.Id_buildBlock, buildBlockArguments,
           /*argLabels=*/{});
-      return std::make_pair(buildBlock, llvm::None);
+      return std::make_pair(buildBlock, std::nullopt);
     }
   }
 
@@ -339,7 +345,7 @@ protected:
     };
 
     NullablePtr<Expr> buildBlockVarRef;
-    llvm::Optional<UnsupportedElt> unsupported;
+    std::optional<UnsupportedElt> unsupported;
 
     std::tie(buildBlockVarRef, unsupported) = transform(braceStmt, elements);
     if (unsupported)
@@ -485,7 +491,7 @@ protected:
   NullablePtr<IfStmt>
   transformIf(IfStmt *ifStmt,
               SmallVectorImpl<std::pair<Expr *, Stmt *>> &branchVarRefs) {
-    llvm::Optional<UnsupportedElt> unsupported;
+    std::optional<UnsupportedElt> unsupported;
 
     // If there is a #available in the condition, wrap the 'then' or 'else'
     // in a call to buildLimitedAvailability(_:).
@@ -624,7 +630,7 @@ protected:
     return DoStmt::createImplicit(ctx, LabeledStmtInfo(), doBody);
   }
 
-  llvm::Optional<std::pair<Expr *, CaseStmt *>>
+  std::optional<std::pair<Expr *, CaseStmt *>>
   transformCase(CaseStmt *caseStmt) {
     auto *body = caseStmt->getBody();
 
@@ -637,19 +643,19 @@ protected:
         // completion. Code completion ignores diagnostics
         // and won't get any types if we fail.
         if (!ctx.SourceMgr.hasIDEInspectionTargetBuffer())
-          return llvm::None;
+          return std::nullopt;
       }
     }
 
     NullablePtr<Expr> caseVarRef;
-    llvm::Optional<UnsupportedElt> unsupported;
+    std::optional<UnsupportedElt> unsupported;
     SmallVector<ASTNode, 4> newBody;
 
     std::tie(caseVarRef, unsupported) = transform(body, newBody);
 
     if (unsupported) {
       recordUnsupported(*unsupported);
-      return llvm::None;
+      return std::nullopt;
     }
 
     auto *newCase = CaseStmt::create(
@@ -705,7 +711,7 @@ protected:
                           /*Commas=*/{}, /*RBrace=*/endLoc));
 
     NullablePtr<Expr> bodyVarRef;
-    llvm::Optional<UnsupportedElt> unsupported;
+    std::optional<UnsupportedElt> unsupported;
 
     SmallVector<ASTNode, 4> newBody;
     {
@@ -912,27 +918,12 @@ private:
 
 } // end anonymous namespace
 
-llvm::Optional<BraceStmt *>
+std::optional<BraceStmt *>
 TypeChecker::applyResultBuilderBodyTransform(FuncDecl *func, Type builderType) {
-  // Pre-check the body: pre-check any expressions in it and look
-  // for return statements.
-  //
-  // If we encountered an error or there was an explicit result type,
-  // bail out and report that to the caller.
+  // First look for any return statements, and bail if we have any.
   auto &ctx = func->getASTContext();
-  auto request =
-      PreCheckResultBuilderRequest{{AnyFunctionRef(func),
-                                      /*SuppressDiagnostics=*/false}};
-  switch (evaluateOrDefault(ctx.evaluator, request,
-                            ResultBuilderBodyPreCheck::Error)) {
-  case ResultBuilderBodyPreCheck::Okay:
-    // If the pre-check was okay, apply the result-builder transform.
-    break;
-
-  case ResultBuilderBodyPreCheck::Error:
-    return nullptr;
-
-  case ResultBuilderBodyPreCheck::HasReturnStmt: {
+  if (evaluateOrDefault(ctx.evaluator, BraceHasReturnRequest{func->getBody()},
+                        false)) {
     // One or more explicit 'return' statements were encountered, which
     // disables the result builder transform. Warn when we do this.
     auto returnStmts = findReturnStatements(func);
@@ -964,9 +955,12 @@ TypeChecker::applyResultBuilderBodyTransform(FuncDecl *func, Type builderType) {
       }
     }
 
-    return llvm::None;
+    return std::nullopt;
   }
-  }
+
+  auto target = SyntacticElementTarget(func);
+  if (ConstraintSystem::preCheckTarget(target))
+    return nullptr;
 
   ConstraintSystemOptions options = ConstraintSystemFlags::AllowFixes;
   auto resultInterfaceTy = func->getResultInterfaceType();
@@ -1014,8 +1008,7 @@ TypeChecker::applyResultBuilderBodyTransform(FuncDecl *func, Type builderType) {
     cs.Options |= ConstraintSystemFlags::ForCodeCompletion;
     cs.solveForCodeCompletion(solutions);
 
-    SyntacticElementTarget funcTarget(func);
-    CompletionContextFinder analyzer(funcTarget, func->getDeclContext());
+    CompletionContextFinder analyzer(target, func->getDeclContext());
     if (analyzer.hasCompletion()) {
       filterSolutionsForCodeCompletion(solutions, analyzer);
       for (const auto &solution : solutions) {
@@ -1062,7 +1055,7 @@ TypeChecker::applyResultBuilderBodyTransform(FuncDecl *func, Type builderType) {
 
     case SolutionResult::Kind::UndiagnosedError:
       reportSolutionsToSolutionCallback(salvagedResult);
-      cs.diagnoseFailureFor(SyntacticElementTarget(func));
+      cs.diagnoseFailureFor(target);
       salvagedResult.markAsDiagnosed();
       return nullptr;
 
@@ -1096,8 +1089,7 @@ TypeChecker::applyResultBuilderBodyTransform(FuncDecl *func, Type builderType) {
   cs.applySolution(solutions.front());
 
   // Apply the solution to the function body.
-  if (auto result =
-          cs.applySolution(solutions.front(), SyntacticElementTarget(func))) {
+  if (auto result = cs.applySolution(solutions.front(), target)) {
     performSyntacticDiagnosticsForTarget(*result, /*isExprStmt*/ false);
     auto *body = result->getFunctionBody();
 
@@ -1115,7 +1107,7 @@ TypeChecker::applyResultBuilderBodyTransform(FuncDecl *func, Type builderType) {
   return nullptr;
 }
 
-llvm::Optional<ConstraintSystem::TypeMatchResult>
+std::optional<ConstraintSystem::TypeMatchResult>
 ConstraintSystem::matchResultBuilder(AnyFunctionRef fn, Type builderType,
                                      Type bodyResultType,
                                      ConstraintKind bodyResultConstraintKind,
@@ -1138,22 +1130,8 @@ ConstraintSystem::matchResultBuilder(AnyFunctionRef fn, Type builderType,
   // not apply the result builder transform if it contained an explicit return.
   // To maintain source compatibility, we still need to check for HasReturnStmt.
   // https://github.com/apple/swift/issues/64332.
-  auto request =
-      PreCheckResultBuilderRequest{{fn, /*SuppressDiagnostics=*/false}};
-  switch (evaluateOrDefault(getASTContext().evaluator, request,
-                            ResultBuilderBodyPreCheck::Error)) {
-  case ResultBuilderBodyPreCheck::Okay:
-    // If the pre-check was okay, apply the result-builder transform.
-    break;
-
-  case ResultBuilderBodyPreCheck::Error: {
-    llvm_unreachable(
-        "Running PreCheckResultBuilderRequest on a function shouldn't run "
-        "preCheckExpression and thus we should never enter this case.");
-    break;
-  }
-
-  case ResultBuilderBodyPreCheck::HasReturnStmt:
+  if (evaluateOrDefault(getASTContext().evaluator,
+                        BraceHasReturnRequest{fn.getBody()}, false)) {
     // Diagnostic mode means that solver couldn't reach any viable
     // solution, so let's diagnose presence of a `return` statement
     // in the closure body.
@@ -1168,7 +1146,7 @@ ConstraintSystem::matchResultBuilder(AnyFunctionRef fn, Type builderType,
 
     // If the body has a return statement, suppress the transform but
     // continue solving the constraint system.
-    return llvm::None;
+    return std::nullopt;
   }
 
   auto transformedBody = getBuilderTransformedBody(fn, builder);
@@ -1176,6 +1154,7 @@ ConstraintSystem::matchResultBuilder(AnyFunctionRef fn, Type builderType,
   // let's do it and cache the result.
   if (!transformedBody) {
     ResultBuilderTransform transform(*this, fn.getAsDeclContext(),
+                                     fn.getBody()->getSourceRange(),
                                      builderType, bodyResultType);
     auto *body = transform.apply(fn.getBody());
 
@@ -1253,42 +1232,14 @@ ConstraintSystem::matchResultBuilder(AnyFunctionRef fn, Type builderType,
 }
 
 namespace {
-
-/// Pre-check all the expressions in the body.
-class PreCheckResultBuilderApplication : public ASTWalker {
-  AnyFunctionRef Fn;
-  bool SkipPrecheck = false;
-  bool SuppressDiagnostics = false;
+class ReturnStmtFinder : public ASTWalker {
   std::vector<ReturnStmt *> ReturnStmts;
-  bool HasError = false;
-
-  bool hasReturnStmt() const { return !ReturnStmts.empty(); }
 
 public:
-  PreCheckResultBuilderApplication(AnyFunctionRef fn, bool skipPrecheck,
-                                     bool suppressDiagnostics)
-      : Fn(fn), SkipPrecheck(skipPrecheck),
-        SuppressDiagnostics(suppressDiagnostics) {}
-
-  const std::vector<ReturnStmt *> getReturnStmts() const { return ReturnStmts; }
-
-  ResultBuilderBodyPreCheck run() {
-    Stmt *oldBody = Fn.getBody();
-
-    Stmt *newBody = oldBody->walk(*this);
-
-    // If the walk was aborted, it was because we had a problem of some kind.
-    assert((newBody == nullptr) == HasError &&
-           "unexpected short-circuit while walking body");
-    if (HasError)
-      return ResultBuilderBodyPreCheck::Error;
-
-    assert(oldBody == newBody && "pre-check walk wasn't in-place?");
-
-    if (hasReturnStmt())
-      return ResultBuilderBodyPreCheck::HasReturnStmt;
-
-    return ResultBuilderBodyPreCheck::Okay;
+  static std::vector<ReturnStmt *> find(const BraceStmt *BS) {
+    ReturnStmtFinder finder;
+    const_cast<BraceStmt *>(BS)->walk(finder);
+    return std::move(finder.ReturnStmts);
   }
 
   MacroWalking getMacroWalkingBehavior() const override {
@@ -1296,71 +1247,17 @@ public:
   }
 
   PreWalkResult<Expr *> walkToExprPre(Expr *E) override {
-    if (SkipPrecheck)
-      return Action::SkipNode(E);
-
-    // Pre-check the expression.  If this fails, abort the walk immediately.
-    // Otherwise, replace the expression with the result of pre-checking.
-    // In either case, don't recurse into the expression.
-    {
-      auto *DC = Fn.getAsDeclContext();
-      auto &diagEngine = DC->getASTContext().Diags;
-
-      // Suppress any diagnostics which could be produced by this expression.
-      DiagnosticTransaction transaction(diagEngine);
-
-      HasError |= ConstraintSystem::preCheckExpression(
-          E, DC, /*replaceInvalidRefsWithErrors=*/true);
-
-      HasError |= transaction.hasErrors();
-
-      if (!HasError)
-        HasError |= containsErrorExpr(E);
-
-      if (SuppressDiagnostics)
-        transaction.abort();
-
-      if (HasError)
-        return Action::Stop();
-
-      return Action::SkipNode(E);
-    }
+    return Action::SkipNode(E);
   }
 
   PreWalkResult<Stmt *> walkToStmtPre(Stmt *S) override {
     // If we see a return statement, note it..
-    if (auto returnStmt = dyn_cast<ReturnStmt>(S)) {
-      if (!returnStmt->isImplicit()) {
-        ReturnStmts.push_back(returnStmt);
-        return Action::SkipNode(S);
-      }
-    }
+    auto *returnStmt = dyn_cast<ReturnStmt>(S);
+    if (!returnStmt || returnStmt->isImplicit())
+      return Action::Continue(S);
 
-    // Otherwise, recurse into the statement normally.
-    return Action::Continue(S);
-  }
-
-  /// Check whether given expression (including single-statement
-  /// closures) contains `ErrorExpr` as one of its sub-expressions.
-  bool containsErrorExpr(Expr *expr) {
-    bool hasError = false;
-
-    expr->forEachChildExpr([&](Expr *expr) -> Expr * {
-      hasError |= isa<ErrorExpr>(expr);
-      if (hasError)
-        return nullptr;
-
-      if (auto *closure = dyn_cast<ClosureExpr>(expr)) {
-        if (closure->hasSingleExpressionBody()) {
-          hasError |= containsErrorExpr(closure->getSingleExpressionBody());
-          return hasError ? nullptr : expr;
-        }
-      }
-
-      return expr;
-    });
-
-    return hasError;
+    ReturnStmts.push_back(returnStmt);
+    return Action::SkipNode(S);
   }
 
   /// Ignore patterns.
@@ -1368,25 +1265,15 @@ public:
     return Action::SkipNode(pat);
   }
 };
+} // end anonymous namespace
 
-}
-
-ResultBuilderBodyPreCheck PreCheckResultBuilderRequest::evaluate(
-    Evaluator &evaluator, PreCheckResultBuilderDescriptor owner) const {
-  // Closures should already be pre-checked when we run this, so there's no need
-  // to pre-check them again.
-  bool skipPrecheck = owner.Fn.getAbstractClosureExpr();
-  return PreCheckResultBuilderApplication(
-             owner.Fn, skipPrecheck,
-             /*suppressDiagnostics=*/owner.SuppressDiagnostics)
-      .run();
+bool BraceHasReturnRequest::evaluate(Evaluator &evaluator,
+                                     const BraceStmt *BS) const {
+  return !ReturnStmtFinder::find(BS).empty();
 }
 
 std::vector<ReturnStmt *> TypeChecker::findReturnStatements(AnyFunctionRef fn) {
-  PreCheckResultBuilderApplication precheck(fn, /*skipPreCheck=*/true,
-                                              /*SuppressDiagnostics=*/true);
-  (void)precheck.run();
-  return precheck.getReturnStmts();
+  return ReturnStmtFinder::find(fn.getBody());
 }
 
 ResultBuilderOpSupport TypeChecker::checkBuilderOpSupport(
@@ -1424,7 +1311,7 @@ ResultBuilderOpSupport TypeChecker::checkBuilderOpSupport(
           continue;
       }
 
-      // Check if the the candidate has a suitable availability for the
+      // Check if the candidate has a suitable availability for the
       // calling context.
       if (isUnavailable(func)) {
         foundUnavailable = true;
@@ -1513,7 +1400,7 @@ swift::determineResultBuilderBuildFixItInfo(NominalTypeDecl *builder) {
 
 void swift::printResultBuilderBuildFunction(
     NominalTypeDecl *builder, Type componentType,
-    ResultBuilderBuildFunction function, llvm::Optional<std::string> stubIndent,
+    ResultBuilderBuildFunction function, std::optional<std::string> stubIndent,
     llvm::raw_ostream &out) {
   // Render the component type into a string.
   std::string componentTypeString;

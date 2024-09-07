@@ -108,7 +108,6 @@ class FuncDecl;
 class IRGenOptions;
 class KeyPathPattern;
 class ModuleDecl;
-class SILUndef;
 class SourceFile;
 class SerializedSILLoader;
 class SILFunctionBuilder;
@@ -192,7 +191,6 @@ private:
   friend SILType;
   friend SILVTable;
   friend SILProperty;
-  friend SILUndef;
   friend SILWitnessTable;
   friend SILMoveOnlyDeinit;
   friend Lowering::SILGenModule;
@@ -315,9 +313,6 @@ private:
   /// This is a cache of builtin Function declarations to numeric ID mappings.
   llvm::DenseMap<Identifier, BuiltinInfo> BuiltinIDCache;
 
-  /// This is the set of undef values we've created, for uniquing purposes.
-  llvm::DenseMap<SILType, SILUndef *> UndefValues;
-
   llvm::DenseMap<std::pair<Decl *, VarDecl *>, unsigned> fieldIndices;
   llvm::DenseMap<EnumElementDecl *, unsigned> enumCaseIndices;
 
@@ -348,7 +343,7 @@ private:
   /// projections, shared between all functions in the module.
   std::unique_ptr<IndexTrieNode> indexTrieRoot;
 
-  /// A mapping from root local archetypes to the instructions which define
+  /// A mapping from local generic environments to the instructions which define
   /// them.
   ///
   /// The value is either a SingleValueInstruction or a PlaceholderValue,
@@ -356,10 +351,10 @@ private:
   /// deserializing SIL, where local archetypes can be forward referenced.
   ///
   /// In theory we wouldn't need to have the SILFunction in the key, because
-  /// local archetypes \em should be unique across the module. But currently
+  /// local environments should be unique across the module. But currently
   /// in some rare cases SILGen re-uses the same local archetype for multiple
   /// functions.
-  using LocalArchetypeKey = std::pair<LocalArchetypeType *, SILFunction *>;
+  using LocalArchetypeKey = std::pair<GenericEnvironment *, SILFunction *>;
   llvm::DenseMap<LocalArchetypeKey, SILValue> RootLocalArchetypeDefs;
 
   /// The number of PlaceholderValues in RootLocalArchetypeDefs.
@@ -456,6 +451,27 @@ public:
     hasAccessMarkerHandler = true;
   }
 
+  /// Returns the instruction which defines the given local generic environment,
+  /// e.g. an open_existential_addr.
+  ///
+  /// In case the generic environment is not defined yet (e.g. during parsing or
+  /// deserialization), a PlaceholderValue is returned. This should not be the
+  /// case outside of parsing or deserialization.
+  SILValue getLocalGenericEnvironmentDef(GenericEnvironment *genericEnv,
+                                         SILFunction *inFunction);
+
+  /// Returns the instruction which defines the given local generic environment,
+  /// e.g. an open_existential_addr.
+  ///
+  /// In contrast to getLocalGenericEnvironmentDef, it is required that all local
+  /// generic environments are resolved.
+  SingleValueInstruction *
+  getLocalGenericEnvironmentDefInst(GenericEnvironment *genericEnv,
+                                    SILFunction *inFunction) {
+    return dyn_cast<SingleValueInstruction>(
+        getLocalGenericEnvironmentDef(genericEnv, inFunction));
+  }
+
   /// Returns the instruction which defines the given root local archetype,
   /// e.g. an open_existential_addr.
   ///
@@ -481,6 +497,11 @@ public:
   ///
   /// This should only be the case during parsing or deserialization.
   bool hasUnresolvedLocalArchetypeDefinitions();
+
+  /// If we added any instructions that reference unresolved local archetypes
+  /// and then deleted those instructions without resolving those archetypes,
+  /// we must reclaim those unresolved local archetypes.
+  void reclaimUnresolvedLocalArchetypeDefinitions();
 
   /// Get a unique index for a struct or class field in layout order.
   ///
@@ -526,15 +547,15 @@ public:
     basicBlockNames[block] = name.str();
 #endif
   }
-  llvm::Optional<StringRef> getBasicBlockName(const SILBasicBlock *block) {
+  std::optional<StringRef> getBasicBlockName(const SILBasicBlock *block) {
 #ifndef NDEBUG
     auto Known = basicBlockNames.find(block);
     if (Known == basicBlockNames.end())
-      return llvm::None;
+      return std::nullopt;
 
     return StringRef(Known->second);
 #else
-    return llvm::None;
+    return std::nullopt;
 #endif
   }
 
@@ -791,7 +812,7 @@ public:
   /// If \p linkage is provided, the deserialized function is required to have
   /// that linkage. Returns null, if this is not the case.
   SILFunction *loadFunction(StringRef name, LinkingMode LinkMode,
-                            llvm::Optional<SILLinkage> linkage = llvm::None);
+                            std::optional<SILLinkage> linkage = std::nullopt);
 
   /// Update the linkage of the SILFunction with the linkage of the serialized
   /// function.
@@ -939,19 +960,6 @@ public:
   /// Check linear OSSA lifetimes, assuming complete OSSA.
   void verifyOwnership() const;
 
-  /// Check if there are any leaking instructions.
-  ///
-  /// Aborts with an error if more instructions are allocated than contained in
-  /// the module.
-  void checkForLeaks() const;
-
-  /// Check if there are any leaking instructions after the SILModule is
-  /// destructed.
-  ///
-  /// The SILModule destructor already calls checkForLeaks(). This function is
-  /// useful to check if the destructor itself destroys all data structures.
-  static void checkForLeaksAfterDestruction();
-
   /// Pretty-print the module.
   void dump(bool Verbose = false) const;
 
@@ -1071,6 +1079,11 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const SILModule &M){
   M.print(OS);
   return OS;
 }
+
+void verificationFailure(const Twine &complaint,
+              const SILInstruction *atInstruction,
+              const SILArgument *atArgument,
+              const std::function<void()> &extraContext);
 
 inline bool SILOptions::supportsLexicalLifetimes(const SILModule &mod) const {
   switch (mod.getStage()) {

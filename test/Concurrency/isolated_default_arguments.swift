@@ -1,7 +1,6 @@
 // RUN: %empty-directory(%t)
 
-// RUN: %target-swift-frontend -I %t  -disable-availability-checking -strict-concurrency=complete -enable-upcoming-feature IsolatedDefaultValues -parse-as-library -emit-sil -o /dev/null -verify %s
-// RUN: %target-swift-frontend -I %t  -disable-availability-checking -strict-concurrency=complete -parse-as-library -emit-sil -o /dev/null -verify -enable-upcoming-feature IsolatedDefaultValues -enable-experimental-feature RegionBasedIsolation %s
+// RUN: %target-swift-frontend -I %t  -disable-availability-checking -strict-concurrency=complete -parse-as-library -emit-sil -o /dev/null -verify -enable-upcoming-feature IsolatedDefaultValues -enable-upcoming-feature RegionBasedIsolation -enable-upcoming-feature InferSendableFromCaptures %s
 
 // REQUIRES: concurrency
 // REQUIRES: asserts
@@ -154,7 +153,7 @@ struct S3 {
 }
 
 struct S4 {
-  // expected-warning@+1 {{main actor-isolated default value in a nonisolated context; this is an error in Swift 6}}
+  // expected-warning@+1 {{main actor-isolated default value in a nonisolated context; this is an error in the Swift 6 language mode}}
   var x: Int = requiresMainActor()
 }
 
@@ -194,7 +193,7 @@ extension A {
   }
 }
 
-// expected-warning@+1 {{default initializer for 'C1' cannot be both nonisolated and main actor-isolated; this is an error in Swift 6}}
+// expected-warning@+1 {{default initializer for 'C1' cannot be both nonisolated and main actor-isolated; this is an error in the Swift 6 language mode}}
 class C1 {
   // expected-note@+1 {{initializer for property 'x' is main actor-isolated}}
   @MainActor var x = requiresMainActor()
@@ -203,7 +202,7 @@ class C1 {
 
 class NonSendable {}
 
-// expected-warning@+1 {{default initializer for 'C2' cannot be both nonisolated and main actor-isolated; this is an error in Swift 6}}
+// expected-warning@+1 {{default initializer for 'C2' cannot be both nonisolated and main actor-isolated; this is an error in the Swift 6 language mode}}
 class C2 {
   // expected-note@+1 {{initializer for property 'x' is main actor-isolated}}
   @MainActor var x = NonSendable()
@@ -231,7 +230,7 @@ func callDefaultInit() async {
   _ = MultipleVars()
 }
 
-// expected-warning@+1 {{default initializer for 'MultipleVarsInvalid' cannot be both nonisolated and main actor-isolated; this is an error in Swift 6}}
+// expected-warning@+1 {{default initializer for 'MultipleVarsInvalid' cannot be both nonisolated and main actor-isolated; this is an error in the Swift 6 language mode}}
 class MultipleVarsInvalid {
   // expected-note@+1 {{initializer for property 'x' is main actor-isolated}}
   @MainActor var (x, y) = (requiresMainActor(), requiresMainActor())
@@ -254,13 +253,13 @@ struct UseRequiresMain {
 }
 
 nonisolated func test() async {
-  // expected-warning@+2 {{expression is 'async' but is not marked with 'await'; this is an error in Swift 6}}
+  // expected-warning@+2 {{expression is 'async' but is not marked with 'await'; this is an error in the Swift 6 language mode}}
   // expected-note@+1 {{calls to initializer 'init()' from outside of its actor context are implicitly asynchronous}}
   _ = UseRequiresMain()
 }
 
-// expected-warning@+2 {{memberwise initializer for 'InitAccessors' cannot be both nonisolated and main actor-isolated; this is an error in Swift 6}}
-// expected-warning@+1 {{default initializer for 'InitAccessors' cannot be both nonisolated and main actor-isolated; this is an error in Swift 6}}
+// expected-warning@+2 {{memberwise initializer for 'InitAccessors' cannot be both nonisolated and main actor-isolated; this is an error in the Swift 6 language mode}}
+// expected-warning@+1 {{default initializer for 'InitAccessors' cannot be both nonisolated and main actor-isolated; this is an error in the Swift 6 language mode}}
 struct InitAccessors {
   private var _a: Int
 
@@ -281,4 +280,40 @@ struct InitAccessors {
 
 struct CError: Error, RawRepresentable {
   var rawValue: CInt
+}
+
+// Consider isolated key-paths when computing initializer isolation
+
+@MainActor
+class UseIsolatedKeyPath {
+  let kp: KeyPath<UseIsolatedKeyPath, Nested> = \.x // okay
+
+  // expected-error@+1 {{default argument cannot be both main actor-isolated and global actor 'SomeGlobalActor'-isolated}}
+  let kp2: KeyPath<UseIsolatedKeyPath, Bool> = \.x.y // okay
+
+  var x: Nested = .init()
+
+  class Nested {
+    @SomeGlobalActor var y: Bool = true
+  }
+}
+
+@MainActor
+protocol InferMainActor {}
+
+struct UseIsolatedPropertyWrapperInit: InferMainActor {
+  @Wrapper(\.value) var value: Int // okay
+
+  // expected-warning@+1 {{global actor 'SomeGlobalActor'-isolated default value in a main actor-isolated context; this is an error in the Swift 6 language mode}}
+  @Wrapper(\.otherValue) var otherValue: Int
+}
+
+@propertyWrapper struct Wrapper<T> {
+  init(_: KeyPath<Values, T>) {}
+  var wrappedValue: T { fatalError() }
+}
+
+struct Values {
+  @MainActor var value: Int { 0 }
+  @SomeGlobalActor var otherValue: Int { 0 }
 }

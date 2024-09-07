@@ -12,6 +12,7 @@
 
 #include "swift/Frontend/CASOutputBackends.h"
 
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/FileTypes.h"
 #include "swift/Frontend/CachingUtils.h"
 #include "swift/Frontend/CompileJobCacheKey.h"
@@ -64,7 +65,7 @@ public:
 
   llvm::Expected<std::unique_ptr<llvm::vfs::OutputFileImpl>>
   createFileImpl(llvm::StringRef ResolvedPath,
-                 llvm::Optional<llvm::vfs::OutputConfig> Config) {
+                 std::optional<llvm::vfs::OutputConfig> Config) {
     auto ProducingInput = OutputToInputMap.find(ResolvedPath);
     assert(ProducingInput != OutputToInputMap.end() && "Unknown output file");
 
@@ -121,7 +122,7 @@ IntrusiveRefCntPtr<OutputBackend> SwiftCASOutputBackend::cloneImpl() const {
 
 Expected<std::unique_ptr<OutputFileImpl>>
 SwiftCASOutputBackend::createFileImpl(StringRef ResolvedPath,
-                                      Optional<OutputConfig> Config) {
+                                      std::optional<OutputConfig> Config) {
   return Impl.createFileImpl(ResolvedPath, Config);
 }
 
@@ -141,6 +142,21 @@ Error SwiftCASOutputBackend::storeCachedDiagnostics(unsigned InputIndex,
                    file_types::ID::TY_CachedDiagnostics);
 }
 
+Error SwiftCASOutputBackend::storeMCCASObjectID(StringRef OutputFilename,
+                                                llvm::cas::CASID ID) {
+  auto Input = Impl.OutputToInputMap.find(OutputFilename);
+  if (Input == Impl.OutputToInputMap.end())
+    return llvm::createStringError("InputIndex for output file not found!");
+  auto InputIndex = Input->second.first;
+  auto MCRef = Impl.CAS.getReference(ID);
+  if (!MCRef)
+    return createStringError("Invalid CASID: " + ID.toString() +
+                             ". No associated ObjectRef found!");
+
+  Impl.OutputRefs[InputIndex].insert({file_types::TY_Object, *MCRef});
+  return Impl.finalizeCacheKeysFor(InputIndex);
+}
+
 void SwiftCASOutputBackend::Implementation::initBackend(
     const FrontendInputsAndOutputs &InputsAndOutputs) {
   // FIXME: The output to input map might not be enough for example all the
@@ -149,7 +165,10 @@ void SwiftCASOutputBackend::Implementation::initBackend(
   // any commands write output to `-`.
   file_types::ID mainOutputType = InputsAndOutputs.getPrincipalOutputType();
   auto addInput = [&](const InputFile &Input, unsigned Index) {
-    if (!Input.outputFilename().empty())
+    // Ignore the outputFilename for typecheck action since it is not producing
+    // an output file for that.
+    if (!Input.outputFilename().empty() &&
+        Action != FrontendOptions::ActionType::Typecheck)
       OutputToInputMap.insert(
           {Input.outputFilename(), {Index, mainOutputType}});
     Input.getPrimarySpecificPaths()
@@ -177,8 +196,8 @@ void SwiftCASOutputBackend::Implementation::initBackend(
 Error SwiftCASOutputBackend::Implementation::storeImpl(
     StringRef Path, StringRef Bytes, unsigned InputIndex,
     file_types::ID OutputKind) {
-  Optional<ObjectRef> BytesRef;
-  if (Error E = CAS.storeFromString(None, Bytes).moveInto(BytesRef))
+  std::optional<ObjectRef> BytesRef;
+  if (Error E = CAS.storeFromString(std::nullopt, Bytes).moveInto(BytesRef))
     return E;
 
   LLVM_DEBUG(llvm::dbgs() << "DEBUG: producing CAS output of type \'"
@@ -211,7 +230,7 @@ Error SwiftCASOutputBackend::Implementation::finalizeCacheKeysFor(
   llvm::sort(OutputsForInput,
              [](auto &LHS, auto &RHS) { return LHS.first < RHS.first; });
 
-  Optional<ObjectRef> Result;
+  std::optional<ObjectRef> Result;
   // Use a clang compatible result CAS object schema when emiting PCM.
   if (Action == FrontendOptions::ActionType::EmitPCM) {
     clang::cas::CompileJobCacheResult::Builder Builder;

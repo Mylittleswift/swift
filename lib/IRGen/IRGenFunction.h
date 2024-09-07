@@ -59,6 +59,7 @@ namespace irgen {
   class IRGenModule;
   class LinkEntity;
   class LocalTypeDataCache;
+  class MetadataDependencyCollector;
   class MetadataResponse;
   class Scope;
   class TypeInfo;
@@ -76,7 +77,7 @@ public:
   OptimizationMode OptMode;
   bool isPerformanceConstraint;
 
-  llvm::Function *CurFn;
+  llvm::Function *const CurFn;
   ModuleDecl *getSwiftModule() const;
   SILModule &getSILModule() const;
   Lowering::TypeConverter &getSILTypes() const;
@@ -86,7 +87,7 @@ public:
                 bool isPerformanceConstraint = false,
                 OptimizationMode Mode = OptimizationMode::NotSet,
                 const SILDebugScope *DbgScope = nullptr,
-                llvm::Optional<SILLocation> DbgLoc = llvm::None);
+                std::optional<SILLocation> DbgLoc = std::nullopt);
   ~IRGenFunction();
 
   void unimplemented(SourceLoc Loc, StringRef Message);
@@ -101,7 +102,7 @@ public:
   Explosion collectParameters();
   void emitScalarReturn(SILType returnResultType, SILType funcResultType,
                         Explosion &scalars, bool isSwiftCCReturn,
-                        bool isOutlined);
+                        bool isOutlined, SILType errorType = {});
   void emitScalarReturn(llvm::Type *resultTy, Explosion &scalars);
   
   void emitBBForReturn();
@@ -155,6 +156,18 @@ public:
     CoroutineHandle = handle;
   }
 
+  llvm::BasicBlock *getCoroutineExitBlock() const {
+    return CoroutineExitBlock;
+  }
+
+  SmallVector<llvm::Value *, 1> coroutineResults;
+  
+  void setCoroutineExitBlock(llvm::BasicBlock *block) {
+    assert(CoroutineExitBlock == nullptr && "already set exit BB");
+    assert(block != nullptr && "setting a null exit BB");
+    CoroutineExitBlock = block;
+  }
+
   llvm::Value *getAsyncTask();
   llvm::Value *getAsyncContext();
   void storeCurrentAsyncContext(llvm::Value *context);
@@ -190,6 +203,8 @@ public:
 
   void emitResumeAsyncContinuationThrowing(llvm::Value *continuation,
                                            llvm::Value *error);
+
+  void emitClearSensitive(Address address, llvm::Value *size);
 
   FunctionPointer
   getFunctionPointerForResumeIntrinsic(llvm::Value *resumeIntrinsic);
@@ -236,7 +251,7 @@ private:
   bool callsAnyAlwaysInlineThunksWithForeignExceptionTraps = false;
 
 public:
-  void emitCoroutineOrAsyncExit();
+  void emitCoroutineOrAsyncExit(bool isUnwind);
 
 //--- Helper methods -----------------------------------------------------------
 public:
@@ -343,6 +358,15 @@ public:
                                               llvm::Value *minor,
                                               llvm::Value *patch);
 
+  llvm::Value *emitTargetVariantOSVersionAtLeastCall(llvm::Value *major,
+                                                     llvm::Value *minor,
+                                                     llvm::Value *patch);
+
+  llvm::Value *emitTargetOSVersionOrVariantOSVersionAtLeastCall(
+      llvm::Value *major, llvm::Value *minor, llvm::Value *patch,
+      llvm::Value *variantMajor, llvm::Value *variantMinor,
+      llvm::Value *variantPatch);
+
   llvm::Value *emitProjectBoxCall(llvm::Value *box, llvm::Value *typeMetadata);
 
   llvm::Value *emitAllocEmptyBoxCall();
@@ -380,7 +404,9 @@ public:
   llvm::Value *emitTypeMetadataRefForLayout(SILType type);
   llvm::Value *emitTypeMetadataRefForLayout(SILType type,
                                             DynamicMetadataRequest request);
-  
+
+  llvm::Value *emitValueGenericRef(CanType type);
+
   llvm::Value *emitValueWitnessTableRef(SILType type,
                                         llvm::Value **metadataSlot = nullptr);
   llvm::Value *emitValueWitnessTableRef(SILType type,
@@ -392,6 +418,12 @@ public:
   FunctionPointer emitValueWitnessFunctionRef(SILType type,
                                               llvm::Value *&metadataSlot,
                                               ValueWitness index);
+
+  void emitInitializeFieldOffsetVector(SILType T,
+                                       llvm::Value *metadata,
+                                       bool isVWTMutable,
+                                       MetadataDependencyCollector *collector);
+
 
   llvm::Value *optionallyLoadFromConditionalProtocolWitnessTable(
     llvm::Value *wtable);
@@ -420,6 +452,15 @@ public:
 
   /// Emit a non-mergeable trap call, optionally followed by a terminator.
   void emitTrap(StringRef failureMessage, bool EmitUnreachable);
+
+  /// Given at least a src address to a list of elements, runs body over each
+  /// element passing its address. An optional destination address can be
+  /// provided which this will run over as well to perform things like
+  /// 'initWithTake' from src to dest.
+  void emitLoopOverElements(const TypeInfo &elementTypeInfo,
+                            SILType elementType, CanType countType,
+                            Address dest, Address src,
+                          std::function<void (Address dest, Address src)> body);
 
 private:
   llvm::Instruction *AllocaIP;
@@ -561,7 +602,8 @@ public:
   void emitBlockRelease(llvm::Value *value);
 
   void emitForeignReferenceTypeLifetimeOperation(ValueDecl *fn,
-                                                 llvm::Value *value);
+                                                 llvm::Value *value,
+                                                 bool needsNullCheck = false);
 
   // Routines for an unknown reference-counting style (meaning,
   // dynamically something compatible with either the ObjC or Swift styles).
@@ -792,7 +834,25 @@ public:
   llvm::Value *getDynamicSelfMetadata();
   void setDynamicSelfMetadata(CanType selfBaseTy, bool selfIsExact,
                               llvm::Value *value, DynamicSelfKind kind);
+#ifndef NDEBUG
+  LocalTypeDataCache const *getLocalTypeData() { return LocalTypeData; }
+#endif
 
+  /// A forwardable argument is a load that is immediately preceeds the apply it
+  /// is used as argument to. If there is no side-effecting instructions between
+  /// said load and the apply, we can memcpy the loads address to the apply's
+  /// indirect argument alloca.
+  void clearForwardableArguments() {
+    forwardableArguments.clear();
+  }
+
+  void setForwardableArgument(unsigned idx) {
+    forwardableArguments.insert(idx);
+  }
+
+  bool isForwardableArgument(unsigned idx) const {
+    return forwardableArguments.contains(idx);
+  }
 private:
   LocalTypeDataCache &getOrCreateLocalTypeData();
   void destroyLocalTypeData();
@@ -811,6 +871,8 @@ private:
   CanType SelfType;
   bool SelfTypeIsExact = false;
   DynamicSelfKind SelfKind;
+
+  llvm::SmallSetVector<unsigned, 16> forwardableArguments;
 };
 
 using ConditionalDominanceScope = IRGenFunction::ConditionalDominanceScope;

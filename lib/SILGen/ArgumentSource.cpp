@@ -17,6 +17,7 @@
 #include "ArgumentSource.h"
 #include "Conversion.h"
 #include "Initialization.h"
+#include "swift/Basic/Assertions.h"
 
 using namespace swift;
 using namespace Lowering;
@@ -81,8 +82,10 @@ ManagedValue ArgumentSource::getAsSingleValue(SILGenFunction &SGF,
                                               SILType loweredTy,
                                               SGFContext C) && {
   auto substFormalType = getSubstRValueType();
+  auto loweredFormalTy = SGF.getLoweredType(substFormalType);
   auto conversion =
-    Conversion::getSubstToOrig(origFormalType, substFormalType, loweredTy);
+    Conversion::getSubstToOrig(origFormalType, substFormalType,
+                               loweredFormalTy, loweredTy);
   return std::move(*this).getConverted(SGF, conversion, C);
 }
 

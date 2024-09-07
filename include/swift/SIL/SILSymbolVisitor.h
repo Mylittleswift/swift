@@ -39,6 +39,9 @@ struct SILSymbolVisitorOptions {
 
   /// Whether LLVM IR Witness Method Elimination is enabled.
   bool WitnessMethodElimination = false;
+
+  /// Whether resilient protocols should be emitted fragile.
+  bool FragileResilientProtocols = false;
 };
 
 /// Context for `SILSymbolVisitor` symbol enumeration.
@@ -109,6 +112,7 @@ public:
   virtual void addMethodLookupFunction(ClassDecl *CD) {}
   virtual void addNominalTypeDescriptor(NominalTypeDecl *NTD) {}
   virtual void addObjCInterface(ClassDecl *CD) {}
+  virtual void addObjCMetaclass(ClassDecl *CD) {}
   virtual void addObjCMethod(AbstractFunctionDecl *AFD) {}
   virtual void addObjCResilientClassStub(ClassDecl *CD) {}
   virtual void addOpaqueTypeDescriptor(OpaqueTypeDecl *OTD) {}

@@ -28,6 +28,12 @@ module ReferenceCounted {
   requires cplusplus
 }
 
+module ReferenceCountedObjCProperty {
+  header "reference-counted-objc-property.h"
+  requires cplusplus
+  export *
+}
+
 module MemberLayout {
   header "member-layout.h"
   requires cplusplus
@@ -43,3 +49,7 @@ module DerivedFieldGetterReturnsOwnedFRT {
   requires cplusplus
 }
 
+module FunctionsAndMethodsReturningFRT {
+  header "cxx-functions-and-methods-returning-frt.h"
+  requires cplusplus
+}

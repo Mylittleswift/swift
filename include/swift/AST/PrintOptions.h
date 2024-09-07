@@ -13,14 +13,14 @@
 #ifndef SWIFT_AST_PRINTOPTIONS_H
 #define SWIFT_AST_PRINTOPTIONS_H
 
-#include "swift/Basic/STLExtras.h"
 #include "swift/AST/AttrKind.h"
 #include "swift/AST/Identifier.h"
 #include "swift/AST/TypeOrExtensionDecl.h"
-#include "llvm/ADT/Optional.h"
+#include "swift/Basic/STLExtras.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallSet.h"
 #include <limits.h>
+#include <optional>
 #include <vector>
 
 namespace swift {
@@ -98,12 +98,12 @@ public:
   AnyAttrKind() : kind(NumTypeAttrKinds), isType(1) {}
 
   /// Returns the TypeAttrKind.
-  llvm::Optional<TypeAttrKind> type() const {
+  std::optional<TypeAttrKind> type() const {
     if (!isType || kind == NumTypeAttrKinds) return {};
     return static_cast<TypeAttrKind>(kind);
   }
   /// Returns the DeclAttrKind.
-  llvm::Optional<DeclAttrKind> decl() const {
+  std::optional<DeclAttrKind> decl() const {
     if (isType || kind == NumDeclAttrKinds)
       return {};
     return static_cast<DeclAttrKind>(kind);
@@ -272,12 +272,12 @@ struct PrintOptions {
 
   bool SkipSwiftPrivateClangDecls = false;
 
-  /// Whether to skip internal stdlib declarations.
-  bool SkipPrivateStdlibDecls = false;
+  /// Whether to skip underscored declarations from system modules.
+  bool SkipPrivateSystemDecls = false;
 
-  /// Whether to skip underscored stdlib protocols.
+  /// Whether to skip underscored protocols from system modules.
   /// Protocols marked with @_show_in_interface are still printed.
-  bool SkipUnderscoredStdlibProtocols = false;
+  bool SkipUnderscoredSystemProtocols = false;
 
   /// Whether to skip unsafe C++ class methods that were renamed
   /// (e.g. __fooUnsafe). See IsSafeUseOfCxxDecl.
@@ -372,10 +372,26 @@ struct PrintOptions {
   /// Whether to suppress printing of custom attributes that are expanded macros.
   bool SuppressExpandedMacros = true;
 
+  /// Suppress the @isolated(any) attribute.
+  bool SuppressIsolatedAny = false;
+
+  /// Suppress 'isolated' and '#isolation' on isolated parameters with optional type.
+  bool SuppressOptionalIsolatedParams = false;
+
+  /// Suppress 'sending' on arguments and results.
+  bool SuppressSendingArgsAndResults = false;
+
+  /// Suppress printing of '~Proto' for suppressible, non-invertible protocols.
+  bool SuppressConformanceSuppression = false;
+
+  /// Replace BitwiseCopyable with _BitwiseCopyable.
+  bool SuppressBitwiseCopyable = false;
+
   /// List of attribute kinds that should not be printed.
   std::vector<AnyAttrKind> ExcludeAttrList = {
       DeclAttrKind::Transparent, DeclAttrKind::Effects,
-      DeclAttrKind::FixedLayout, DeclAttrKind::ShowInInterface};
+      DeclAttrKind::FixedLayout, DeclAttrKind::ShowInInterface,
+  };
 
   /// List of attribute kinds that should be printed exclusively.
   /// Empty means allow all.
@@ -433,7 +449,7 @@ struct PrintOptions {
   bool PrintInSILBody = false;
 
   /// Whether to use an empty line to separate two members in a single decl.
-  bool EmptyLineBetweenMembers = false;
+  bool EmptyLineBetweenDecls = false;
 
   /// Whether to print empty members of a declaration on a single line, e.g.:
   /// ```
@@ -488,9 +504,6 @@ struct PrintOptions {
   /// (e.g. the overridden method in the superclass) if such comment is found.
   bool PrintDocumentationComments = false;
 
-  /// Whether to print regular comments from clang module headers.
-  bool PrintRegularClangComments = false;
-
   /// When true, printing interface from a source file will print the original
   /// source text for applicable declarations, in order to preserve the
   /// formatting.
@@ -536,7 +549,7 @@ struct PrintOptions {
   ModuleDecl *CurrentModule = nullptr;
 
   /// The information for converting archetypes to specialized types.
-  llvm::Optional<TypeTransformContext> TransformContext;
+  std::optional<TypeTransformContext> TransformContext;
 
   /// Whether to display (Clang-)imported module names;
   bool QualifyImportedTypes = false;
@@ -595,17 +608,6 @@ struct PrintOptions {
   QualifyNestedDeclarations ShouldQualifyNestedDeclarations =
       QualifyNestedDeclarations::Never;
 
-  /// If true, we print a protocol's primary associated types using the
-  /// primary associated type syntax: `protocol Foo<Type1, ...>`.
-  ///
-  /// If false, we print them as ordinary associated types.
-  bool PrintPrimaryAssociatedTypes = true;
-
-  /// Whether or not to print `@attached(extension)` attributes on
-  /// macro declarations. This is used for feature suppression in
-  /// Swift interface printing.
-  bool PrintExtensionMacroAttributes = true;
-
   /// If this is not \c nullptr then function bodies (including accessors
   /// and constructors) will be printed by this function.
   std::function<void(const ValueDecl *, ASTPrinter &)> FunctionBody;
@@ -631,7 +633,6 @@ struct PrintOptions {
     result.TypeDefinitions = true;
     result.VarInitializers = true;
     result.PrintDocumentationComments = true;
-    result.PrintRegularClangComments = true;
     result.PrintLongAttrsOnSeparateLines = true;
     result.AlwaysTryPrintParameterLabels = true;
     return result;
@@ -678,11 +679,11 @@ struct PrintOptions {
     result.SkipUnavailable = true;
     result.SkipImplicit = true;
     result.SkipSwiftPrivateClangDecls = true;
-    result.SkipPrivateStdlibDecls = true;
-    result.SkipUnderscoredStdlibProtocols = true;
+    result.SkipPrivateSystemDecls = true;
+    result.SkipUnderscoredSystemProtocols = true;
     result.SkipUnsafeCXXMethods = true;
     result.SkipDeinit = true;
-    result.EmptyLineBetweenMembers = true;
+    result.EmptyLineBetweenDecls = true;
     result.CascadeDocComment = true;
     result.ShouldQualifyNestedDeclarations =
         QualifyNestedDeclarations::Always;
@@ -733,19 +734,12 @@ struct PrintOptions {
     return CurrentPrintabilityChecker->shouldPrint(P, *this);
   }
 
-  /// Retrieve the print options that are suitable to print the testable interface.
-  static PrintOptions printTestableInterface(bool printFullConvention) {
-    PrintOptions result = printInterface(printFullConvention);
-    result.AccessFilter = AccessLevel::Internal;
-    return result;
-  }
-
   /// Retrieve the print options that are suitable to print interface for a
   /// swift file.
   static PrintOptions printSwiftFileInterface(bool printFullConvention) {
     PrintOptions result = printInterface(printFullConvention);
     result.AccessFilter = AccessLevel::Internal;
-    result.EmptyLineBetweenMembers = true;
+    result.EmptyLineBetweenDecls = true;
     return result;
   }
 
@@ -794,7 +788,7 @@ struct PrintOptions {
       PrintOptions::FunctionRepresentationMode::None;
     PO.PrintDocumentationComments = false;
     PO.ExcludeAttrList.push_back(DeclAttrKind::Available);
-    PO.SkipPrivateStdlibDecls = true;
+    PO.SkipPrivateSystemDecls = true;
     PO.SkipUnsafeCXXMethods = true;
     PO.ExplodeEnumCaseDecls = true;
     PO.ShouldQualifyNestedDeclarations = QualifyNestedDeclarations::TypesOnly;

@@ -13,6 +13,7 @@
 #define DEBUG_TYPE "sil-access-utils"
 
 #include "swift/SIL/MemAccessUtils.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/GraphNodeWorklist.h"
 #include "swift/SIL/Consumption.h"
 #include "swift/SIL/DynamicCasts.h"
@@ -58,7 +59,7 @@ class AccessPhiVisitor
   UseDefVisitor &useDefVisitor;
   StorageCastTy storageCastTy;
 
-  llvm::Optional<SILValue> commonDefinition;
+  std::optional<SILValue> commonDefinition;
   SmallVector<SILValue, 8> pointerWorklist;
   SmallPtrSet<SILPhiArgument *, 4> nestedPhis;
 
@@ -276,12 +277,12 @@ protected:
   // If the optional baseVal is set, then a result was found. If the SILValue
   // within the optional is invalid, then there are multiple inconsistent base
   // addresses (this may currently happen with RawPointer phis).
-  llvm::Optional<SILValue> baseVal;
+  std::optional<SILValue> baseVal;
   // If the kind optional is set, then 'baseVal' is a valid
   // AccessBase. 'baseVal' may be a valid SILValue while kind optional has no
   // value if an invalid address producer was detected, via a call to
   // visitNonAccess.
-  llvm::Optional<AccessBase::Kind> kindVal;
+  std::optional<AccessBase::Kind> kindVal;
 
 public:
   FindAccessBaseVisitor(NestedAccessType nestedAccessTy,
@@ -316,12 +317,12 @@ public:
 
   void invalidateResult() {
     baseVal = SILValue();
-    kindVal = llvm::None;
+    kindVal = std::nullopt;
   }
 
-  llvm::Optional<SILValue> saveResult() const { return baseVal; }
+  std::optional<SILValue> saveResult() const { return baseVal; }
 
-  void restoreResult(llvm::Optional<SILValue> result) { baseVal = result; }
+  void restoreResult(std::optional<SILValue> result) { baseVal = result; }
 
   void addUnknownOffset() { return; }
 
@@ -330,7 +331,7 @@ public:
   SILValue visitBase(SILValue base, AccessStorage::Kind kind) {
     setResult(base);
     if (!baseVal.value()) {
-      kindVal = llvm::None;
+      kindVal = std::nullopt;
     } else {
       assert(!kindVal || kindVal.value() == kind);
       kindVal = kind;
@@ -340,7 +341,7 @@ public:
 
   SILValue visitNonAccess(SILValue value) {
     setResult(value);
-    kindVal = llvm::None;
+    kindVal = std::nullopt;
     return SILValue();
   }
 
@@ -795,7 +796,6 @@ bool swift::isIdentityPreservingRefCast(SingleValueInstruction *svi) {
   return isa<CopyValueInst>(svi) || isa<BeginBorrowInst>(svi) ||
          isa<EndInitLetRefInst>(svi) || isa<BeginDeallocRefInst>(svi) ||
          isa<EndCOWMutationInst>(svi) ||
-         isa<MarkUnresolvedReferenceBindingInst>(svi) ||
          isIdentityAndOwnershipPreservingRefCast(svi);
 }
 
@@ -824,6 +824,7 @@ bool swift::isIdentityAndOwnershipPreservingRefCast(
   // Ignore markers
   case SILInstructionKind::MarkUninitializedInst:
   case SILInstructionKind::MarkDependenceInst:
+  case SILInstructionKind::MarkUnresolvedReferenceBindingInst:
     return true;
   }
 }
@@ -1101,9 +1102,9 @@ class FindAccessStorageVisitor
 
 public:
   struct Result {
-    llvm::Optional<AccessStorage> storage;
+    std::optional<AccessStorage> storage;
     SILValue base;
-    llvm::Optional<AccessStorageCast> seenCast;
+    std::optional<AccessStorageCast> seenCast;
   };
 
 private:
@@ -1139,7 +1140,7 @@ public:
   // may be multiple global_addr bases for identical storage.
   SILValue getBase() const { return result.base; }
 
-  llvm::Optional<AccessStorageCast> getCast() const { return result.seenCast; }
+  std::optional<AccessStorageCast> getCast() const { return result.seenCast; }
 
   // MARK: AccessPhiVisitor::UseDefVisitor implementation.
 
@@ -1595,7 +1596,7 @@ class AccessPathDefUseTraversal {
   // apply. For other storage, it is the same as accessPath.getRoot().
   //
   // 'base' is typically invalid, maning that all uses of 'storage' for the
-  // access path will be visited. When 'base' is set, the the visitor is
+  // access path will be visited. When 'base' is set, the visitor is
   // restricted to a specific access base, such as a particular
   // ref_element_addr.
   SILValue base;
@@ -2087,13 +2088,14 @@ struct AccessUseTestVisitor : public AccessUseVisitor {
   }
 };
 
-static FunctionTest AccessPathBaseTest("accesspath-base", [](auto &function,
-                                                             auto &arguments,
-                                                             auto &test) {
+static FunctionTest AccessPathBaseTest("accesspath", [](auto &function,
+                                                        auto &arguments,
+                                                        auto &test) {
   auto value = arguments.takeValue();
   function.print(llvm::outs());
-  llvm::outs() << "Access path base: " << value;
+  llvm::outs() << "Access path for: " << value;
   auto accessPathWithBase = AccessPathWithBase::compute(value);
+  llvm::outs() << "  base: " << accessPathWithBase.base;
   AccessUseTestVisitor visitor;
   visitAccessPathBaseUses(visitor, accessPathWithBase, &function);
 });
@@ -2193,6 +2195,7 @@ bool GatherUniqueStorageUses::visitUse(Operand *use, AccessUseType useTy) {
     case SILArgumentConvention::Indirect_Inout:
     case SILArgumentConvention::Indirect_InoutAliasable:
     case SILArgumentConvention::Indirect_Out:
+    case SILArgumentConvention::Indirect_In_CXX:
     case SILArgumentConvention::Pack_Inout:
     case SILArgumentConvention::Pack_Out:
       return visitApplyOperand(use, visitor,
@@ -2592,11 +2595,6 @@ static void visitBuiltinAddress(BuiltinInst *builtin,
       visitor(&builtin->getAllOperands()[0]);
       return;
 
-    // These effect both operands.
-    case BuiltinValueKind::Copy:
-      visitor(&builtin->getAllOperands()[1]);
-      return;
-
     // These consume values out of their second operand.
     case BuiltinValueKind::ResumeNonThrowingContinuationReturning:
     case BuiltinValueKind::ResumeThrowingContinuationReturning:
@@ -2631,11 +2629,6 @@ static void visitBuiltinAddress(BuiltinInst *builtin,
     case BuiltinValueKind::TSanInoutAccess:
     case BuiltinValueKind::CancelAsyncTask:
     case BuiltinValueKind::CreateAsyncTask:
-    case BuiltinValueKind::CreateAsyncTaskInGroup:
-    case BuiltinValueKind::CreateAsyncDiscardingTaskInGroup:
-    case BuiltinValueKind::CreateAsyncTaskWithExecutor:
-    case BuiltinValueKind::CreateAsyncTaskInGroupWithExecutor:
-    case BuiltinValueKind::CreateAsyncDiscardingTaskInGroupWithExecutor:
     case BuiltinValueKind::AutoDiffCreateLinearMapContextWithType:
     case BuiltinValueKind::AutoDiffAllocateSubcontextWithType:
     case BuiltinValueKind::InitializeDefaultActor:
@@ -2672,6 +2665,7 @@ static void visitBuiltinAddress(BuiltinInst *builtin,
     // These builtins take a generic 'T' as their operand.
     case BuiltinValueKind::GetEnumTag:
     case BuiltinValueKind::InjectEnumTag:
+    case BuiltinValueKind::AddressOfRawLayout:
       visitor(&builtin->getAllOperands()[0]);
       return;
 

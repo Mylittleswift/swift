@@ -19,11 +19,13 @@
 #include "TypeChecker.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/Builtins.h"
+#include "swift/AST/ConformanceLookup.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/Ownership.h"
 #include "swift/AST/TypeCheckRequests.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Defer.h"
 
 using namespace swift;
@@ -51,14 +53,13 @@ bool isImplicit(BitwiseCopyableCheck check) {
 /// The implicit check kind appropriate to \p nominal, if any.
 ///
 /// For public, non-frozen types, this is ::None.
-llvm::Optional<BitwiseCopyableCheck>
+std::optional<BitwiseCopyableCheck>
 getImplicitCheckForNominal(NominalTypeDecl *nominal) {
   assert(nominal);
   if (!nominal
            ->getFormalAccessScope(
                /*useDC=*/nullptr, /*treatUsableFromInlineAsPublic=*/true)
-           .isPublic() ||
-      !nominal->isResilient())
+           .isPublicOrPackage())
     return {BitwiseCopyableCheck::Implicit};
 
   if (nominal->hasClangNode() ||
@@ -66,7 +67,7 @@ getImplicitCheckForNominal(NominalTypeDecl *nominal) {
       nominal->getAttrs().hasAttribute<FrozenAttr>())
     return {BitwiseCopyableCheck::Implicit};
 
-  return llvm::None;
+  return std::nullopt;
 }
 
 /// Checks that \p nominal conforms to BitwiseCopyable and emits the relevant
@@ -142,7 +143,7 @@ bool BitwiseCopyableStorageVisitor::visitMemberDecl(ValueDecl *decl, Type ty) {
 }
 
 bool BitwiseCopyableStorageVisitor::visitMemberType(Type ty, SourceLoc loc) {
-  auto conformance = module->checkConformance(ty, protocol);
+  auto conformance = checkConformance(ty, protocol);
   if (conformance.isInvalid() || conformance.hasUnavailableConformance()) {
     return visitNonconformingMemberType(ty, loc);
   }
@@ -230,22 +231,30 @@ void BitwiseCopyableStorageVisitor::emitNonconformingMemberTypeDiagnostic(
 static bool checkBitwiseCopyableInstanceStorage(NominalTypeDecl *nominal,
                                                 DeclContext *dc,
                                                 BitwiseCopyableCheck check) {
+  auto *conformanceDecl = dc->getAsDecl() ? dc->getAsDecl() : nominal;
+  if (nominal->suppressesConformance(KnownProtocolKind::BitwiseCopyable)) {
+    if (!isImplicit(check)) {
+      conformanceDecl->diagnose(diag::non_bitwise_copyable_type_suppressed);
+    }
+    return true;
+  }
+
+  auto &attrs = nominal->getAttrs();
+  if (attrs.hasAttribute<SensitiveAttr>()) {
+    if (!isImplicit(check)) {
+      conformanceDecl->diagnose(diag::non_bitwise_copyable_type_sensitive);
+    }
+    return true;
+  }
+
+  if (dc->mapTypeIntoContext(nominal->getDeclaredInterfaceType())
+          ->isNoncopyable()) {
+    // Already separately diagnosed when explicit.
+    return true;
+  }
+
   assert(dc->getParentModule()->getASTContext().getProtocol(
       KnownProtocolKind::BitwiseCopyable));
-
-  if (dc->mapTypeIntoContext(nominal->getDeclaredInterfaceType())->isNoncopyable()) {
-    if (!isImplicit(check)) {
-      nominal->diagnose(diag::non_bitwise_copyable_type_noncopyable);
-    }
-    return true;
-  }
-
-  if (!dc->mapTypeIntoContext(nominal->getDeclaredInterfaceType())->isEscapable()) {
-    if (!isImplicit(check)) {
-      nominal->diagnose(diag::non_bitwise_copyable_type_nonescapable);
-    }
-    return true;
-  }
 
   if (isa<ClassDecl>(nominal)) {
     if (!isImplicit(check)) {
@@ -266,6 +275,14 @@ static bool checkBitwiseCopyableInstanceStorage(NominalTypeDecl *nominal,
   if (sd && sd->isCxxNonTrivial()) {
     if (!isImplicit(check)) {
       nominal->diagnose(diag::non_bitwise_copyable_type_cxx_nontrivial);
+    }
+    return true;
+  }
+
+  if (sd && sd->hasUnreferenceableStorage()) {
+    if (!isImplicit(check)) {
+      sd->diagnose(diag::non_bitwise_copyable_c_type_nontrivial);
+      sd->diagnose(diag::note_non_bitwise_copyable_c_type_add_attr);
     }
     return true;
   }
@@ -329,6 +346,7 @@ bool DeriveImplicitBitwiseCopyableConformance::allowedForFile() {
 
     case SourceFileKind::Library:
     case SourceFileKind::MacroExpansion:
+    case SourceFileKind::DefaultArgument:
     case SourceFileKind::Main:
     case SourceFileKind::SIL:
       return true;

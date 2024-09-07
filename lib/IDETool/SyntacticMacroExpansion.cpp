@@ -15,6 +15,7 @@
 #include "swift/AST/MacroDefinition.h"
 #include "swift/AST/PluginLoader.h"
 #include "swift/AST/TypeRepr.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Driver/FrontendUtil.h"
 #include "swift/Frontend/Frontend.h"
 #include "swift/IDE/Utils.h"
@@ -62,7 +63,7 @@ bool SyntacticMacroExpansionInstance::setup(
       invocation.getLangOptions(), invocation.getTypeCheckerOptions(),
       invocation.getSILOptions(), invocation.getSearchPathOptions(),
       invocation.getClangImporterOptions(), invocation.getSymbolGraphOptions(),
-      SourceMgr, Diags));
+      invocation.getCASOptions(), SourceMgr, Diags));
   registerParseRequestFunctions(Ctx->evaluator);
   registerTypeCheckerRequestFunctions(Ctx->evaluator);
 
@@ -177,8 +178,8 @@ MacroDecl *SyntacticMacroExpansionInstance::getSynthesizedMacroDecl(
 /// Create a unique name of the expansion. The result is *appended* to \p out.
 static void addExpansionDiscriminator(
     SmallString<32> &out, const SourceFile *SF, SourceLoc loc,
-    llvm::Optional<SourceLoc> supplementalLoc = llvm::None,
-    llvm::Optional<MacroRole> role = llvm::None) {
+    std::optional<SourceLoc> supplementalLoc = std::nullopt,
+    std::optional<MacroRole> role = std::nullopt) {
   SourceManager &SM = SF->getASTContext().SourceMgr;
 
   StableHasher hasher = StableHasher::defaultHasher();
@@ -329,7 +330,7 @@ struct ExpansionNode {
 class MacroExpansionFinder : public ASTWalker {
   SourceManager &SM;
   SourceLoc locToResolve;
-  llvm::Optional<ExpansionNode> result;
+  std::optional<ExpansionNode> result;
 
   bool rangeContainsLocToResolve(SourceRange Range) const {
     return SM.rangeContainsTokenLoc(Range, locToResolve);
@@ -339,7 +340,7 @@ public:
   MacroExpansionFinder(SourceManager &SM, SourceLoc locToResolve)
       : SM(SM), locToResolve(locToResolve) {}
 
-  llvm::Optional<ExpansionNode> getResult() const { return result; }
+  std::optional<ExpansionNode> getResult() const { return result; }
 
   MacroWalking getMacroWalkingBehavior() const override {
     return MacroWalking::None;

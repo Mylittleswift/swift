@@ -25,6 +25,7 @@
 #include "MoveOnlyObjectCheckerUtils.h"
 #include "MoveOnlyUtils.h"
 
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/BlotSetVector.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/FrozenMultiMap.h"
@@ -103,8 +104,8 @@ class MoveOnlyBorrowToDestructureTransformPass : public SILFunctionTransform {
     }
 
     diagCount = diagnosticEmitter.getDiagnosticCount();
-    auto introducers = llvm::makeArrayRef(moveIntroducersToProcess.begin(),
-                                          moveIntroducersToProcess.end());
+    auto introducers = llvm::ArrayRef(moveIntroducersToProcess.begin(),
+                                      moveIntroducersToProcess.end());
     if (runTransform(fn, introducers, postOrderAnalysis, diagnosticEmitter)) {
       invalidateAnalysis(SILAnalysis::InvalidationKind::Instructions);
     }

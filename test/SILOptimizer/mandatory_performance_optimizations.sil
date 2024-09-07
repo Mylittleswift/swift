@@ -120,7 +120,7 @@ bb0:
   %2 = tuple ()
   return %2 : $()
 }
-sil shared [transparent] [serialized] [thunk] [canonical] @$sSiSLsSL1loiySbx_xtFZTW : $@convention(witness_method: Comparable) (@in_guaranteed Int, @in_guaranteed Int, @thick Int.Type) -> Bool {
+sil shared [ossa] [transparent] [serialized] [thunk] [canonical] @$sSiSLsSL1loiySbx_xtFZTW : $@convention(witness_method: Comparable) (@in_guaranteed Int, @in_guaranteed Int, @thick Int.Type) -> Bool {
 bb0(%0 : $*Int, %1 : $*Int, %2 : $@thick Int.Type):
   %3 = integer_literal $Builtin.Int1, 0
   %4 = struct $Bool (%3 : $Builtin.Int1)
@@ -167,6 +167,11 @@ bb0:
   return %6 : $()
 }
 
+// Check that we don't crash on global init-once declarations.
+
+// CHECK-LABEL: sil [global_init_once_fn] [no_locks] @external_global_init_once : $@convention(c) () -> ()
+sil [global_init_once_fn] [no_locks] @external_global_init_once : $@convention(c) () -> ()
+
 sil @yield_int_value : $@convention(thin) @yield_once () -> (@yields Int32) {
 bb0:
   %0 = integer_literal $Builtin.Int32, 10
@@ -186,7 +191,7 @@ sil [no_locks] @inline_begin_apply : $@convention(thin) () -> Int32 {
 bb0:
   %0 = function_ref @yield_int_value : $@convention(thin) @yield_once () -> (@yields Int32)
   (%1, %2) = begin_apply %0() : $@convention(thin) @yield_once () -> (@yields Int32)
-  end_apply %2
+  end_apply %2 as $()
   return %1 : $Int32
 }
 
@@ -199,10 +204,10 @@ bb0:
   (%1, %2) = begin_apply %0() : $@convention(thin) @yield_once () -> (@yields Int32)
   cond_br undef, bb1, bb2
 bb1:
-  end_apply %2
+  end_apply %2 as $()
   br bb3
 bb2:
-  end_apply %2
+  end_apply %2 as $()
   br bb3
 bb3:
   return %1 : $Int32

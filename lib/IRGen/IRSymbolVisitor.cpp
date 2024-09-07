@@ -103,6 +103,15 @@ public:
 
   void addDispatchThunk(SILDeclRef declRef) override {
     auto entity = LinkEntity::forDispatchThunk(declRef);
+
+    // TODO: explain why
+    if (declRef.isDistributedThunk()) {
+      auto afd = declRef.getAbstractFunctionDecl();
+      if (afd && isa<ProtocolDecl>(afd->getDeclContext())) {
+        return;
+      }
+    }
+
     addLinkEntity(entity);
 
     if (declRef.getAbstractFunctionDecl()->hasAsync())
@@ -147,6 +156,14 @@ public:
   }
 
   void addMethodDescriptor(SILDeclRef declRef) override {
+    if (declRef.isDistributedThunk()) {
+      auto afd = declRef.getAbstractFunctionDecl();
+      auto DC = afd->getDeclContext();
+      if (isa<ProtocolDecl>(DC)) {
+        return;
+      }
+    }
+
     addLinkEntity(LinkEntity::forMethodDescriptor(declRef));
   }
 
@@ -160,6 +177,10 @@ public:
 
   void addObjCInterface(ClassDecl *CD) override {
     Visitor.addObjCInterface(CD);
+  }
+
+  void addObjCMetaclass(ClassDecl *CD) override {
+    addLinkEntity(LinkEntity::forObjCMetaclass(CD));
   }
 
   void addObjCMethod(AbstractFunctionDecl *AFD) override {

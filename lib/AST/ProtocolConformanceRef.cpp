@@ -18,6 +18,7 @@
 #include "swift/AST/ProtocolConformanceRef.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/Availability.h"
+#include "swift/AST/ConformanceLookup.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/InFlightSubstitution.h"
 #include "swift/AST/Module.h"
@@ -25,6 +26,7 @@
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/TypeCheckRequests.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Assertions.h"
 
 #define DEBUG_TYPE "AST"
 
@@ -110,20 +112,12 @@ ProtocolConformanceRef::subst(Type origType, InFlightSubstitution &IFS) const {
   // If the type is an existential, it must be self-conforming.
   if (substType->isExistentialType()) {
     auto optConformance =
-        proto->getModuleContext()->lookupExistentialConformance(substType,
-                                                                proto);
+        lookupConformance(substType, proto, /*allowMissing=*/true);
     if (optConformance)
       return optConformance;
 
     return ProtocolConformanceRef::forInvalid();
   }
-
-  // If the type has been fully substituted and the requirement is for
-  // an invertible protocol, just do a module lookup. This avoids an infinite
-  // substitution issue by recognizing that these protocols are very simple
-  // (see rdar://119950540 for the general issue).
-  if (!substType->hasTypeParameter() && proto->getInvertibleProtocolKind())
-    return proto->getModuleContext()->lookupConformance(substType, proto);
 
   // Check the conformance map.
   // FIXME: Pack element level?
@@ -140,7 +134,8 @@ ProtocolConformanceRef ProtocolConformanceRef::mapConformanceOutOfContext() cons
           return type;
         },
         MakeAbstractConformanceForGenericType(),
-        SubstFlags::PreservePackExpansionLevel);
+        SubstFlags::PreservePackExpansionLevel |
+        SubstFlags::SubstitutePrimaryArchetypes);
   } else if (isPack()) {
     return getPack()->subst(
         [](SubstitutableType *type) -> Type {
@@ -149,7 +144,8 @@ ProtocolConformanceRef ProtocolConformanceRef::mapConformanceOutOfContext() cons
           return type;
         },
         MakeAbstractConformanceForGenericType(),
-        SubstFlags::PreservePackExpansionLevel);
+        SubstFlags::PreservePackExpansionLevel |
+        SubstFlags::SubstitutePrimaryArchetypes);
   }
 
   return *this;
@@ -294,7 +290,8 @@ bool ProtocolConformanceRef::hasUnavailableConformance() const {
 
   // Check whether this conformance is on an unavailable extension.
   auto concrete = getConcrete();
-  auto ext = dyn_cast<ExtensionDecl>(concrete->getDeclContext());
+  auto *dc = concrete->getRootConformance()->getDeclContext();
+  auto ext = dyn_cast<ExtensionDecl>(dc);
   if (ext && AvailableAttr::isUnavailable(ext))
     return true;
 

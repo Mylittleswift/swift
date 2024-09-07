@@ -14,9 +14,8 @@
 #define SWIFT_AST_ASTWALKER_H
 
 #include "swift/Basic/LLVM.h"
-#include "llvm/ADT/Optional.h"
-#include "llvm/ADT/None.h"
 #include "llvm/ADT/PointerUnion.h"
+#include <optional>
 #include <utility>
 
 namespace swift {
@@ -48,17 +47,17 @@ enum class SemaReferenceKind : uint8_t {
 
 struct ReferenceMetaData {
   SemaReferenceKind Kind;
-  llvm::Optional<AccessKind> AccKind;
+  std::optional<AccessKind> AccKind;
   bool isImplicit = false;
   bool isImplicitCtorType = false;
 
   /// When non-none, this is a custom attribute reference.
-  llvm::Optional<std::pair<const CustomAttr *, Decl *>> CustomAttrRef;
+  std::optional<std::pair<const CustomAttr *, Decl *>> CustomAttrRef;
 
-  ReferenceMetaData(SemaReferenceKind Kind, llvm::Optional<AccessKind> AccKind,
+  ReferenceMetaData(SemaReferenceKind Kind, std::optional<AccessKind> AccKind,
                     bool isImplicit = false,
-                    llvm::Optional<std::pair<const CustomAttr *, Decl *>>
-                        customAttrRef = llvm::None)
+                    std::optional<std::pair<const CustomAttr *, Decl *>>
+                        customAttrRef = std::nullopt)
       : Kind(Kind), AccKind(AccKind), isImplicit(isImplicit),
         CustomAttrRef(customAttrRef) {}
 };
@@ -101,6 +100,37 @@ enum class MacroWalking {
 
   /// Don't walk into macros.
   None
+};
+
+/// A scheme for walking a `QualifiedIdentTypeRepr`.
+enum class QualifiedIdentTypeReprWalkingScheme {
+  /// Walk in source order, such that each subsequent dot-separated component is
+  /// a child of the previous one. For example, walk `A.B<T.U>.C` like so
+  /// (top-down order):
+  ///
+  /// ```
+  /// A
+  /// ╰─B
+  ///   ├─T
+  ///   │ ╰─U
+  ///   ╰─C
+  /// ```
+  SourceOrderRecursive,
+
+  /// Walk in AST order (that is, according to how member type
+  /// representations are modeled in the AST, such that each previous
+  /// dot-separated component is a child of the subsequent one), base before
+  /// generic arguments. For example, walk `A.B<T.U>.C` like so
+  /// (top-down order):
+  ///
+  /// ```
+  /// C
+  /// ╰─B
+  ///   ├─A
+  ///   ╰─U
+  ///     ╰─T
+  /// ```
+  ASTOrderRecursive
 };
 
 /// An abstract class used to traverse an AST.
@@ -366,7 +396,7 @@ public:
   template <typename T>
   struct PreWalkResult {
     PreWalkAction Action;
-    llvm::Optional<T> Value;
+    std::optional<T> Value;
 
     template <typename U,
               typename std::enable_if<std::is_convertible<U, T>::value>::type
@@ -397,7 +427,7 @@ public:
         : Action(Result.Action), Value(std::move(Result.Value)) {}
 
     PreWalkResult(_Detail::StopWalkAction Action)
-        : Action(Action), Value(llvm::None) {}
+        : Action(Action), Value(std::nullopt) {}
   };
 
   /// Do not construct directly, use \c Action::<action> instead.
@@ -408,7 +438,7 @@ public:
   template <typename T>
   struct PostWalkResult {
     PostWalkAction Action;
-    llvm::Optional<T> Value;
+    std::optional<T> Value;
 
     template <typename U,
               typename std::enable_if<std::is_convertible<U, T>::value>::type
@@ -435,7 +465,7 @@ public:
         : Action(Result.Action), Value(std::move(Result.Value)) {}
 
     PostWalkResult(_Detail::StopWalkAction Action)
-        : Action(Action), Value(llvm::None) {}
+        : Action(Action), Value(std::nullopt) {}
   };
 
   /// This method is called when first visiting an expression
@@ -563,6 +593,12 @@ public:
     return Action::Continue();
   }
 
+  /// This method configures how to walk `QualifiedIdentTypeRepr` nodes.
+  virtual QualifiedIdentTypeReprWalkingScheme
+  getQualifiedIdentTypeReprWalkingScheme() const {
+    return QualifiedIdentTypeReprWalkingScheme::ASTOrderRecursive;
+  }
+
   /// This method configures whether the walker should explore into the generic
   /// params in AbstractFunctionDecl and NominalTypeDecl.
   virtual bool shouldWalkIntoGenericParams() { return false; }
@@ -599,27 +635,12 @@ public:
   }
 
   /// This method configures whether the walker should visit the body of a
-  /// closure that was checked separately from its enclosing expression.
-  ///
-  /// For work that is performed for every top-level expression, this should
-  /// be overridden to return false, to avoid duplicating work or visiting
-  /// bodies of closures that have not yet been type checked.
-  virtual bool shouldWalkIntoSeparatelyCheckedClosure(ClosureExpr *) {
-    return true;
-  }
-
-  /// This method configures whether the walker should visit the body of a
   /// TapExpr.
   virtual bool shouldWalkIntoTapExpression() { return true; }
 
   /// This method configures whether the walker should visit the underlying
   /// value of a property wrapper placeholder.
   virtual bool shouldWalkIntoPropertyWrapperPlaceholderValue() { return true; }
-
-  /// This method configures whether the walker should visit the capture
-  /// initializer expressions within a capture list directly, rather than
-  /// walking the declarations.
-  virtual bool shouldWalkCaptureInitializerExpressions() { return false; }
 
   /// This method configures whether the walker should exhibit the legacy
   /// behavior where accessors appear as peers of their storage, rather

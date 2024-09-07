@@ -1,4 +1,4 @@
-// swift-tools-version:5.0
+// swift-tools-version:5.4
 
 import PackageDescription
 import Foundation
@@ -127,8 +127,7 @@ targets.append(
     dependencies: swiftBenchDeps,
     path: "utils",
     sources: ["main.swift"],
-    swiftSettings: [.unsafeFlags(["-Xfrontend",
-                                  "-enable-experimental-cxx-interop",
+    swiftSettings: [.unsafeFlags(["-cxx-interoperability-mode=default",
                                   "-I",
                                   "utils/CxxTests"])]))
 
@@ -166,8 +165,7 @@ targets += cxxSingleSourceLibraries.map { name in
     dependencies: singleSourceDeps,
     path: "cxx-source",
     sources: ["\(name).swift"],
-    swiftSettings: [.unsafeFlags(["-Xfrontend",
-                                  "-enable-experimental-cxx-interop",
+    swiftSettings: [.unsafeFlags(["-cxx-interoperability-mode=default",
                                   "-I",
                                   "utils/CxxTests",
                                   // FIXME: https://github.com/apple/swift/issues/61453
@@ -191,5 +189,6 @@ let p = Package(
   name: "swiftbench",
   products: products,
   targets: targets,
-  swiftLanguageVersions: [.v4]
+  swiftLanguageVersions: [.v4],
+  cxxLanguageStandard: .cxx20
 )

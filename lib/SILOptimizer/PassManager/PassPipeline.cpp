@@ -26,6 +26,7 @@
 #include "swift/AST/Module.h"
 #include "swift/AST/SILOptions.h"
 #include "swift/SIL/SILModule.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SILOptimizer/Analysis/Analysis.h"
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
@@ -60,19 +61,6 @@ static llvm::cl::opt<bool> SILPrintFinalOSSAModule(
 static llvm::cl::opt<bool> SILViewSILGenCFG(
     "sil-view-silgen-cfg", llvm::cl::init(false),
     llvm::cl::desc("Enable the sil cfg viewer pass before diagnostics"));
-
-llvm::cl::opt<bool>
-    EnableDestroyHoisting("enable-destroy-hoisting", llvm::cl::init(false),
-                          llvm::cl::desc("Enable the DestroyHoisting pass."));
-
-llvm::cl::opt<bool>
-    EnableDeinitDevirtualizer("enable-deinit-devirtualizer", llvm::cl::init(false),
-                          llvm::cl::desc("Enable the DestroyHoisting pass."));
-
-llvm::cl::opt<bool>
-EnableLifetimeDependenceDiagnostics(
-  "enable-lifetime-dependence-diagnostics", llvm::cl::init(false),
-  llvm::cl::desc("Enable lifetime dependence diagnostics."));
 
 //===----------------------------------------------------------------------===//
 //                          Diagnostic Pass Pipeline
@@ -136,6 +124,10 @@ static void addMandatoryDiagnosticOptPipeline(SILPassPipelinePlan &P) {
 
   P.addAddressLowering();
 
+  // Before we run later semantic optimizations, eliminate simple functions that
+  // we specialized to ensure that we do not emit diagnostics twice.
+  P.addDiagnosticDeadFunctionElimination();
+
   P.addFlowIsolation();
 
   //===---
@@ -145,8 +137,11 @@ static void addMandatoryDiagnosticOptPipeline(SILPassPipelinePlan &P) {
   P.addTransferNonSendable();
 
   // Now that we have completed running passes that use region analysis, clear
-  // region analysis.
+  // region analysis and emit diagnostics for unnecessary preconcurrency
+  // imports.
   P.addRegionAnalysisInvalidationTransform();
+  P.addDiagnoseUnnecessaryPreconcurrencyImports();
+
   // Lower tuple addr constructor. Eventually this can be merged into later
   // passes. This ensures we do not need to update later passes for something
   // that is only needed by TransferNonSendable().
@@ -176,19 +171,26 @@ static void addMandatoryDiagnosticOptPipeline(SILPassPipelinePlan &P) {
   // Check noImplicitCopy and move only types for objects and addresses.
   P.addMoveOnlyChecker();
 
-  // Check ~Escapable.
-  if (EnableLifetimeDependenceDiagnostics) {
-    P.addLifetimeDependenceDiagnostics();
-  }
-  if (EnableDeinitDevirtualizer)
-    P.addDeinitDevirtualizer();
-
+  // FIXME: rdar://122701694 (`consuming` keyword causes verification error on
+  //        invalid SIL types)
+  //
   // Lower move only wrapped trivial types.
-  P.addTrivialMoveOnlyTypeEliminator();
+  //   P.addTrivialMoveOnlyTypeEliminator();
+
   // Check no uses after consume operator of a value in an address.
   P.addConsumeOperatorCopyableAddressesChecker();
   // No uses after consume operator of copyable value.
   P.addConsumeOperatorCopyableValuesChecker();
+
+  // Check ~Escapable.
+  if (P.getOptions().EnableLifetimeDependenceDiagnostics) {
+    P.addLifetimeDependenceDiagnostics();
+  }
+
+  // As a temporary measure, we also eliminate move only for non-trivial types
+  // until we can audit the later part of the pipeline. Eventually, this should
+  // occur before IRGen.
+  P.addMoveOnlyTypeEliminator();
 
   //
   // End Ownership Optimizations
@@ -202,9 +204,7 @@ static void addMandatoryDiagnosticOptPipeline(SILPassPipelinePlan &P) {
 #endif
 
   if (Options.shouldOptimize()) {
-    if (EnableDestroyHoisting) {
-      P.addDestroyHoisting();
-    } else if (P.getOptions().DestroyHoisting == DestroyHoistingOption::On) {
+    if (P.getOptions().DestroyHoisting == DestroyHoistingOption::On) {
       P.addDestroyAddrHoisting();
     }
   }
@@ -255,11 +255,6 @@ static void addMandatoryDiagnosticOptPipeline(SILPassPipelinePlan &P) {
   // Canonical swift requires all non cond_br critical edges to be split.
   P.addSplitNonCondBrCriticalEdges();
 
-  // As a temporary measure, we also eliminate move only for non-trivial types
-  // until we can audit the later part of the pipeline. Eventually, this should
-  // occur before IRGen.
-  P.addMoveOnlyTypeEliminator();
-
   // For embedded Swift: Specialize generic class vtables.
   P.addVTableSpecializer();
 
@@ -287,7 +282,10 @@ SILPassPipelinePlan::getSILGenPassPipeline(const SILOptions &Options) {
   P.startPipeline("SILGen Passes");
 
   P.addSILGenCleanup();
-
+  if (P.getOptions().EnableLifetimeDependenceDiagnostics) {
+    P.addLifetimeDependenceInsertion();
+    P.addLifetimeDependenceScopeFixup();
+  }
   if (SILViewSILGenCFG) {
     addCFGPrinterPipeline(P, "SIL View SILGen CFG");
   }
@@ -508,6 +506,8 @@ void addFunctionPasses(SILPassPipelinePlan &P,
   }
   P.addARCSequenceOpts();
 
+  P.addDeinitDevirtualizer();
+
   // We earlier eliminated ownership if we are not compiling the stdlib. Now
   // handle the stdlib functions, re-simplifying, eliminating ARC as we do.
   if (P.getOptions().CopyPropagation != CopyPropagationOption::Off) {
@@ -674,7 +674,14 @@ static void addPerfEarlyModulePassPipeline(SILPassPipelinePlan &P) {
 static void addHighLevelFunctionPipeline(SILPassPipelinePlan &P) {
   P.startPipeline("HighLevel,Function+EarlyLoopOpt",
                   true /*isFunctionPassPipeline*/);
-  P.addEagerSpecializer();
+
+  // Skip EagerSpecializer on embedded Swift, which already specializes
+  // everything. Otherwise this would create metatype references for functions
+  // with @_specialize attribute and those are incompatible with Emebdded Swift.
+  if (!P.getOptions().EmbeddedSwift) {
+    P.addEagerSpecializer();
+  }
+
   P.addObjCBridgingOptimization();
 
   addFunctionPasses(P, OptimizationLevelKind::HighLevel);
@@ -726,7 +733,7 @@ static void addMidLevelFunctionPipeline(SILPassPipelinePlan &P) {
   P.addLoopUnroll();
 }
 
-  static void addClosureSpecializePassPipeline(SILPassPipelinePlan &P) {
+static void addClosureSpecializePassPipeline(SILPassPipelinePlan &P) {
   P.startPipeline("ClosureSpecialize");
   P.addDeadFunctionAndGlobalElimination();
   P.addReadOnlyGlobalVariablesPass();
@@ -759,7 +766,11 @@ static void addMidLevelFunctionPipeline(SILPassPipelinePlan &P) {
   P.addCapturePropagation();
 
   // Specialize closure.
-  P.addClosureSpecializer();
+  if (P.getOptions().EnableExperimentalSwiftBasedClosureSpecialization) {
+    P.addExperimentalSwiftBasedClosureSpecialization();
+  } else {
+    P.addClosureSpecializer();
+  }
 
   // Do the second stack promotion on low-level SIL.
   P.addStackPromotion();
@@ -797,6 +808,9 @@ static void addLowLevelPassPipeline(SILPassPipelinePlan &P) {
   P.addDeadObjectElimination();
   P.addObjectOutliner();
   P.addDeadStoreElimination();
+  P.addDCE();
+  P.addSimplification();
+  P.addInitializeStaticGlobals();
 
   // dead-store-elimination can expose opportunities for dead object elimination.
   P.addDeadObjectElimination();
@@ -900,6 +914,7 @@ SILPassPipelinePlan::getLoweringPassPipeline(const SILOptions &Options) {
   P.startPipeline("Lowering");
   P.addLowerHopToActor(); // FIXME: earlier for more opportunities?
   P.addOwnershipModelEliminator();
+  P.addAlwaysEmitConformanceMetadataPreservation();
   P.addIRGenPrepare();
 
   return P;
@@ -991,9 +1006,13 @@ SILPassPipelinePlan::getPerformancePassPipeline(const SILOptions &Options) {
   if (Options.StopOptimizationAfterSerialization)
     return P;
 
+  P.addAutodiffClosureSpecialization();
+
   // After serialization run the function pass pipeline to iteratively lower
   // high-level constructs like @_semantics calls.
   addMidLevelFunctionPipeline(P);
+
+  P.addAutodiffClosureSpecialization();
 
   // Perform optimizations that specialize.
   addClosureSpecializePassPipeline(P);

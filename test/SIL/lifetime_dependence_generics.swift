@@ -1,38 +1,37 @@
 // RUN: %target-swift-frontend %s -emit-sil \
-// RUN:   -disable-experimental-parser-round-trip \
 // RUN:   -enable-experimental-feature NonescapableTypes \
-// RUN:   -enable-experimental-feature NoncopyableGenerics \
-// RUN:   -enable-experimental-lifetime-dependence-inference | %FileCheck %s
-// REQUIRES: noncopyable_generics
+// RUN:   -enable-experimental-feature SuppressedAssociatedTypes | %FileCheck %s
+
 
 protocol P {
   associatedtype E: ~Escapable
-  borrowing func getE() -> _borrow(self) E
+  borrowing func getE() -> dependsOn(self) E
 }
 
 extension P {
-  borrowing func getDefault() -> _borrow(self) E {
+  borrowing func getDefault() -> dependsOn(self) E {
     return getE()
   }
 }
 
 public struct View: ~Escapable {
+  // TODO: dependsOn(immortal)
   @_unsafeNonescapableResult
   init() { }
 }
 
 public struct PView: P {
-  borrowing func getE() -> _borrow(self) View { return View() }
+  borrowing func getE() -> dependsOn(self) View { return View() }
 }
 
-public func test(pview: consuming PView) -> _consume(pview) View {
+public func test(pview: borrowing PView) -> dependsOn(pview) View {
   return pview.getDefault()
 }
 
-// CHECK: sil hidden @$s28lifetime_dependence_generics1PPAAE10getDefault1EQzyF : $@convention(method) <Self where Self : P> (@in_guaranteed Self) -> _scope(0) @out Self.E {
+// CHECK-LABEL: sil hidden @$s28lifetime_dependence_generics1PPAAE10getDefault1EQzYlsS_yF : $@convention(method) <Self where Self : P> (@in_guaranteed Self) -> _scope(0)  @out Self.E {
 
-// CHECK: sil hidden @$s28lifetime_dependence_generics5PViewV4getEAA4ViewVyF : $@convention(method) (PView) -> _scope(0) @owned View {
+// CHECK-LABEL: sil hidden @$s28lifetime_dependence_generics5PViewV4getEAA4ViewVYlsS_yF : $@convention(method) (PView) -> _scope(0)  @owned View {
 
-// CHECK: sil private [transparent] [thunk] @$s28lifetime_dependence_generics5PViewVAA1PA2aDP4getE1EQzyFTW : $@convention(witness_method: P) (@in_guaranteed PView) -> _scope(0) @out View {
+// CHECK-LABEL: sil private [transparent] [thunk] @$s28lifetime_dependence_generics5PViewVAA1PA2aDP4getE1EQzYlsS_yFTW : $@convention(witness_method: P) (@in_guaranteed PView) -> _scope(0)  @out View {
 
-// CHECK: sil @$s28lifetime_dependence_generics4test5pviewAA4ViewVAA5PViewVn_tF : $@convention(thin) (PView) -> _inherit(1) @owned View {
+// CHECK-LABEL: sil @$s28lifetime_dependence_generics4test5pviewAA4ViewVYlsS_AA5PViewV_tF : $@convention(thin) (PView) -> _scope(0)  @owned View {

@@ -18,6 +18,7 @@
 #include "swift/AST/Module.h"
 #include "swift/AST/SwiftNameTranslation.h"
 #include "swift/AST/TypeCheckRequests.h"
+#include "swift/Basic/Assertions.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/NestedNameSpecifier.h"
@@ -210,7 +211,7 @@ void ClangSyntaxPrinter::printInlineForHelperFunction() const {
 }
 
 void ClangSyntaxPrinter::printNullability(
-    llvm::Optional<OptionalTypeKind> kind,
+    std::optional<OptionalTypeKind> kind,
     NullabilityPrintKind printKind) const {
   if (!kind)
     return;

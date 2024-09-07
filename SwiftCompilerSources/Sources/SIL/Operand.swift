@@ -14,7 +14,7 @@ import SILBridging
 
 /// An operand of an instruction.
 public struct Operand : CustomStringConvertible, NoReflectionChildren {
-  fileprivate let bridged: BridgedOperand
+  public let bridged: BridgedOperand
 
   public init(bridged: BridgedOperand) {
     self.bridged = bridged
@@ -62,6 +62,10 @@ public struct OperandArray : RandomAccessCollection, CustomReflectable {
     self.count = count
   }
 
+  static public var empty: OperandArray {
+    OperandArray(base: OptionalBridgedOperand(bridged: nil), count: 0)
+  }
+
   public var startIndex: Int { return 0 }
   public var endIndex: Int { return count }
   
@@ -83,7 +87,7 @@ public struct OperandArray : RandomAccessCollection, CustomReflectable {
   
   /// Returns a sub-array defined by `bounds`.
   ///
-  /// Note: this does not return a Slice. The first index of the returnd array is always 0.
+  /// Note: this does not return a Slice. The first index of the returned array is always 0.
   public subscript(bounds: Range<Int>) -> OperandArray {
     assert(bounds.lowerBound >= startIndex && bounds.upperBound <= endIndex)
     return OperandArray(
@@ -150,6 +154,10 @@ extension Sequence where Element == Operand {
     self.lazy.filter { !($0.instruction is I) }
   }
 
+  public func ignore(user: Instruction) -> LazyFilterSequence<Self> {
+    self.lazy.filter { !($0.instruction == user) }
+  }
+
   public func getSingleUser<I: Instruction>(ofType: I.Type) -> I? {
     filterUsers(ofType: I.self).singleUse?.instruction as? I
   }
@@ -176,6 +184,8 @@ extension Operand {
     case let srcDestInst as SourceDestAddrInstruction
            where srcDestInst.destinationOperand == self:
       return true
+    case let apply as FullApplySite:
+      return apply.isIndirectResult(operand: self)
     default:
       return false
     }

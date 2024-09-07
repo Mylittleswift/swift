@@ -18,6 +18,7 @@
 #include "swift/AST/Decl.h"
 #include "swift/AST/GenericSignature.h"
 #include "swift/AST/SubstitutionMap.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILLinkage.h"
 #include "swift/SIL/SILMoveOnlyDeinit.h"
@@ -45,7 +46,7 @@ void SILGenFunction::emitDestroyingDestructor(DestructorDecl *dd) {
   // Create a basic block to jump to for the implicit destruction behavior
   // of releasing the elements and calling the superclass destructor.
   // We won't actually emit the block until we finish with the destructor body.
-  prepareEpilog(dd, llvm::None, llvm::None, CleanupLocation(Loc));
+  prepareEpilog(dd, std::nullopt, std::nullopt, CleanupLocation(Loc));
 
   auto cleanupLoc = CleanupLocation(Loc);
 
@@ -96,7 +97,7 @@ void SILGenFunction::emitDestroyingDestructor(DestructorDecl *dd) {
   emitProfilerIncrement(dd->getTypecheckedBody());
   emitStmt(dd->getTypecheckedBody());
 
-  llvm::Optional<SILValue> maybeReturnValue;
+  std::optional<SILValue> maybeReturnValue;
   SILLocation returnLoc(Loc);
   std::tie(maybeReturnValue, returnLoc) = emitEpilogBB(Loc);
 
@@ -118,9 +119,15 @@ void SILGenFunction::emitDestroyingDestructor(DestructorDecl *dd) {
     SILValue baseSelf = B.createUpcast(cleanupLoc, selfValue, baseSILTy);
     ManagedValue dtorValue;
     SILType dtorTy;
+
     auto subMap
-      = superclassTy->getContextSubstitutionMap(SGM.M.getSwiftModule(),
-                                                superclass);
+      = superclassTy->getContextSubstitutionMap(superclass);
+
+    // We completely drop the generic signature if all generic parameters were
+    // concrete.
+    if (subMap && subMap.getGenericSignature()->areAllParamsConcrete())
+      subMap = SubstitutionMap();
+
     std::tie(dtorValue, dtorTy)
       = emitSiblingMethodRef(cleanupLoc, baseSelf, dtorConstant, subMap);
 
@@ -191,12 +198,11 @@ void SILGenFunction::emitDeallocatingClassDestructor(DestructorDecl *dd) {
   // Form a reference to the destroying destructor.
   SILDeclRef dtorConstant(dd, SILDeclRef::Kind::Destroyer);
   auto classTy = initialSelfValue->getType();
-  auto classDecl = classTy.getASTType()->getAnyNominal();
+
+  auto subMap = F.getForwardingSubstitutionMap();
+
   ManagedValue dtorValue;
   SILType dtorTy;
-  auto subMap = classTy.getASTType()
-    ->getContextSubstitutionMap(SGM.M.getSwiftModule(),
-                                classDecl);
   std::tie(dtorValue, dtorTy)
     = emitSiblingMethodRef(loc, initialSelfValue, dtorConstant, subMap);
 
@@ -248,14 +254,14 @@ void SILGenFunction::emitDeallocatingMoveOnlyDestructor(DestructorDecl *dd) {
   // Create a basic block to jump to for the implicit destruction behavior
   // of releasing the elements and calling the superclass destructor.
   // We won't actually emit the block until we finish with the destructor body.
-  prepareEpilog(dd, llvm::None, llvm::None, CleanupLocation(loc));
+  prepareEpilog(dd, std::nullopt, std::nullopt, CleanupLocation(loc));
 
   auto cleanupLoc = CleanupLocation(loc);
 
   emitProfilerIncrement(dd->getTypecheckedBody());
   emitStmt(dd->getTypecheckedBody());
 
-  llvm::Optional<SILValue> maybeReturnValue;
+  std::optional<SILValue> maybeReturnValue;
   SILLocation returnLoc(loc);
   std::tie(maybeReturnValue, returnLoc) = emitEpilogBB(loc);
 
@@ -263,6 +269,15 @@ void SILGenFunction::emitDeallocatingMoveOnlyDestructor(DestructorDecl *dd) {
   emitMoveOnlyMemberDestruction(selfValue,
                                 dd->getDeclContext()->getSelfNominalTypeDecl(),
                                 cleanupLoc);
+
+  if (auto *ddi = dyn_cast<DropDeinitInst>(selfValue)) {
+    if (auto *mu =
+            dyn_cast<MarkUnresolvedNonCopyableValueInst>(ddi->getOperand())) {
+      if (auto *asi = dyn_cast<AllocStackInst>(mu->getOperand())) {
+        B.createDeallocStack(loc, asi);
+      }
+    }
+  }
 
   // Return.
   B.createReturn(loc, emitEmptyTuple(loc));
@@ -286,7 +301,7 @@ void SILGenFunction::emitIVarDestroyer(SILDeclRef ivarDestroyer) {
   assert(selfValue);
 
   auto cleanupLoc = CleanupLocation(loc);
-  prepareEpilog(cd, llvm::None, llvm::None, cleanupLoc);
+  prepareEpilog(cd, std::nullopt, std::nullopt, cleanupLoc);
   {
     Scope S(*this, cleanupLoc);
     // Self is effectively guaranteed for the duration of any destructor.  For
@@ -506,15 +521,19 @@ void SILGenFunction::emitClassMemberDestruction(ManagedValue selfValue,
 void SILGenFunction::emitMoveOnlyMemberDestruction(SILValue selfValue,
                                                    NominalTypeDecl *nom,
                                                    CleanupLocation cleanupLoc) {
-  // drop_deinit invalidates any user-defined struct/enum deinit
-  // before the individual members are destroyed.
-  selfValue = B.createDropDeinit(cleanupLoc, selfValue);
+  if (!isa<DropDeinitInst>(selfValue)) {
+    // drop_deinit invalidates any user-defined struct/enum deinit
+    // before the individual members are destroyed.
+    selfValue = B.createDropDeinit(cleanupLoc, selfValue);
+  }
   if (selfValue->getType().isObject()) {
     // A destroy value that uses the result of a drop_deinit implicitly performs
     // memberwise destruction.
     B.emitDestroyValueOperation(cleanupLoc, selfValue);
     return;
   }
+  // self has been stored into a temporary
+  assert(!selfValue->getType().isObject());
   if (auto *structDecl = dyn_cast<StructDecl>(nom)) {
     for (VarDecl *vd : nom->getStoredProperties()) {
       const TypeLowering &ti = getTypeLowering(vd->getTypeInContext());
@@ -577,13 +596,13 @@ void SILGenFunction::emitObjCDestructor(SILDeclRef dtor) {
   // Create a basic block to jump to for the implicit destruction behavior
   // of releasing the elements and calling the superclass destructor.
   // We won't actually emit the block until we finish with the destructor body.
-  prepareEpilog(dd, llvm::None, llvm::None, CleanupLocation(loc));
+  prepareEpilog(dd, std::nullopt, std::nullopt, CleanupLocation(loc));
 
   emitProfilerIncrement(dd->getTypecheckedBody());
   // Emit the destructor body.
   emitStmt(dd->getTypecheckedBody());
 
-  llvm::Optional<SILValue> maybeReturnValue;
+  std::optional<SILValue> maybeReturnValue;
   SILLocation returnLoc(loc);
   std::tie(maybeReturnValue, returnLoc) = emitEpilogBB(loc);
 
@@ -615,8 +634,7 @@ void SILGenFunction::emitObjCDestructor(SILDeclRef dtor) {
   assert(superSelf->getOwnershipKind() == OwnershipKind::Owned);
 
   auto subMap
-    = superclassTy->getContextSubstitutionMap(SGM.M.getSwiftModule(),
-                                              superclass);
+    = superclassTy->getContextSubstitutionMap(superclass);
 
   B.createApply(cleanupLoc, superclassDtorValue, subMap, superSelf);
 

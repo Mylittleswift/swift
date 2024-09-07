@@ -22,6 +22,7 @@
 
 #include "OwnershipLiveRange.h"
 #include "SemanticARCOptVisitor.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/LinearLifetimeChecker.h"
 #include "swift/SIL/MemAccessUtils.h"
 #include "swift/SIL/OwnershipUtils.h"
@@ -56,7 +57,7 @@ class StorageGuaranteesLoadVisitor
   // The current address being visited.
   SILValue currentAddress;
 
-  llvm::Optional<bool> isWritten;
+  std::optional<bool> isWritten;
 
 public:
   StorageGuaranteesLoadVisitor(Context &context, LoadInst *load,
@@ -386,9 +387,9 @@ bool SemanticARCOptVisitor::performLoadCopyToLoadBorrowOptimization(
   SILValue replacement = lbi;
   if (original != li) {
     getCallbacks().eraseAndRAUWSingleValueInst(li, lbi);
-    auto *bbi =
-        SILBuilderWithScope(cast<SingleValueInstruction>(original))
-            .createBeginBorrow(li->getLoc(), lbi, original->isLexical());
+    auto *bbi = SILBuilderWithScope(cast<SingleValueInstruction>(original))
+                    .createBeginBorrow(li->getLoc(), lbi,
+                                       IsLexical_t(original->isLexical()));
     replacement = bbi;
     lr.insertEndBorrowsAtDestroys(bbi, getDeadEndBlocks(),
                                   ctx.lifetimeFrontier);

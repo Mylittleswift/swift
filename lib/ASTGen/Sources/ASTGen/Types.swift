@@ -82,7 +82,7 @@ extension ASTGenVisitor {
     case .implicitlyUnwrappedOptionalType(let node):
       return self.generate(implicitlyUnwrappedOptionalType: node).asTypeRepr
     case .memberType(let node):
-      return self.generate(memberType: node)
+      return self.generate(memberType: node).asTypeRepr
     case .metatypeType(let node):
       return self.generate(metatypeType: node)
     case .missingType:
@@ -120,14 +120,14 @@ extension ASTGenVisitor {
     let id = self.generateIdentifier(node.name)
 
     guard let generics = node.genericArgumentClause else {
-      return BridgedSimpleIdentTypeRepr.createParsed(ctx, loc: loc, name: id).asTypeRepr
+      return BridgedUnqualifiedIdentTypeRepr.createParsed(ctx, loc: loc, name: id).asTypeRepr
     }
 
     let genericArguments = generics.arguments.lazy.map {
       self.generate(type: $0.argument)
     }
 
-    return BridgedGenericIdentTypeRepr.createParsed(
+    return BridgedUnqualifiedIdentTypeRepr.createParsed(
       self.ctx,
       name: id,
       nameLoc: loc,
@@ -137,45 +137,29 @@ extension ASTGenVisitor {
     ).asTypeRepr
   }
 
-  func generate(memberType node: MemberTypeSyntax) -> BridgedTypeRepr {
-    // Gather the member components, in decreasing depth order.
-    var reverseMemberComponents = [BridgedTypeRepr]()
+  func generate(memberType node: MemberTypeSyntax) -> BridgedDeclRefTypeRepr {
+    let (name, nameLoc) = self.generateIdentifierAndSourceLoc(node.name)
 
-    var baseType = TypeSyntax(node)
-    while let memberType = baseType.as(MemberTypeSyntax.self) {
-      let (name, nameLoc) = self.generateIdentifierAndSourceLoc(node.name)
+    let genericArguments: BridgedArrayRef
+    let angleRange: BridgedSourceRange
+    if let generics = node.genericArgumentClause {
+      genericArguments = generics.arguments.lazy.map {
+        self.generate(type: $0.argument)
+      }.bridgedArray(in: self)
 
-      if let generics = memberType.genericArgumentClause {
-        let genericArguments = generics.arguments.lazy.map {
-          self.generate(type: $0.argument)
-        }
-
-        reverseMemberComponents.append(
-          BridgedGenericIdentTypeRepr.createParsed(
-            self.ctx,
-            name: name,
-            nameLoc: nameLoc,
-            genericArgs: genericArguments.bridgedArray(in: self),
-            leftAngleLoc: self.generateSourceLoc(generics.leftAngle),
-            rightAngleLoc: self.generateSourceLoc(generics.rightAngle)
-          ).asTypeRepr
-        )
-      } else {
-        reverseMemberComponents.append(
-          BridgedSimpleIdentTypeRepr.createParsed(self.ctx, loc: nameLoc, name: name).asTypeRepr
-        )
-      }
-
-      baseType = memberType.baseType
+      angleRange = self.generateSourceRange(start: generics.leftAngle, end: generics.rightAngle)
+    } else {
+      genericArguments = .init()
+      angleRange = .init()
     }
 
-    let baseComponent = generate(type: baseType)
-    let memberComponents = reverseMemberComponents.reversed().bridgedArray(in: self)
-
-    return BridgedMemberTypeRepr.createParsed(
+    return BridgedDeclRefTypeRepr.createParsed(
       self.ctx,
-      base: baseComponent,
-      members: memberComponents
+      base: self.generate(type: node.baseType),
+      name: name,
+      nameLoc: nameLoc,
+      genericArguments: genericArguments,
+      angleRange: angleRange
     )
   }
 
@@ -341,7 +325,7 @@ extension ASTGenVisitor {
     )
   }
 
-  func generate(classRestrictionType node: ClassRestrictionTypeSyntax) -> BridgedSimpleIdentTypeRepr {
+  func generate(classRestrictionType node: ClassRestrictionTypeSyntax) -> BridgedUnqualifiedIdentTypeRepr {
     // TODO: diagnostics.
     // warning: using 'class' keyword to define a class-constrained protocol is deprecated; use 'AnyObject' instead
     return .createParsed(
@@ -366,7 +350,6 @@ extension BridgedAttributedTypeSpecifier {
     case .__owned: self = .legacyOwned
     case ._const: self = .const
     case .isolated: self = .isolated
-    case ._resultDependsOn: self = .resultDependsOn
     default: return nil
     }
   }

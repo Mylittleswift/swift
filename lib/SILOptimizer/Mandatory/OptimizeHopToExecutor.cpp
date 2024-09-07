@@ -11,12 +11,12 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "optimize-hop-to-executor"
+#include "swift/SIL/ApplySite.h"
+#include "swift/SIL/MemAccessUtils.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILFunction.h"
-#include "swift/SIL/ApplySite.h"
-#include "swift/SIL/MemoryLocations.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
-#include "swift/SIL/MemAccessUtils.h"
 
 using namespace swift;
 

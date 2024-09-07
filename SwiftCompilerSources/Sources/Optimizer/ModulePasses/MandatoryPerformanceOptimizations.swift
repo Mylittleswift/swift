@@ -56,7 +56,7 @@ private func optimizeFunctionsTopDown(using worklist: inout FunctionWorklist,
         f.set(isPerformanceConstraint: true, context)
       }
 
-      optimize(function: f, context, &worklist)
+      optimize(function: f, context, moduleContext, &worklist)
     }
 
     // Generic specialization takes care of removing metatype arguments of generic functions.
@@ -73,7 +73,7 @@ fileprivate struct PathFunctionTuple: Hashable {
   var function: Function
 }
 
-private func optimize(function: Function, _ context: FunctionPassContext, _ worklist: inout FunctionWorklist) {
+private func optimize(function: Function, _ context: FunctionPassContext, _ moduleContext: ModulePassContext, _ worklist: inout FunctionWorklist) {
   var alreadyInlinedFunctions: Set<PathFunctionTuple> = Set()
   
   var changed = true
@@ -92,11 +92,11 @@ private func optimize(function: Function, _ context: FunctionPassContext, _ work
       // Embedded Swift specific transformations
       case let alloc as AllocRefInst:
         if context.options.enableEmbeddedSwift {
-          specializeVTableAndAddEntriesToWorklist(for: alloc.type, in: function, context, &worklist)
+          specializeVTableAndAddEntriesToWorklist(for: alloc.type, in: function, context, moduleContext, &worklist)
         }
       case let metatype as MetatypeInst:
         if context.options.enableEmbeddedSwift {
-          specializeVTableAndAddEntriesToWorklist(for: metatype.type, in: function, context, &worklist)
+          specializeVTableAndAddEntriesToWorklist(for: metatype.type, in: function, context, moduleContext, &worklist)
         }
       case let classMethod as ClassMethodInst:
         if context.options.enableEmbeddedSwift {
@@ -118,6 +118,16 @@ private func optimize(function: Function, _ context: FunctionPassContext, _ work
           context.erase(instructionIncludingDebugUses: iem)
         }
 
+      case let fri as FunctionRefInst:
+        // Mandatory de-virtualization and mandatory inlining might leave referenced functions in "serialized"
+        // functions with wrong linkage. Fix this by making the referenced function public.
+        // It's not great, because it can prevent dead code elimination. But it's only a rare case.
+        if function.serializedKind != .notSerialized,
+           !fri.referencedFunction.hasValidLinkageForFragileRef(function.serializedKind)
+        {
+          fri.referencedFunction.set(linkage: .public, moduleContext)
+        }
+
       default:
         break
       }
@@ -133,18 +143,28 @@ private func optimize(function: Function, _ context: FunctionPassContext, _ work
   }
 }
 
-private func specializeVTableAndAddEntriesToWorklist(for type: Type, in function: Function, _ context: FunctionPassContext, _ worklist: inout FunctionWorklist) {
-  guard let vtable = context.specializeVTable(for: type, in: function) else {
+private func specializeVTableAndAddEntriesToWorklist(for type: Type, in function: Function,
+                                                     _ context: FunctionPassContext, _ moduleContext: ModulePassContext,
+                                                     _ worklist: inout FunctionWorklist) {
+  let vTablesCountBefore = moduleContext.vTables.count
+
+  guard context.specializeVTable(for: type, in: function) != nil else {
     return
   }
 
-  for entry in vtable.entries {
-    worklist.pushIfNotVisited(entry.function)
+  // More than one new vtable might have been created (superclasses), process them all
+  let vTables = moduleContext.vTables
+  for i in vTablesCountBefore ..< vTables.count {
+    for entry in vTables[i].entries {
+      worklist.pushIfNotVisited(entry.function)
+    }
   }
 }
 
 private func inlineAndDevirtualize(apply: FullApplySite, alreadyInlinedFunctions: inout Set<PathFunctionTuple>,
                                    _ context: FunctionPassContext, _ simplifyCtxt: SimplifyContext) {
+  // De-virtualization and inlining in/into a "serialized" function might create function references to functions
+  // with wrong linkage. We need to fix this later (see handling of FunctionRefInst in `optimize`).
   if simplifyCtxt.tryDevirtualize(apply: apply, isMandatory: true) != nil {
     return
   }
@@ -158,9 +178,7 @@ private func inlineAndDevirtualize(apply: FullApplySite, alreadyInlinedFunctions
     return
   }
 
-  if apply.canInline &&
-     shouldInline(apply: apply, callee: callee, alreadyInlinedFunctions: &alreadyInlinedFunctions)
-  {
+  if shouldInline(apply: apply, callee: callee, alreadyInlinedFunctions: &alreadyInlinedFunctions) {
     if apply.inliningCanInvalidateStackNesting  {
       simplifyCtxt.notifyInvalidatedStackNesting()
     }
@@ -188,12 +206,23 @@ private func removeUnusedMetatypeInstructions(in function: Function, _ context: 
 
 private func shouldInline(apply: FullApplySite, callee: Function, alreadyInlinedFunctions: inout Set<PathFunctionTuple>) -> Bool {
   if callee.isTransparent {
+    precondition(callee.hasOwnership, "transparent functions should have ownership at this stage of the pipeline")
     return true
+  }
+
+  if !apply.canInline {
+    return false
   }
 
   if apply is BeginApplyInst {
     // Avoid co-routines because they might allocate (their context).
     return true
+  }
+
+  if callee.mayBindDynamicSelf {
+    // We don't support inlining a function that binds dynamic self into a global-init function
+    // because the global-init function cannot provide the self metadata.
+    return false
   }
 
   if apply.parentFunction.isGlobalInitOnceFunction && callee.inlineStrategy == .always {
@@ -341,6 +370,9 @@ private extension Value {
 private extension Function {
   /// Analyzes the global initializer function and returns global it initializes (from `alloc_global` instruction).
   func getInitializedGlobal() -> GlobalVariable? {
+    if !isDefinition {
+      return nil
+    }
     for inst in self.entryBlock.instructions {
       switch inst {
       case let agi as AllocGlobalInst:

@@ -1,23 +1,15 @@
 // REQUIRES: swift_swift_parser
 
 // RUN: %empty-directory(%t)
-// RUN: %target-swift-frontend %s -swift-version 5 -module-name main -disable-availability-checking -typecheck -enable-experimental-feature SymbolLinkageMarkers -plugin-path %swift-plugin-dir -dump-macro-expansions > %t/expansions-dump.txt 2>&1
+// RUN: %target-swift-frontend %s -swift-version 5 -module-name main -disable-availability-checking -typecheck -enable-experimental-feature DebugDescriptionMacro -plugin-path %swift-plugin-dir -dump-macro-expansions > %t/expansions-dump.txt 2>&1
 // RUN: %FileCheck %s < %t/expansions-dump.txt
 
 struct MyStruct {}
 
-@_DebugDescription
+@DebugDescription
 extension MyStruct {
   var debugDescription: String { "thirty" }
 }
-// CHECK: #if os(Linux)
-// CHECK: @_section(".lldbsummaries")
-// CHECK: #elseif os(Windows)
-// CHECK: @_section(".lldbsummaries")
-// CHECK: #else
-// CHECK: @_section("__DATA_CONST,__lldbsummaries")
-// CHECK: #endif
-// CHECK: @_used
 // CHECK: static let _lldb_summary = (
 // CHECK:     /* version */ 1 as UInt8,
 // CHECK:     /* record size */ 34 as UInt8,

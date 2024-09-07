@@ -14,6 +14,7 @@
 #include "SILGenFunction.h"
 #include "Scope.h"
 #include "swift/AST/DiagnosticsSIL.h"
+#include "swift/Basic/Assertions.h"
 
 #define DEBUG_TYPE "silgen"
 
@@ -33,7 +34,7 @@ static FuncDecl *synthesizeExit(ASTContext &ctx, ModuleDecl *moduleDecl) {
       /*async*/ false, /*throws*/ false, /*thrownType*/ Type(), {}, params,
       ctx.getNeverType(), moduleDecl);
   exitFuncDecl->getAttrs().add(new (ctx) ExternAttr(
-      llvm::None, llvm::None, ExternKind::C, /*implicit*/ true));
+      std::nullopt, std::nullopt, ExternKind::C, /*implicit*/ true));
   return exitFuncDecl;
 }
 
@@ -58,9 +59,9 @@ void SILGenModule::emitEntryPoint(SourceFile *SF, SILFunction *TopLevel) {
   TopLevelSGF.MagicFunctionName = SwiftModule->getName();
   auto moduleCleanupLoc = CleanupLocation::getModuleCleanupLocation();
 
-  TopLevelSGF.prepareEpilog(
-      SF, llvm::None, getASTContext().getErrorExistentialType(),
-      moduleCleanupLoc);
+  TopLevelSGF.prepareEpilog(SF, std::nullopt,
+                            getASTContext().getErrorExistentialType(),
+                            moduleCleanupLoc);
 
   auto prologueLoc = RegularLocation::getModuleLocation();
   prologueLoc.markAsPrologue();
@@ -302,13 +303,12 @@ void SILGenFunction::emitCallToMain(FuncDecl *mainFunc) {
       SubstitutionMap subMap = SubstitutionMap::get(
           genericSig, [&](SubstitutableType *dependentType) {
             return errorType.getASTType();
-          }, LookUpConformanceInModule(getModule().getSwiftModule()));
+          }, LookUpConformanceInModule());
 
       // Generic errors are passed indirectly.
       if (!error->getType().isAddress()) {
-        auto *tmp = B.createAllocStack(loc,
-                                       error->getType().getObjectType(),
-                                       llvm::None);
+        auto *tmp = B.createAllocStack(loc, error->getType().getObjectType(),
+                                       std::nullopt);
         emitSemanticStore(
             loc, error, tmp,
             getTypeLowering(tmp->getType()), IsInitialization);
@@ -336,6 +336,9 @@ void SILGenFunction::emitCallToMain(FuncDecl *mainFunc) {
 }
 
 void SILGenModule::emitEntryPoint(SourceFile *SF) {
+  if (getASTContext().SILOpts.SkipFunctionBodies != FunctionBodySkipping::None)
+    return;
+
   assert(!M.lookUpFunction(getASTContext().getEntryPointFunctionName()) &&
          "already emitted toplevel?!");
 
@@ -367,9 +370,16 @@ void SILGenFunction::emitMarkFunctionEscapeForTopLevelCodeGlobals(
 /// uninitialized global variable
 static void emitMarkFunctionEscape(SILGenFunction &SGF,
                                    AbstractFunctionDecl *AFD) {
+  auto &Ctx = SGF.getASTContext();
+  if (Ctx.TypeCheckerOpts.DeferToRuntime &&
+      Ctx.LangOpts.hasFeature(Feature::LazyImmediate))
+    return;
+
   if (AFD->getDeclContext()->isLocalContext())
     return;
   auto CaptureInfo = AFD->getCaptureInfo();
+  if (!CaptureInfo.hasBeenComputed())
+    return;
   SGF.emitMarkFunctionEscapeForTopLevelCodeGlobals(AFD, std::move(CaptureInfo));
 }
 

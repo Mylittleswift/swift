@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Statistic.h"
 #include "swift/Config.h"
 #include "clang/Basic/SourceLocation.h"
@@ -154,7 +155,7 @@ auxName(StringRef ModuleName,
 
 class UnifiedStatsReporter::RecursionSafeTimers {
   struct RecursionSafeTimer {
-    llvm::Optional<llvm::NamedRegionTimer> Timer;
+    std::optional<llvm::NamedRegionTimer> Timer;
     size_t RecursionDepth;
   };
 

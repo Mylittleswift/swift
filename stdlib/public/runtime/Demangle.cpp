@@ -266,6 +266,20 @@ _buildDemanglingForMetadataPack(MetadataPackPointer pack, size_t count,
   return node;
 }
 
+static Demangle::NodePointer
+_buildDemanglingForValue(intptr_t value, GenericValueDescriptor valueDescriptor,
+                         Demangle::Demangler &Dem) {
+  switch (valueDescriptor.Type) {
+  case GenericValueType::Int: {
+    if (value < 0) {
+      return Dem.createNode(Node::Kind::NegativeInteger, value);
+    }
+
+    return Dem.createNode(Node::Kind::Integer, value);
+  }
+  }
+}
+
 /// Build an array of demangling trees for each generic argument to the given
 /// generic type context descriptor.
 ///
@@ -297,7 +311,7 @@ static bool _buildDemanglingForGenericArgs(
   auto packHeader = generics->getGenericPackShapeHeader();
   auto packDescriptors = generics->getGenericPackShapeDescriptors();
 
-  llvm::SmallVector<MetadataOrPack> allGenericArgs;
+  llvm::SmallVector<MetadataPackOrValue> allGenericArgs;
 
   auto numKeyArgs = 0;
   for (auto param : generics->getGenericParams()) {
@@ -356,6 +370,25 @@ static bool _buildDemanglingForGenericArgs(
 
       demangledGenerics.push_back(genericArgDemangling);
       packIndex += 1;
+      break;
+    }
+
+    case GenericParamKind::Value: {
+      // FIXME: We really want to get the specific value descriptor when
+      // building a demangling, but when all value parameters become non-key
+      // we lose the value header. May need to do extra work to walk up parents
+      // and find this parameter's specific value descriptor.
+
+      auto valueDescriptor = GenericValueDescriptor{GenericValueType::Int};
+      auto value = genericArg.getValue();
+      auto genericArgDemangling = _buildDemanglingForValue(value,
+                                                           valueDescriptor,
+                                                           Dem);
+
+      if (!genericArgDemangling)
+        return false;
+
+      demangledGenerics.push_back(genericArgDemangling);
       break;
     }
 
@@ -530,6 +563,8 @@ swift::_swift_buildDemanglingForMetadata(const Metadata *type,
       // If there is a superclass constraint, we mangle it specially.
       auto result = Dem.createNode(Node::Kind::ProtocolListWithClass);
       auto superclassNode = _swift_buildDemanglingForMetadata(superclass, Dem);
+      if (!superclassNode)
+        return nullptr;
 
       result->addChild(proto_list, Dem);
       result->addChild(superclassNode, Dem);
@@ -573,6 +608,8 @@ swift::_swift_buildDemanglingForMetadata(const Metadata *type,
     auto metatype = static_cast<const ExistentialMetatypeMetadata *>(type);
     auto instance = _swift_buildDemanglingForMetadata(metatype->InstanceType,
                                                       Dem);
+    if (!instance)
+      return nullptr;
     auto node = Dem.createNode(Node::Kind::ExistentialMetatype);
     node->addChild(instance, Dem);
     return node;
@@ -605,6 +642,11 @@ swift::_swift_buildDemanglingForMetadata(const Metadata *type,
       auto flags = func->getParameterFlags(i);
       auto input = _swift_buildDemanglingForMetadata(param, Dem);
 
+      // If we failed to build the demangling for an input, we have to fail
+      // building the demangling for the function type too.
+      if (!input)
+        return nullptr;
+
       auto wrapInput = [&](Node::Kind kind) {
         auto parent = Dem.createNode(kind);
         parent->addChild(input, Dem);
@@ -613,22 +655,25 @@ swift::_swift_buildDemanglingForMetadata(const Metadata *type,
       if (flags.isNoDerivative()) {
         wrapInput(Node::Kind::NoDerivative);
       }
-      switch (flags.getValueOwnership()) {
-      case ValueOwnership::Default:
+      switch (flags.getOwnership()) {
+      case ParameterOwnership::Default:
         /* nothing */
         break;
-      case ValueOwnership::InOut:
+      case ParameterOwnership::InOut:
         wrapInput(Node::Kind::InOut);
         break;
-      case ValueOwnership::Shared:
+      case ParameterOwnership::Shared:
         wrapInput(Node::Kind::Shared);
         break;
-      case ValueOwnership::Owned:
+      case ParameterOwnership::Owned:
         wrapInput(Node::Kind::Owned);
         break;
       }
       if (flags.isIsolated()) {
         wrapInput(Node::Kind::Isolated);
+      }
+      if (flags.isSending()) {
+        wrapInput(Node::Kind::Sending);
       }
 
       inputs.push_back({input, flags.isVariadic()});
@@ -691,6 +736,9 @@ swift::_swift_buildDemanglingForMetadata(const Metadata *type,
 
     NodePointer resultTy = _swift_buildDemanglingForMetadata(func->ResultType,
                                                              Dem);
+    if (!resultTy)
+      return nullptr;
+
     NodePointer result = Dem.createNode(Node::Kind::ReturnType);
     result->addChild(resultTy, Dem);
     
@@ -698,6 +746,8 @@ swift::_swift_buildDemanglingForMetadata(const Metadata *type,
     if (func->hasGlobalActor()) {
       auto globalActorTypeNode =
           _swift_buildDemanglingForMetadata(func->getGlobalActor(), Dem);
+      if (!globalActorTypeNode)
+        return nullptr;
       NodePointer globalActorNode =
           Dem.createNode(Node::Kind::GlobalActorFunctionType);
       globalActorNode->addChild(globalActorTypeNode, Dem);
@@ -731,6 +781,8 @@ swift::_swift_buildDemanglingForMetadata(const Metadata *type,
       if (auto thrownError = func->getThrownError()) {
         auto thrownErrorTypeNode =
           _swift_buildDemanglingForMetadata(thrownError, Dem);
+        if (!thrownErrorTypeNode)
+          return nullptr;
         NodePointer thrownErrorNode =
             Dem.createNode(Node::Kind::TypedThrowsAnnotation);
         thrownErrorNode->addChild(thrownErrorTypeNode, Dem);
@@ -745,6 +797,10 @@ swift::_swift_buildDemanglingForMetadata(const Metadata *type,
     }
     if (func->isAsync())
       funcNode->addChild(Dem.createNode(Node::Kind::AsyncAnnotation), Dem);
+
+    if (func->getExtendedFlags().hasSendingResult())
+      funcNode->addChild(Dem.createNode(Node::Kind::SendingResultFunctionType),
+                         Dem);
 
     funcNode->addChild(parameters, Dem);
     funcNode->addChild(result, Dem);
@@ -790,6 +846,8 @@ swift::_swift_buildDemanglingForMetadata(const Metadata *type,
       // Add the element type child.
       auto eltType =
         _swift_buildDemanglingForMetadata(tuple->getElement(i).Type, Dem);
+      if (!eltType)
+        return nullptr;
 
       if (eltType->getKind() == Node::Kind::Type) {
         elt->addChild(eltType, Dem);

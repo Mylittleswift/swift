@@ -54,7 +54,7 @@ fileprivate struct _CapacityAndFlags {
   // in the bottom 48 bits, and flags in the top 16.
   fileprivate var _storage: UInt64
 
-#if _pointerBitWidth(_32)
+#if _pointerBitWidth(_32) || _pointerBitWidth(_16)
   fileprivate init(realCapacity: Int, flags: UInt16) {
     let realCapUInt = UInt64(UInt(bitPattern: realCapacity))
     _internalInvariant(realCapUInt == realCapUInt & _CountAndFlags.countMask)
@@ -179,14 +179,18 @@ fileprivate func _allocate<T: AnyObject>(
   growthFactor: Float? = nil, // Exponential growth factor for large allocs
   tailAllocator: (_ numTailBytes: Int) -> T // Do the actual tail allocation
 ) -> (T, realNumTailBytes: Int) {
+#if !$Embedded
   _internalInvariant(getSwiftClassInstanceExtents(T.self).1 == numHeaderBytes)
+#endif
+
+  func roundUp(_ x: Int) -> Int { (x + 15) & ~15 }
 
   let numBytes = numHeaderBytes + numTailBytes
 
   let linearBucketThreshold = 128
   if _fastPath(numBytes < linearBucketThreshold) {
     // Allocate up to the nearest bucket of 16
-    let realNumBytes = _mallocGoodSize(for: numBytes)
+    let realNumBytes = roundUp(numBytes)
     let realNumTailBytes = realNumBytes - numHeaderBytes
     _internalInvariant(realNumTailBytes >= numTailBytes)
     let object = tailAllocator(realNumTailBytes)
@@ -200,10 +204,27 @@ fileprivate func _allocate<T: AnyObject>(
     growTailBytes = numTailBytes
   }
 
-  let total = _mallocGoodSize(for: numHeaderBytes + growTailBytes)
+  let total = roundUp(numHeaderBytes + growTailBytes)
   let totalTailBytes = total - numHeaderBytes
 
-  return (tailAllocator(totalTailBytes), totalTailBytes)
+  let object = tailAllocator(totalTailBytes)
+
+  let allocSize: Int?
+  #if !$Embedded
+    allocSize = _mallocSize(ofAllocation: UnsafeRawPointer(Builtin.bridgeToRawPointer(object)))
+  #else
+    allocSize = nil
+  #endif
+  if let allocSize {
+    _internalInvariant(allocSize % MemoryLayout<Int>.stride == 0)
+
+    let realNumTailBytes = allocSize - numHeaderBytes
+    _internalInvariant(realNumTailBytes >= numTailBytes)
+
+    return (object, realNumTailBytes)
+  } else {
+    return (object, totalTailBytes)
+  }
 }
 
 fileprivate func _allocateStringStorage(
@@ -242,7 +263,7 @@ final internal class __StringStorage
 
   @inline(__always)
   internal var count: Int { _countAndFlags.count }
-#elseif _pointerBitWidth(_32)
+#elseif _pointerBitWidth(_32) || _pointerBitWidth(_16)
   // The total allocated storage capacity. Note that this includes the required
   // nul-terminator.
   private var _realCapacity: Int
@@ -304,7 +325,7 @@ extension __StringStorage {
 #if _pointerBitWidth(_64)
     storage._capacityAndFlags = capAndFlags
     storage._countAndFlags = countAndFlags
-#elseif _pointerBitWidth(_32)
+#elseif _pointerBitWidth(_32) || _pointerBitWidth(_16)
     storage._realCapacity = capAndFlags._realCapacity
     storage._count = countAndFlags.count
     storage._countFlags = countAndFlags.flags
@@ -351,7 +372,7 @@ extension __StringStorage {
     let countAndFlags = _CountAndFlags(mortalCount: count, isASCII: false)
     #if _pointerBitWidth(_64)
     storage._countAndFlags = countAndFlags
-    #elseif _pointerBitWidth(_32)
+    #elseif _pointerBitWidth(_32) || _pointerBitWidth(_16)
     storage._count = countAndFlags.count
     storage._countFlags = countAndFlags.flags
     #else
@@ -506,7 +527,7 @@ extension __StringStorage {
       mortalCount: newCount, isASCII: newIsASCII)
 #if _pointerBitWidth(_64)
     self._countAndFlags = countAndFlags
-#elseif _pointerBitWidth(_32)
+#elseif _pointerBitWidth(_32) || _pointerBitWidth(_16)
     self._count = countAndFlags.count
     self._countFlags = countAndFlags.flags
 #else
@@ -654,7 +675,7 @@ final internal class __SharedStringStorage
 
 #if _pointerBitWidth(_64)
   internal var _countAndFlags: _StringObject.CountAndFlags
-#elseif _pointerBitWidth(_32)
+#elseif _pointerBitWidth(_32) || _pointerBitWidth(_16)
   internal var _count: Int
   internal var _countFlags: UInt16
 
@@ -681,7 +702,7 @@ final internal class __SharedStringStorage
     self.immortal = true
 #if _pointerBitWidth(_64)
     self._countAndFlags = countAndFlags
-#elseif _pointerBitWidth(_32)
+#elseif _pointerBitWidth(_32) || _pointerBitWidth(_16)
     self._count = countAndFlags.count
     self._countFlags = countAndFlags.flags
 #else
@@ -710,7 +731,7 @@ final internal class __SharedStringStorage
     self.immortal = false
 #if _pointerBitWidth(_64)
     self._countAndFlags = countAndFlags
-#elseif _pointerBitWidth(_32)
+#elseif _pointerBitWidth(_32) || _pointerBitWidth(_16)
     self._count = countAndFlags.count
     self._countFlags = countAndFlags.flags
 #else

@@ -40,14 +40,14 @@ struct SILArgumentKind {
   SILArgumentKind(innerty value) : value(value) {}
   operator innerty() const { return value; }
 
-  static llvm::Optional<SILArgumentKind> fromValueKind(ValueKind kind) {
+  static std::optional<SILArgumentKind> fromValueKind(ValueKind kind) {
     switch (kind) {
 #define ARGUMENT(ID, PARENT)                                                   \
   case ValueKind::ID:                                                          \
     return SILArgumentKind(ID);
 #include "swift/SIL/SILNodes.def"
     default:
-      return llvm::None;
+      return std::nullopt;
     }
   }
 };
@@ -366,15 +366,13 @@ class SILFunctionArgument : public SILArgument {
       ValueOwnershipKind ownershipKind, const ValueDecl *decl = nullptr,
       bool isNoImplicitCopy = false,
       LifetimeAnnotation lifetimeAnnotation = LifetimeAnnotation::None,
-      bool isCapture = false, bool isParameterPack = false,
-      bool hasResultDependsOn = false)
+      bool isCapture = false, bool isParameterPack = false)
       : SILArgument(ValueKind::SILFunctionArgument, parentBlock, type,
                     ownershipKind, decl) {
     sharedUInt32().SILFunctionArgument.noImplicitCopy = isNoImplicitCopy;
     sharedUInt32().SILFunctionArgument.lifetimeAnnotation = lifetimeAnnotation;
     sharedUInt32().SILFunctionArgument.closureCapture = isCapture;
     sharedUInt32().SILFunctionArgument.parameterPack = isParameterPack;
-    sharedUInt32().SILFunctionArgument.hasResultDependsOn = hasResultDependsOn;
   }
 
   // A special constructor, only intended for use in
@@ -426,17 +424,7 @@ public:
     sharedUInt32().SILFunctionArgument.lifetimeAnnotation = newValue;
   }
 
-  bool hasResultDependsOn() const {
-    return sharedUInt32().SILFunctionArgument.hasResultDependsOn;
-  }
-
-  void setHasResultDependsOn(bool flag = true) {
-    sharedUInt32().SILFunctionArgument.hasResultDependsOn = flag;
-  }
-
-  bool isTransferring() const {
-    return getKnownParameterInfo().hasOption(SILParameterInfo::Transferring);
-  }
+  bool isSending() const;
 
   Lifetime getLifetime() const {
     return getType()

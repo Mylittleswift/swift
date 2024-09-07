@@ -66,6 +66,9 @@ class ModuleFileSharedCore {
   /// The canonical name of the SDK the module was built with.
   StringRef SDKName;
 
+  /// Version string of the SDK against which the module was built.
+  StringRef SDKVersion;
+
   /// The name of the module interface this module was compiled from.
   ///
   /// Empty if this module didn't come from an interface file.
@@ -102,9 +105,6 @@ class ModuleFileSharedCore {
 
   /// \c true if this module was compiled with -enable-ossa-modules.
   bool RequiresOSSAModules;
-
-  /// \c true if this module was compiled with NoncopyableGenerics
-  bool RequiresNoncopyableGenerics;
 
   /// An array of module names that are allowed to import this one.
   ArrayRef<StringRef> AllowableClientNames;
@@ -391,6 +391,16 @@ private:
     /// Whether this module is built with C++ interoperability enabled.
     unsigned HasCxxInteroperability : 1;
 
+    /// Whether this module uses the platform default C++ stdlib, or an
+    /// overridden C++ stdlib.
+    unsigned CXXStdlibKind : 8;
+
+    /// Whether this module is built with -allow-non-resilient-access.
+    unsigned AllowNonResilientAccess : 1;
+
+    /// Whether this module is built with -package-cmo.
+    unsigned SerializePackageEnabled : 1;
+
     // Explicitly pad out to the next word boundary.
     unsigned : 3;
   } Bits = {};
@@ -413,7 +423,6 @@ private:
       std::unique_ptr<llvm::MemoryBuffer> moduleSourceInfoInputBuffer,
       bool isFramework,
       bool requiresOSSAModules,
-      bool requiresNoncopyableGenerics,
       StringRef requiredSDK,
       serialization::ValidationInfo &info, PathObfuscator &pathRecoverer);
 
@@ -551,14 +560,13 @@ public:
        std::unique_ptr<llvm::MemoryBuffer> moduleDocInputBuffer,
        std::unique_ptr<llvm::MemoryBuffer> moduleSourceInfoInputBuffer,
        bool isFramework, bool requiresOSSAModules,
-       bool requiresNoncopyableGenerics,
        StringRef requiredSDK, PathObfuscator &pathRecoverer,
        std::shared_ptr<const ModuleFileSharedCore> &theModule) {
     serialization::ValidationInfo info;
     auto *core = new ModuleFileSharedCore(
         std::move(moduleInputBuffer), std::move(moduleDocInputBuffer),
         std::move(moduleSourceInfoInputBuffer), isFramework,
-        requiresOSSAModules, requiresNoncopyableGenerics, requiredSDK, info,
+        requiresOSSAModules, requiredSDK, info,
         pathRecoverer);
     if (!moduleInterfacePath.empty()) {
       ArrayRef<char> path;
@@ -604,6 +612,29 @@ public:
     return Dependencies;
   }
 
+  /// Returns the list of modules this module depends on.
+  ArrayRef<LinkLibrary> getLinkLibraries() const {
+    return LinkLibraries;
+  }
+
+  /// Does this module correspond to a framework.
+  bool isFramework() const {
+    return Bits.IsFramework;
+  }
+
+  /// Does this module correspond to a static archive.
+  bool isStaticLibrary() const {
+    return Bits.IsStaticLibrary;
+  }
+
+  llvm::VersionTuple getUserModuleVersion() const {
+    return UserModuleVersion;
+  }
+
+  /// If the module-defining `.swiftinterface` file is an SDK-relative path,
+  /// resolve it to be absolute to the specified SDK.
+  std::string resolveModuleDefiningFilePath(const StringRef SDKPath) const;
+
   /// Returns \c true if this module file contains a section with incremental
   /// information.
   bool hasIncrementalInfo() const { return HasIncrementalInfo; }
@@ -619,8 +650,8 @@ public:
 
   /// How should \p dependency be loaded for a transitive import via \c this?
   ///
-  /// If \p debuggerMode, more transitive dependencies should try to be loaded
-  /// as they can be useful in debugging.
+  /// If \p importNonPublicDependencies, more transitive dependencies
+  /// should try to be loaded as they can be useful in debugging.
   ///
   /// If \p isPartialModule, transitive dependencies should be loaded as we're
   /// in merge-module mode.
@@ -632,12 +663,9 @@ public:
   /// import. Reports non-public dependencies as required for a testable
   /// client so it can access internal details, which in turn can reference
   /// those non-public dependencies.
-  ModuleLoadingBehavior
-  getTransitiveLoadingBehavior(const Dependency &dependency,
-                               bool debuggerMode,
-                               bool isPartialModule,
-                               StringRef packageName,
-                               bool forTestable) const;
+  ModuleLoadingBehavior getTransitiveLoadingBehavior(
+      const Dependency &dependency, bool importNonPublicDependencies,
+      bool isPartialModule, StringRef packageName, bool forTestable) const;
 };
 
 template <typename T, typename RawData>
@@ -648,8 +676,7 @@ void ModuleFileSharedCore::allocateBuffer(MutableArrayRef<T> &buffer,
     return;
 
   void *rawBuffer = Allocator.Allocate(sizeof(T) * rawData.size(), alignof(T));
-  buffer = llvm::makeMutableArrayRef(static_cast<T *>(rawBuffer),
-                                     rawData.size());
+  buffer = llvm::MutableArrayRef(static_cast<T *>(rawBuffer), rawData.size());
   std::uninitialized_copy(rawData.begin(), rawData.end(), buffer.begin());
 }
 

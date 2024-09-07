@@ -30,7 +30,7 @@ protected:
 
   llvm::Expected<std::unique_ptr<llvm::vfs::OutputFileImpl>>
   createFileImpl(llvm::StringRef ResolvedPath,
-                 llvm::Optional<llvm::vfs::OutputConfig> Config) override;
+                 std::optional<llvm::vfs::OutputConfig> Config) override;
 
   virtual llvm::Error storeImpl(llvm::StringRef Path, llvm::StringRef Bytes,
                                 unsigned InputIndex, file_types::ID OutputKind);
@@ -48,6 +48,10 @@ public:
 
   llvm::Error storeCachedDiagnostics(unsigned InputIndex,
                                      llvm::StringRef Bytes);
+
+  /// Store the MCCAS CASID \p ID as the object file output for the input
+  /// that corresponds to the \p OutputFilename
+  llvm::Error storeMCCASObjectID(StringRef OutputFilename, llvm::cas::CASID ID);
 
 private:
   class Implementation;

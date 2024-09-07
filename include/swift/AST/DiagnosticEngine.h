@@ -50,6 +50,7 @@ namespace swift {
   class ValueDecl;
   class SourceFile;
 
+  enum class CXXStdlibKind : uint8_t;
   enum class DescriptivePatternKind : uint8_t;
   enum class SelfAccessKind : uint8_t;
   enum class ReferenceOwnership : uint8_t;
@@ -87,6 +88,10 @@ namespace swift {
       typedef T type;
     };
   }
+
+  template <class... ArgTypes>
+  using DiagArgTuple =
+    std::tuple<typename detail::PassArgument<ArgTypes>::type...>;
 
   /// A family of wrapper types for compiler data types that forces its
   /// underlying data to be formatted with full qualification.
@@ -136,6 +141,7 @@ namespace swift {
     VersionTuple,
     LayoutConstraint,
     ActorIsolation,
+    IsolationSource,
     Diagnostic,
     ClangDecl
   };
@@ -171,6 +177,7 @@ namespace swift {
       llvm::VersionTuple VersionVal;
       LayoutConstraint LayoutConstraintVal;
       ActorIsolation ActorIsolationVal;
+      IsolationSource IsolationSourceVal;
       DiagnosticInfo *DiagnosticVal;
       const clang::NamedDecl *ClangDecl;
     };
@@ -277,6 +284,11 @@ namespace swift {
     DiagnosticArgument(ActorIsolation AI)
       : Kind(DiagnosticArgumentKind::ActorIsolation),
         ActorIsolationVal(AI) {
+    }
+
+    DiagnosticArgument(IsolationSource IS)
+      : Kind(DiagnosticArgumentKind::IsolationSource),
+        IsolationSourceVal(IS){
     }
 
     DiagnosticArgument(DiagnosticInfo *D)
@@ -398,6 +410,11 @@ namespace swift {
       return ActorIsolationVal;
     }
 
+    IsolationSource getAsIsolationSource() const {
+      assert(Kind == DiagnosticArgumentKind::IsolationSource);
+      return IsolationSourceVal;
+    }
+
     DiagnosticInfo *getAsDiagnostic() const {
       assert(Kind == DiagnosticArgumentKind::Diagnostic);
       return DiagnosticVal;
@@ -411,14 +428,29 @@ namespace swift {
 
   /// Describes the current behavior to take with a diagnostic.
   /// Ordered from most severe to least.
-  enum class DiagnosticBehavior : uint8_t {
-    Unspecified = 0,
-    Fatal,
-    Error,
-    Warning,
-    Remark,
-    Note,
-    Ignore,
+  struct DiagnosticBehavior {
+    enum Kind : uint8_t {
+      Unspecified = 0,
+      Fatal,
+      Error,
+      Warning,
+      Remark,
+      Note,
+      Ignore,
+    };
+
+    Kind kind;
+
+    DiagnosticBehavior() : kind(Unspecified) {}
+    DiagnosticBehavior(Kind kind) : kind(kind) {}
+    operator Kind() const { return kind; }
+
+    /// Move up the lattice returning the max value.
+    DiagnosticBehavior merge(DiagnosticBehavior other) const {
+      auto value = std::max(std::underlying_type<Kind>::type(*this),
+                            std::underlying_type<Kind>::type(other));
+      return Kind(value);
+    }
   };
 
   struct DiagnosticFormatOptions {
@@ -476,20 +508,28 @@ namespace swift {
     friend DiagnosticEngine;
     friend class InFlightDiagnostic;
 
+    Diagnostic(DiagID ID) : ID(ID) {}
+
   public:
     // All constructors are intentionally implicit.
     template<typename ...ArgTypes>
     Diagnostic(Diag<ArgTypes...> ID,
                typename detail::PassArgument<ArgTypes>::type... VArgs)
-      : ID(ID.ID) {
-      DiagnosticArgument DiagArgs[] = {
-        DiagnosticArgument(0), std::move(VArgs)... 
-      };
-      Args.append(DiagArgs + 1, DiagArgs + 1 + sizeof...(VArgs));
+        : Diagnostic(ID.ID) {
+      Args.reserve(sizeof...(ArgTypes));
+      gatherArgs(VArgs...);
     }
 
     /*implicit*/Diagnostic(DiagID ID, ArrayRef<DiagnosticArgument> Args)
       : ID(ID), Args(Args.begin(), Args.end()) {}
+
+    template <class... ArgTypes>
+    static Diagnostic fromTuple(Diag<ArgTypes...> id,
+                                const DiagArgTuple<ArgTypes...> &tuple) {
+      Diagnostic result(id.ID);
+      result.gatherArgsFromTuple<DiagArgTuple<ArgTypes...>, 0, ArgTypes...>(tuple);
+      return result;
+    }
     
     // Accessors.
     DiagID getID() const { return ID; }
@@ -528,6 +568,37 @@ namespace swift {
 
     void addChildNote(Diagnostic &&D);
     void insertChildNote(unsigned beforeIndex, Diagnostic &&D);
+
+  private:
+    // gatherArgs could just be `Args.emplace_back(args)...;` if C++
+    // allowed pack expansions in statement context.
+
+    // Base case.
+    void gatherArgs() {}
+
+    // Pull one off the pack.
+    template <class ArgType, class... RemainingArgTypes>
+    void gatherArgs(ArgType arg, RemainingArgTypes... remainingArgs) {
+      Args.emplace_back(arg);
+      gatherArgs(remainingArgs...);
+    }
+
+    // gatherArgsFromTuple could just be
+    // `Args.emplace_back(std::get<packIndexOf<ArgTypes>>(tuple))...;`
+    // in a better world.
+
+    // Base case.
+    template <class Tuple, size_t Index>
+    void gatherArgsFromTuple(const Tuple &tuple) {}
+
+    // Pull one off the pack.
+    template <class Tuple, size_t Index,
+              class ArgType, class... RemainingArgTypes>
+    void gatherArgsFromTuple(const Tuple &tuple) {
+      Args.emplace_back(std::move(std::get<Index>(tuple)));
+      gatherArgsFromTuple<Tuple, Index + 1, RemainingArgTypes...>(
+        std::move(tuple));
+    }
   };
 
   /// A diagnostic that has no input arguments, so it is trivially-destructable.
@@ -596,8 +667,8 @@ namespace swift {
 
     /// Conditionally limit the diagnostic behavior if the given \c limit
     /// is not \c None.
-    InFlightDiagnostic &limitBehaviorIf(
-        llvm::Optional<DiagnosticBehavior> limit) {
+    InFlightDiagnostic &
+    limitBehaviorIf(std::optional<DiagnosticBehavior> limit) {
       if (!limit) {
         return *this;
       }
@@ -684,6 +755,9 @@ namespace swift {
 
     static const char *fixItStringFor(const FixItID id);
 
+    /// Get the best location where an 'import' fixit might be offered.
+    SourceLoc getBestAddImportFixItLoc(const Decl *Member) const;
+
     /// Add a token-based replacement fix-it to the currently-active
     /// diagnostic.
     template <typename... ArgTypes>
@@ -739,6 +813,9 @@ namespace swift {
     InFlightDiagnostic &fixItInsert(SourceLoc L, StringRef Str) {
       return fixItReplaceChars(L, L, "%0", {Str});
     }
+
+    /// Add a fix-it suggesting to 'import' some module.
+    InFlightDiagnostic &fixItAddImport(StringRef ModuleName);
 
     /// Add an insertion fix-it to the currently-active diagnostic.  The
     /// text is inserted immediately *after* the token specified.
@@ -866,6 +943,73 @@ namespace swift {
     DiagnosticState &operator=(DiagnosticState &&) = default;
   };
 
+  /// A lightweight reference to a diagnostic that's been fully applied to
+  /// its arguments.  This allows a general routine (in the parser, say) to
+  /// be customized to emit an arbitrary diagnostic without needing to
+  /// eagerly construct a full Diagnostic.  Like ArrayRef and function_ref,
+  /// this stores a reference to what's likely to be a temporary, so it
+  /// should only be used as a function parameter.  If you need to persist
+  /// the diagnostic, you'll have to call createDiagnostic().
+  ///
+  /// You can initialize a DiagRef parameter in one of two ways:
+  /// - passing a Diag<> as the argument, e.g.
+  ///      diag::circular_reference
+  ///   or
+  /// - constructing it with a Diag and its arguments, e.g.
+  ///      {diag::circular_protocol_def, {proto->getName()}}
+  ///
+  /// It'd be nice to let people write `{diag::my_error, arg0, arg1}`
+  /// instead of `{diag::my_error, {arg0, arg1}}`, but we can't: the
+  /// temporary needs to be created in the calling context.
+  class DiagRef {
+    DiagID id;
+
+    /// If this is null, then id is a Diag<> and there are no arguments.
+    Diagnostic (*createFn)(DiagID id, const void *opaqueStorage);
+    const void *opaqueStorage;
+
+  public:
+    /// Construct a diagnostic from a diagnostic ID that's known to not take
+    /// arguments.
+    DiagRef(Diag<> id)
+      : id(id.ID), createFn(nullptr), opaqueStorage(nullptr) {}
+
+    /// Construct a diagnostic from a diagnostic ID and its arguments.
+    template <class... ArgTypes>
+    DiagRef(Diag<ArgTypes...> id, const DiagArgTuple<ArgTypes...> &tuple)
+      : id(id.ID),
+        createFn(&createFromTuple<ArgTypes...>),
+        opaqueStorage(&tuple) {}
+
+    // A specialization of the general constructor above for diagnostics
+    // with no arguments; this is a useful optimization when a DiagRef
+    // is constructed generically.
+    DiagRef(Diag<> id, const DiagArgTuple<> &tuple)
+      : DiagRef(id) {}
+
+    /// Return the diagnostic ID that this will emit.
+    DiagID getID() const {
+      return id;
+    }
+
+    /// Create a full Diagnostic.  It's safe to do this multiple times on
+    /// a single DiagRef.
+    Diagnostic createDiagnostic() {
+      if (!createFn) {
+        return Diagnostic(Diag<> {id});
+      } else {
+        return createFn(id, opaqueStorage);
+      }
+    }
+
+  private:
+    template <class... ArgTypes>
+    static Diagnostic createFromTuple(DiagID id, const void *opaqueStorage) {
+      auto tuple = static_cast<const DiagArgTuple<ArgTypes...> *>(opaqueStorage);
+      return Diagnostic::fromTuple(Diag<ArgTypes...> {id}, *tuple);
+    }
+  };
+
   /// Class responsible for formatting diagnostics and presenting them
   /// to the user.
   class DiagnosticEngine {
@@ -883,7 +1027,7 @@ namespace swift {
     DiagnosticState state;
 
     /// The currently active diagnostic, if there is one.
-    llvm::Optional<Diagnostic> ActiveDiagnostic;
+    std::optional<Diagnostic> ActiveDiagnostic;
 
     /// Diagnostics wrapped by ActiveDiagnostic, if any.
     SmallVector<DiagnosticInfo, 2> WrappedDiagnostics;
@@ -1113,6 +1257,12 @@ namespace swift {
       return diagnose(Loc, Diagnostic(ID, std::move(Args)...));
     }
 
+    /// Emit the given lazily-applied diagnostic at the specified
+    /// source location.
+    InFlightDiagnostic diagnose(SourceLoc loc, DiagRef diag) {
+      return diagnose(loc, diag.createDiagnostic());
+    }
+
     /// Delete an API that may lead clients to avoid specifying source location.
     template<typename ...ArgTypes>
     InFlightDiagnostic
@@ -1233,7 +1383,7 @@ namespace swift {
     Diagnostic &getActiveDiagnostic() { return *ActiveDiagnostic; }
 
     /// Generate DiagnosticInfo for a Diagnostic to be passed to consumers.
-    llvm::Optional<DiagnosticInfo>
+    std::optional<DiagnosticInfo>
     diagnosticInfoForDiagnostic(const Diagnostic &diagnostic);
 
     /// Send \c diag to all diagnostic consumers.
@@ -1274,6 +1424,11 @@ namespace swift {
     void resetBufferIndirectlyCausingDiagnostic();
     SourceLoc getDefaultDiagnosticLoc() const {
       return bufferIndirectlyCausingDiagnostic;
+    }
+    SourceLoc getBestAddImportFixItLoc(const Decl *Member,
+                                       SourceFile *sourceFile) const;
+    SourceLoc getBestAddImportFixItLoc(const Decl *Member) const {
+      return getBestAddImportFixItLoc(Member, nullptr);
     }
   };
 
@@ -1559,10 +1714,6 @@ namespace swift {
     /// The unescaped message to display to the user.
     const StringRef Message;
   };
-
-/// Retrieve the macro name for a generated source info that represents
-/// a macro expansion.
-DeclName getGeneratedSourceInfoMacroName(const GeneratedSourceInfo &info);
 
 } // end namespace swift
 

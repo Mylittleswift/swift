@@ -15,6 +15,8 @@
 
 #include "OutputLanguageMode.h"
 
+#include "swift/AST/Decl.h"
+#include "swift/AST/Module.h"
 #include "swift/AST/Type.h"
 // for OptionalTypeKind
 #include "swift/ClangImporter/ClangImporter.h"
@@ -26,6 +28,7 @@ namespace clang {
 
 namespace swift {
 
+class AccessorDecl;
 class PrimitiveTypeMapping;
 class ValueDecl;
 class SwiftToClangInteropContext;
@@ -41,6 +44,7 @@ struct CxxDeclEmissionScope {
   /// lexical scope.
   llvm::StringMap<llvm::SmallVector<const AbstractFunctionDecl *, 2>>
       emittedFunctionOverloads;
+  llvm::StringMap<const AccessorDecl *> emittedAccessorMethodNames;
 };
 
 /// Responsible for printing a Swift Decl or Type in Objective-C, to be
@@ -113,6 +117,9 @@ public:
 
   void print(const Decl *D);
   void print(Type ty);
+
+  /// Prints the name of the type including generic arguments.
+  void printTypeName(raw_ostream &os, Type ty, const ModuleDecl *moduleContext);
 
   void printAvailability(raw_ostream &os, const Decl *D);
 

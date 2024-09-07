@@ -47,7 +47,7 @@ public:
   void completeReturnStmt(CodeCompletionExpr *E) override;
   void completeThenStmt(CodeCompletionExpr *E) override;
   void completeYieldStmt(CodeCompletionExpr *E,
-                         llvm::Optional<unsigned> yieldIndex) override;
+                         std::optional<unsigned> yieldIndex) override;
 
   void completeUnresolvedMember(CodeCompletionExpr *E,
                                 SourceLoc DotLoc) override;
@@ -78,7 +78,7 @@ void ContextInfoCallbacks::completeThenStmt(CodeCompletionExpr *E) {
   ParsedExpr = E;
 }
 void ContextInfoCallbacks::completeYieldStmt(
-    CodeCompletionExpr *E, llvm::Optional<unsigned> yieldIndex) {
+    CodeCompletionExpr *E, std::optional<unsigned> yieldIndex) {
   CurDeclContext = P.CurDeclContext;
   ParsedExpr = E;
 }
@@ -158,7 +158,6 @@ void ContextInfoCallbacks::getImplicitMembers(
 
   class LocalConsumer : public VisibleDeclConsumer {
     DeclContext *DC;
-    ModuleDecl *CurModule;
     Type T;
     SmallVectorImpl<ValueDecl *> &Result;
 
@@ -174,7 +173,7 @@ void ContextInfoCallbacks::getImplicitMembers(
       // Static properties which is convertible to 'Self'.
       if (auto *Var = dyn_cast<VarDecl>(VD)) {
         if (Var->isStatic()) {
-          auto declTy = T->getTypeOfMember(CurModule, Var);
+          auto declTy = T->getTypeOfMember(Var);
           if (declTy->isEqual(T) ||
               swift::isConvertibleTo(declTy, T, /*openArchetypes=*/true, *DC))
             return true;
@@ -186,7 +185,7 @@ void ContextInfoCallbacks::getImplicitMembers(
 
   public:
     LocalConsumer(DeclContext *DC, Type T, SmallVectorImpl<ValueDecl *> &Result)
-        : DC(DC), CurModule(DC->getParentModule()), T(T), Result(Result) {}
+        : DC(DC), T(T), Result(Result) {}
 
     void foundDecl(ValueDecl *VD, DeclVisibilityKind Reason,
                    DynamicLookupInfo) override {

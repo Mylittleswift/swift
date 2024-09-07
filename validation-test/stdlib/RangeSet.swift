@@ -4,7 +4,7 @@
 import StdlibUnittest
 import StdlibCollectionUnittest
 
-@available(SwiftStdlib 5.11, *)
+@available(SwiftStdlib 6.0, *)
 extension RangeSet: ExpressibleByArrayLiteral {
   public init(arrayLiteral elements: Range<Bound>...) {
     self.init(elements)
@@ -21,7 +21,7 @@ extension Collection {
 
 let RangeSetTests = TestSuite("RangeSet")
 
-if #available(SwiftStdlib 5.11, *) {
+if #available(SwiftStdlib 6.0, *) {
   let parent = -200..<200
   let source: RangeSet = [1..<5, 8..<10, 20..<22, 27..<29]
 
@@ -41,6 +41,47 @@ if #available(SwiftStdlib 5.11, *) {
       }
     }
     return set
+  }
+  
+  RangeSetTests.test("initialization") {
+    // Test coalescing and elimination of empty ranges
+    do {
+      let empty = RangeSet(Array(repeating: 0..<0, count: 100))
+      expectTrue(empty.isEmpty)
+
+      let repeated = RangeSet(Array(repeating: 0..<3, count: 100))
+      expectEqual(repeated, [0..<3])
+      
+      let singleAfterEmpty = RangeSet(Array(repeating: 0..<0, count: 100) + [0..<3])
+      expectEqual(singleAfterEmpty, [0..<3])
+
+      let contiguousRanges = (0..<100).map { $0 ..< ($0 + 1) }
+      expectEqual(RangeSet(contiguousRanges), [0..<100])
+      expectEqual(RangeSet(contiguousRanges.shuffled()), [0..<100])
+    }
+    
+    // The `buildRandomRangeSet()` function builds a range set via additions
+    // and removals. This function creates an array of potentially empty or
+    // overlapping ranges that can be used to initialize a range set.
+    func randomRanges() -> [Range<Int>] {
+      (0..<100).map { _ in
+        let low = Int.random(in: 0...100)
+        let count = Int.random(in: 0...20)
+        return low ..< (low + count)
+      }
+    }
+    
+    for _ in 0..<1000 {
+      let ranges = randomRanges()
+      let set = RangeSet(ranges)
+      
+      // Manually construct a range set for comparison
+      var comparison = RangeSet<Int>()
+      for r in ranges {
+        comparison.insert(contentsOf: r)
+      }
+      expectEqual(set, comparison)
+    }
   }
 
   RangeSetTests.test("contains") {
@@ -174,6 +215,55 @@ if #available(SwiftStdlib 5.11, *) {
     }
   }
 
+  RangeSetTests.test("union") {
+    func unionViaSet(
+      _ s1: RangeSet<Int>,
+      _ s2: RangeSet<Int>
+    ) -> RangeSet<Int> {
+      let set1 = Set(parent.indices[s1])
+      let set2 = Set(parent.indices[s2])
+      return RangeSet(set1.union(set2), within: parent)
+    }
+
+    func testUnion(
+      _ set1: RangeSet<Int>,
+      _ set2: RangeSet<Int>,
+      expect union: RangeSet<Int>
+    ) {
+      expectEqual(set1.union(set2), union)
+      expectEqual(set2.union(set1), union)
+
+      var set3 = set1
+      set3.formUnion(set2)
+      expectEqual(set3, union)
+
+      set3 = set2
+      set3.formUnion(set1)
+      expectEqual(set3, union)
+    }
+    
+    // Simple tests
+    testUnion([0..<5, 9..<14],
+              [1..<3, 4..<6, 8..<12],
+              expect: [0..<6, 8..<14])
+    
+    testUnion([10..<20, 50..<60],
+              [15..<55, 58..<65],
+              expect: [10..<65])
+
+    // Test with upper bound / lower bound equality
+    testUnion([10..<20, 30..<40],
+              [15..<30, 40..<50],
+              expect: [10..<50])
+    
+    for _ in 0..<100 {
+      let set1 = buildRandomRangeSet()
+      let set2 = buildRandomRangeSet()
+      testUnion(set1, set2,
+                expect: unionViaSet(set1, set2))
+    }
+  }
+  
   RangeSetTests.test("intersection") {
     func intersectionViaSet(
       _ s1: RangeSet<Int>,

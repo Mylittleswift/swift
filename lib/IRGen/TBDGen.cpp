@@ -26,6 +26,7 @@
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/SynthesizedFileUnit.h"
 #include "swift/AST/TBDGenRequests.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/SourceManager.h"
@@ -100,24 +101,23 @@ getAllMovedPlatformVersions(Decl *D) {
   return Results;
 }
 
-static StringRef getLinkerPlatformName(uint8_t Id) {
+static StringRef getLinkerPlatformName(LinkerPlatformId Id) {
   switch (Id) {
-#define LD_PLATFORM(Name, Id) case Id: return #Name;
+#define LD_PLATFORM(Name, Id) case LinkerPlatformId::Name: return #Name;
 #include "ldPlatformKinds.def"
-  default:
-    llvm_unreachable("unrecognized platform id");
   }
+  llvm_unreachable("unrecognized platform id");
 }
 
-static llvm::Optional<uint8_t> getLinkerPlatformId(StringRef Platform) {
-  return llvm::StringSwitch<llvm::Optional<uint8_t>>(Platform)
-#define LD_PLATFORM(Name, Id) .Case(#Name, Id)
+static std::optional<LinkerPlatformId> getLinkerPlatformId(StringRef Platform) {
+  return llvm::StringSwitch<std::optional<LinkerPlatformId>>(Platform)
+#define LD_PLATFORM(Name, Id) .Case(#Name, LinkerPlatformId::Name)
 #include "ldPlatformKinds.def"
-      .Default(llvm::None);
+      .Default(std::nullopt);
 }
 
 StringRef InstallNameStore::getInstallName(LinkerPlatformId Id) const {
-  auto It = PlatformInstallName.find((uint8_t)Id);
+  auto It = PlatformInstallName.find(Id);
   if (It == PlatformInstallName.end())
     return InstallName;
   else
@@ -129,8 +129,9 @@ static std::string getScalaNodeText(Node *N) {
   return cast<ScalarNode>(N)->getValue(Buffer).str();
 }
 
-static std::set<int8_t> getSequenceNodePlatformList(ASTContext &Ctx, Node *N) {
-  std::set<int8_t> Results;
+static std::set<LinkerPlatformId> getSequenceNodePlatformList(ASTContext &Ctx,
+                                                              Node *N) {
+  std::set<LinkerPlatformId> Results;
   for (auto &E: *cast<SequenceNode>(N)) {
     auto Platform = getScalaNodeText(&E);
     auto Id = getLinkerPlatformId(Platform);
@@ -158,7 +159,7 @@ parseEntry(ASTContext &Ctx,
       auto *MN = cast<MappingNode>(&*It);
       std::string ModuleName;
       std::string InstallName;
-      llvm::Optional<std::set<int8_t>> Platforms;
+      std::optional<std::set<LinkerPlatformId>> Platforms;
       for (auto &Pair: *MN) {
         auto Key = getScalaNodeText(Pair.getKey());
         auto* Value = Pair.getValue();
@@ -233,7 +234,12 @@ TBDGenVisitor::parsePreviousModuleInstallNameMap() {
 }
 
 static LinkerPlatformId
-getLinkerPlatformId(OriginallyDefinedInAttr::ActiveVersion Ver) {
+getLinkerPlatformId(OriginallyDefinedInAttr::ActiveVersion Ver,
+                    ASTContext &Ctx) {
+  auto target =
+      Ver.ForTargetVariant ? Ctx.LangOpts.TargetVariant : Ctx.LangOpts.Target;
+  bool isSimulator = target ? target->isSimulatorEnvironment() : false;
+
   switch(Ver.Platform) {
   case swift::PlatformKind::none:
     llvm_unreachable("cannot find platform kind");
@@ -243,40 +249,45 @@ getLinkerPlatformId(OriginallyDefinedInAttr::ActiveVersion Ver) {
     llvm_unreachable("not used for this platform");
   case swift::PlatformKind::iOS:
   case swift::PlatformKind::iOSApplicationExtension:
-    return Ver.IsSimulator ? LinkerPlatformId::iOS_sim:
-                             LinkerPlatformId::iOS;
+    if (target && target->isMacCatalystEnvironment())
+      return LinkerPlatformId::macCatalyst;
+    return isSimulator ? LinkerPlatformId::iOS_sim : LinkerPlatformId::iOS;
   case swift::PlatformKind::tvOS:
   case swift::PlatformKind::tvOSApplicationExtension:
-    return Ver.IsSimulator ? LinkerPlatformId::tvOS_sim:
-                             LinkerPlatformId::tvOS;
+    return isSimulator ? LinkerPlatformId::tvOS_sim : LinkerPlatformId::tvOS;
   case swift::PlatformKind::watchOS:
   case swift::PlatformKind::watchOSApplicationExtension:
-    return Ver.IsSimulator ? LinkerPlatformId::watchOS_sim:
-                             LinkerPlatformId::watchOS;
+    return isSimulator ? LinkerPlatformId::watchOS_sim
+                       : LinkerPlatformId::watchOS;
   case swift::PlatformKind::macOS:
   case swift::PlatformKind::macOSApplicationExtension:
     return LinkerPlatformId::macOS;
   case swift::PlatformKind::macCatalyst:
   case swift::PlatformKind::macCatalystApplicationExtension:
     return LinkerPlatformId::macCatalyst;
+  case swift::PlatformKind::visionOS:
+  case swift::PlatformKind::visionOSApplicationExtension:
+    return isSimulator ? LinkerPlatformId::xrOS_sim:
+                         LinkerPlatformId::xrOS;
   }
   llvm_unreachable("invalid platform kind");
 }
 
 static StringRef
-getLinkerPlatformName(OriginallyDefinedInAttr::ActiveVersion Ver) {
-  return getLinkerPlatformName((uint8_t)getLinkerPlatformId(Ver));
+getLinkerPlatformName(OriginallyDefinedInAttr::ActiveVersion Ver,
+                      ASTContext &Ctx) {
+  return getLinkerPlatformName(getLinkerPlatformId(Ver, Ctx));
 }
 
 /// Find the most relevant introducing version of the decl stack we have visited
 /// so far.
-static llvm::Optional<llvm::VersionTuple>
+static std::optional<llvm::VersionTuple>
 getInnermostIntroVersion(ArrayRef<Decl *> DeclStack, PlatformKind Platform) {
   for (auto It = DeclStack.rbegin(); It != DeclStack.rend(); ++ It) {
     if (auto Result = (*It)->getIntroducedOSVersion(Platform))
       return Result;
   }
-  return llvm::None;
+  return std::nullopt;
 }
 
 /// Using the introducing version of a symbol as the start version to redirect
@@ -313,17 +324,17 @@ void TBDGenVisitor::addLinkerDirectiveSymbolsLdPrevious(
     // so we don't need the linker directives.
     if (*IntroVer >= Ver.Version)
       continue;
-    auto PlatformNumber = getLinkerPlatformId(Ver);
+    auto PlatformNumber = getLinkerPlatformId(Ver, Ctx);
     auto It = previousInstallNameMap->find(Ver.ModuleName.str());
     if (It == previousInstallNameMap->end()) {
       Ctx.Diags.diagnose(SourceLoc(), diag::cannot_find_install_name,
-                         Ver.ModuleName, getLinkerPlatformName(Ver));
+                         Ver.ModuleName, getLinkerPlatformName(Ver, Ctx));
       continue;
     }
     auto InstallName = It->second.getInstallName(PlatformNumber);
     if (InstallName.empty()) {
       Ctx.Diags.diagnose(SourceLoc(), diag::cannot_find_install_name,
-                         Ver.ModuleName, getLinkerPlatformName(Ver));
+                         Ver.ModuleName, getLinkerPlatformName(Ver, Ctx));
       continue;
     }
     llvm::SmallString<64> Buffer;
@@ -333,8 +344,8 @@ void TBDGenVisitor::addLinkerDirectiveSymbolsLdPrevious(
     OS << "$ld$previous$";
     OS << InstallName << "$";
     OS << ComptibleVersion << "$";
-    OS << std::to_string((uint8_t)PlatformNumber) << "$";
-    static auto getMinor = [](llvm::Optional<unsigned> Minor) {
+    OS << std::to_string(static_cast<uint8_t>(PlatformNumber)) << "$";
+    static auto getMinor = [](std::optional<unsigned> Minor) {
       return Minor.has_value() ? *Minor : 0;
     };
     auto verStart = calculateLdPreviousVersionStart(Ctx, *IntroVer);
@@ -505,6 +516,7 @@ void TBDGenVisitor::visit(const TBDGenDescriptor &desc) {
   opts.PublicOrPackageSymbolsOnly = Opts.PublicOrPackageSymbolsOnly;
   opts.WitnessMethodElimination = Opts.WitnessMethodElimination;
   opts.VirtualFunctionElimination = Opts.VirtualFunctionElimination;
+  opts.FragileResilientProtocols = Opts.FragileResilientProtocols;
 
   auto silVisitorCtx = SILSymbolVisitorContext(SwiftModule, opts);
   auto visitorCtx = IRSymbolVisitorContext{UniversalLinkInfo, silVisitorCtx};
@@ -559,18 +571,18 @@ enum DylibVersionKind_t: unsigned {
 /// If an individual component is greater than the highest number that can be
 /// represented in its alloted space, it will be truncated to the maximum value
 /// that fits in the alloted space, which matches the behavior of the linker.
-static llvm::Optional<llvm::MachO::PackedVersion>
+static std::optional<llvm::MachO::PackedVersion>
 parsePackedVersion(DylibVersionKind_t kind, StringRef versionString,
                    ASTContext &ctx) {
   if (versionString.empty())
-    return llvm::None;
+    return std::nullopt;
 
   llvm::MachO::PackedVersion version;
   auto result = version.parse64(versionString);
   if (!result.first) {
     ctx.Diags.diagnose(SourceLoc(), diag::tbd_err_invalid_version,
                        (unsigned)kind, versionString);
-    return llvm::None;
+    return std::nullopt;
   }
   if (result.second) {
     ctx.Diags.diagnose(SourceLoc(), diag::tbd_warn_truncating_version,
@@ -651,13 +663,13 @@ PublicSymbolsRequest::evaluate(Evaluator &evaluator,
 
 std::vector<std::string> swift::getPublicSymbols(TBDGenDescriptor desc) {
   auto &evaluator = desc.getParentModule()->getASTContext().evaluator;
-  return llvm::cantFail(evaluator(PublicSymbolsRequest{desc}));
+  return evaluateOrFatal(evaluator, PublicSymbolsRequest{desc});
 }
 void swift::writeTBDFile(ModuleDecl *M, llvm::raw_ostream &os,
                          const TBDGenOptions &opts) {
   auto &evaluator = M->getASTContext().evaluator;
   auto desc = TBDGenDescriptor::forModule(M, opts);
-  auto file = llvm::cantFail(evaluator(GenerateTBDRequest{desc}));
+  auto file = evaluateOrFatal(evaluator, GenerateTBDRequest{desc});
   llvm::cantFail(llvm::MachO::TextAPIWriter::writeToStream(os, file),
                  "TBD writing should be error-free");
 }
@@ -755,22 +767,27 @@ private:
   llvm::DenseMap<CategoryNameKey, unsigned> CategoryCounts;
 
   apigen::APIAvailability getAvailability(const Decl *decl) {
-    bool unavailable = false;
+    std::optional<bool> unavailable;
     std::string introduced, obsoleted;
+    bool hasFallbackUnavailability = false;
     auto platform = targetPlatform(module->getASTContext().LangOpts);
     for (auto *attr : decl->getAttrs()) {
       if (auto *ava = dyn_cast<AvailableAttr>(attr)) {
-        if (ava->isUnconditionallyUnavailable())
-          unavailable = true;
-        if (ava->Platform == platform) {
-          if (ava->Introduced)
-            introduced = ava->Introduced->getAsString();
-          if (ava->Obsoleted)
-            obsoleted = ava->Obsoleted->getAsString();
+        if (ava->Platform == PlatformKind::none) {
+          hasFallbackUnavailability = ava->isUnconditionallyUnavailable();
+          continue;
         }
+        if (ava->Platform != platform)
+          continue;
+        unavailable = ava->isUnconditionallyUnavailable();
+        if (ava->Introduced)
+          introduced = ava->Introduced->getAsString();
+        if (ava->Obsoleted)
+          obsoleted = ava->Obsoleted->getAsString();
       }
     }
-    return {introduced, obsoleted, unavailable};
+    return {introduced, obsoleted,
+            unavailable.value_or(hasFallbackUnavailability)};
   }
 
   StringRef getSelectorName(SILDeclRef method, SmallString<128> &buffer) {
@@ -813,6 +830,10 @@ private:
   void buildCategoryName(const ExtensionDecl *ext, const ClassDecl *cls,
                          SmallVectorImpl<char> &s) {
     llvm::raw_svector_ostream os(s);
+    if (!ext->getObjCCategoryName().empty()) {
+      os << ext->getObjCCategoryName();
+      return;
+    }
     ModuleDecl *module = ext->getParentModule();
     os << module->getName();
     unsigned categoryCount = CategoryCounts[{cls, module}]++;
@@ -870,7 +891,7 @@ void swift::writeAPIJSONFile(ModuleDecl *M, llvm::raw_ostream &os,
   TBDGenOptions opts;
   auto &evaluator = M->getASTContext().evaluator;
   auto desc = TBDGenDescriptor::forModule(M, opts);
-  auto api = llvm::cantFail(evaluator(APIGenRequest{desc}));
+  auto api = evaluateOrFatal(evaluator, APIGenRequest{desc});
   api.writeAPIJSONFile(os, PrettyPrint);
 }
 

@@ -19,6 +19,7 @@
 #include "swift/AST/DeclContext.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/SourceFile.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Parse/Parser.h"
 #include "swift/Subsystems.h"
@@ -62,7 +63,7 @@ ParseMembersRequest::evaluate(Evaluator &evaluator,
       }
     }
 
-    llvm::Optional<Fingerprint> fp = llvm::None;
+    std::optional<Fingerprint> fp = std::nullopt;
     if (!idc->getDecl()->isImplicit() && fileUnit) {
       fp = fileUnit->loadFingerprint(idc);
     }
@@ -79,7 +80,7 @@ ParseMembersRequest::evaluate(Evaluator &evaluator,
                                                  declsAndHash.first};
   return FingerprintAndMembers{
       fingerprintAndMembers.fingerprint,
-      ctx.AllocateCopy(llvm::makeArrayRef(fingerprintAndMembers.members))};
+      ctx.AllocateCopy(llvm::ArrayRef(fingerprintAndMembers.members))};
 }
 
 BodyAndFingerprint
@@ -183,7 +184,8 @@ SourceFileParsingResult ParseSourceFileRequest::evaluate(Evaluator &evaluator,
     case GeneratedSourceInfo::ExpressionMacroExpansion:
     case GeneratedSourceInfo::PreambleMacroExpansion:
     case GeneratedSourceInfo::ReplacedFunctionBody:
-    case GeneratedSourceInfo::PrettyPrinted: {
+    case GeneratedSourceInfo::PrettyPrinted:
+    case GeneratedSourceInfo::DefaultArgument: {
       parser.parseTopLevelItems(items);
       break;
     }
@@ -241,7 +243,7 @@ SourceFileParsingResult ParseSourceFileRequest::evaluate(Evaluator &evaluator,
     parser.parseTopLevelItems(items);
   }
 
-  llvm::Optional<ArrayRef<Token>> tokensRef;
+  std::optional<ArrayRef<Token>> tokensRef;
   if (auto tokens = parser.takeTokenReceiver()->finalize())
     tokensRef = ctx.AllocateCopy(*tokens);
 
@@ -254,12 +256,12 @@ evaluator::DependencySource ParseSourceFileRequest::readDependencySource(
   return std::get<0>(getStorage());
 }
 
-llvm::Optional<SourceFileParsingResult>
+std::optional<SourceFileParsingResult>
 ParseSourceFileRequest::getCachedResult() const {
   auto *SF = std::get<0>(getStorage());
   auto items = SF->getCachedTopLevelItems();
   if (!items)
-    return llvm::None;
+    return std::nullopt;
 
   return SourceFileParsingResult{*items, SF->AllCollectedTokens,
                                  SF->InterfaceHasher};

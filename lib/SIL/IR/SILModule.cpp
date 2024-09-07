@@ -18,6 +18,7 @@
 #include "swift/AST/Decl.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/ProtocolConformance.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/ClangImporter/ClangModule.h"
 #include "swift/SIL/FormalLinkage.h"
 #include "swift/SIL/Notifications.h"
@@ -126,8 +127,6 @@ SILModule::SILModule(llvm::PointerUnion<FileUnit *, ModuleDecl *> context,
 
 SILModule::~SILModule() {
 #ifndef NDEBUG
-  checkForLeaks();
-
   NumSlabsAllocated += numAllocatedSlabs;
   assert(numAllocatedSlabs == freeSlabs.size() && "leaking slabs in SILModule");
 #endif
@@ -162,65 +161,6 @@ SILModule::~SILModule() {
     F.eraseAllBlocks();
   }
   flushDeletedInsts();
-}
-
-void SILModule::checkForLeaks() const {
-
-  /// Leak checking is not thread safe, because the instruction counters are
-  /// global non-atomic variables. Leak checking can only be done in case there
-  /// is a single SILModule in a single thread.
-  if (!getOptions().checkSILModuleLeaks)
-    return;
-
-  int instsInModule = scheduledForDeletion.size();
-
-  for (const SILFunction &F : *this) {
-    const SILFunction *sn = &F;
-    do {
-      for (const SILBasicBlock &block : *sn) {
-        instsInModule += std::distance(block.begin(), block.end());
-      }
-    } while ((sn = sn->snapshots) != nullptr);
-  }
-  for (const SILFunction &F : zombieFunctions) {
-    const SILFunction *sn = &F;
-    do {
-      for (const SILBasicBlock &block : F) {
-        instsInModule += std::distance(block.begin(), block.end());
-      }
-    } while ((sn = sn->snapshots) != nullptr);
-  }
-  for (const SILGlobalVariable &global : getSILGlobals()) {
-      instsInModule += std::distance(global.StaticInitializerBlock.begin(),
-                                     global.StaticInitializerBlock.end());
-  }
-  
-  int numAllocated = SILInstruction::getNumCreatedInstructions() -
-                       SILInstruction::getNumDeletedInstructions();
-                       
-  if (numAllocated != instsInModule) {
-    llvm::errs() << "Leaking instructions!\n";
-    llvm::errs() << "Allocated instructions: " << numAllocated << '\n';
-    llvm::errs() << "Instructions in module: " << instsInModule << '\n';
-    llvm_unreachable("leaking instructions");
-  }
-  
-  assert(PlaceholderValue::getNumPlaceholderValuesAlive() == 0 &&
-         "leaking placeholders");
-}
-
-void SILModule::checkForLeaksAfterDestruction() {
-// Disabled in release (non-assert) builds because this check fails in rare
-// cases in lldb, causing crashes. rdar://70826934
-#ifndef NDEBUG
-  int numAllocated = SILInstruction::getNumCreatedInstructions() -
-                     SILInstruction::getNumDeletedInstructions();
-
-  if (numAllocated != 0) {
-    llvm::errs() << "Leaking " << numAllocated << " instructions!\n";
-    llvm_unreachable("leaking instructions");
-  }
-#endif
 }
 
 std::unique_ptr<SILModule> SILModule::createEmptyModule(
@@ -268,9 +208,9 @@ void *SILModule::allocateInst(unsigned Size, unsigned Align) const {
 
 void SILModule::willDeleteInstruction(SILInstruction *I) {
   // Update RootLocalArchetypeDefs.
-  I->forEachDefinedLocalArchetype([&](CanLocalArchetypeType archeTy,
-                                      SILValue dependency) {
-    LocalArchetypeKey key = {archeTy, I->getFunction()};
+  I->forEachDefinedLocalEnvironment([&](GenericEnvironment *genericEnv,
+                                        SILValue dependency) {
+    LocalArchetypeKey key = {genericEnv, I->getFunction()};
     // In case `willDeleteInstruction` is called twice for the
     // same instruction, we need to check if the archetype is really
     // still in the map for this instruction.
@@ -376,23 +316,23 @@ const BuiltinInfo &SILModule::getBuiltinInfo(Identifier ID) {
 
   // Several operation names have suffixes and don't match the name from
   // Builtins.def, so handle those first.
-  if (OperationName.startswith("fence_"))
+  if (OperationName.starts_with("fence_"))
     Info.ID = BuiltinValueKind::Fence;
-  else if (OperationName.startswith("ifdef_"))
+  else if (OperationName.starts_with("ifdef_"))
     Info.ID = BuiltinValueKind::Ifdef;
-  else if (OperationName.startswith("cmpxchg_"))
+  else if (OperationName.starts_with("cmpxchg_"))
     Info.ID = BuiltinValueKind::CmpXChg;
-  else if (OperationName.startswith("atomicrmw_"))
+  else if (OperationName.starts_with("atomicrmw_"))
     Info.ID = BuiltinValueKind::AtomicRMW;
-  else if (OperationName.startswith("atomicload_"))
+  else if (OperationName.starts_with("atomicload_"))
     Info.ID = BuiltinValueKind::AtomicLoad;
-  else if (OperationName.startswith("atomicstore_"))
+  else if (OperationName.starts_with("atomicstore_"))
     Info.ID = BuiltinValueKind::AtomicStore;
-  else if (OperationName.startswith("allocWithTailElems_"))
+  else if (OperationName.starts_with("allocWithTailElems_"))
     Info.ID = BuiltinValueKind::AllocWithTailElems;
-  else if (OperationName.startswith("applyDerivative_"))
+  else if (OperationName.starts_with("applyDerivative_"))
     Info.ID = BuiltinValueKind::ApplyDerivative;
-  else if (OperationName.startswith("applyTranspose_"))
+  else if (OperationName.starts_with("applyTranspose_"))
     Info.ID = BuiltinValueKind::ApplyTranspose;
   else
     Info.ID = llvm::StringSwitch<BuiltinValueKind>(OperationName)
@@ -421,7 +361,7 @@ bool SILModule::loadFunction(SILFunction *F, LinkingMode LinkMode) {
 }
 
 SILFunction *SILModule::loadFunction(StringRef name, LinkingMode LinkMode,
-                                     llvm::Optional<SILLinkage> linkage) {
+                                     std::optional<SILLinkage> linkage) {
   SILFunction *func = lookUpFunction(name);
   if (!func)
     func = getSILLoader()->lookupSILFunction(name, linkage);
@@ -734,17 +674,45 @@ void SILModule::registerDeserializationNotificationHandler(
   deserializationNotificationHandlers.add(std::move(handler));
 }
 
-SILValue SILModule::getRootLocalArchetypeDef(CanLocalArchetypeType archetype,
-                                             SILFunction *inFunction) {
-  assert(archetype->isRoot());
-
-  SILValue &def = RootLocalArchetypeDefs[{archetype, inFunction}];
+SILValue SILModule::getLocalGenericEnvironmentDef(GenericEnvironment *genericEnv,
+                                                  SILFunction *inFunction) {
+  SILValue &def = RootLocalArchetypeDefs[{genericEnv, inFunction}];
   if (!def) {
     numUnresolvedLocalArchetypes++;
-    def = ::new PlaceholderValue(SILType::getPrimitiveAddressType(archetype));
+    def = ::new PlaceholderValue(inFunction,
+                                 SILType::getPrimitiveAddressType(
+                                    inFunction->getASTContext().TheEmptyTupleType));
   }
 
   return def;
+}
+
+SILValue SILModule::getRootLocalArchetypeDef(CanLocalArchetypeType archetype,
+                                             SILFunction *inFunction) {
+  return getLocalGenericEnvironmentDef(archetype->getGenericEnvironment(),
+                                       inFunction);
+}
+
+void SILModule::reclaimUnresolvedLocalArchetypeDefinitions() {
+  llvm::DenseMap<LocalArchetypeKey, SILValue> newLocalArchetypeDefs;
+
+  for (auto pair : RootLocalArchetypeDefs) {
+    if (auto *placeholder = dyn_cast<PlaceholderValue>(pair.second)) {
+      // If a placeholder has no uses, the instruction that introduced it
+      // was deleted before the local archetype was resolved. Reclaim the
+      // placeholder so that we don't complain.
+      if (placeholder->use_empty()) {
+        assert(numUnresolvedLocalArchetypes > 0);
+        --numUnresolvedLocalArchetypes;
+        ::delete placeholder;
+        continue;
+      }
+    }
+
+    newLocalArchetypeDefs.insert(pair);
+  }
+
+  std::swap(newLocalArchetypeDefs, RootLocalArchetypeDefs);
 }
 
 bool SILModule::hasUnresolvedLocalArchetypeDefinitions() {
@@ -794,13 +762,13 @@ unsigned SILModule::getCaseIndex(EnumElementDecl *enumElement) {
 }
 
 void SILModule::notifyAddedInstruction(SILInstruction *inst) {
-  inst->forEachDefinedLocalArchetype([&](CanLocalArchetypeType archeTy,
-                                         SILValue dependency) {
-    SILValue &val = RootLocalArchetypeDefs[{archeTy, inst->getFunction()}];
+  inst->forEachDefinedLocalEnvironment([&](GenericEnvironment *genericEnv,
+                                           SILValue dependency) {
+    SILValue &val = RootLocalArchetypeDefs[{genericEnv, inst->getFunction()}];
     if (val) {
       if (!isa<PlaceholderValue>(val)) {
         // Print a useful error message (and not just abort with an assert).
-        llvm::errs() << "re-definition of root local archetype in function "
+        llvm::errs() << "re-definition of local environment in function "
                      << inst->getFunction()->getName() << ":\n";
         inst->print(llvm::errs());
         llvm::errs() << "previously defined in function "
@@ -808,11 +776,13 @@ void SILModule::notifyAddedInstruction(SILInstruction *inst) {
         val->print(llvm::errs());
         abort();
       }
-      // The local archetype was unresolved so far. Replace the placeholder
+      // The local environment was unresolved so far. Replace the placeholder
       // by inst.
       auto *placeholder = cast<PlaceholderValue>(val);
       placeholder->replaceAllUsesWith(dependency);
       ::delete placeholder;
+
+      assert(numUnresolvedLocalArchetypes > 0);
       numUnresolvedLocalArchetypes--;
     }
     val = dependency;
@@ -821,13 +791,19 @@ void SILModule::notifyAddedInstruction(SILInstruction *inst) {
 
 void SILModule::notifyMovedInstruction(SILInstruction *inst,
                                        SILFunction *fromFunction) {
-  inst->forEachDefinedLocalArchetype([&](CanLocalArchetypeType archeTy,
-                                         SILValue dependency) {
-    LocalArchetypeKey key = {archeTy, fromFunction};
+  for (auto &op : inst->getAllOperands()) {
+    if (auto *undef = dyn_cast<SILUndef>(op.get())) {
+      op.set(SILUndef::get(inst->getFunction(), undef->getType()));
+    }
+  }
+
+  inst->forEachDefinedLocalEnvironment([&](GenericEnvironment *genericEnv,
+                                           SILValue dependency) {
+    LocalArchetypeKey key = {genericEnv, fromFunction};
     assert(RootLocalArchetypeDefs.lookup(key) == dependency &&
            "archetype def was not registered");
     RootLocalArchetypeDefs.erase(key);
-    RootLocalArchetypeDefs[{archeTy, inst->getFunction()}] = dependency;
+    RootLocalArchetypeDefs[{genericEnv, inst->getFunction()}] = dependency;
   });
 }
 
@@ -966,8 +942,8 @@ void SILModule::performOnceForPrespecializedImportedExtensions(
 }
 
 SILProperty *
-SILProperty::create(SILModule &M, bool Serialized, AbstractStorageDecl *Decl,
-                    llvm::Optional<KeyPathPatternComponent> Component) {
+SILProperty::create(SILModule &M, unsigned Serialized, AbstractStorageDecl *Decl,
+                    std::optional<KeyPathPatternComponent> Component) {
   auto prop = new (M) SILProperty(Serialized, Decl, Component);
   M.properties.push_back(prop);
   return prop;

@@ -2,7 +2,7 @@
 // RUN: %target-swift-frontend %s -typecheck -module-name Properties -clang-header-expose-decls=all-public -emit-clang-header-path %t/properties.h
 // RUN: %FileCheck %s < %t/properties.h
 
-// RUN: %check-interop-cxx-header-in-clang(%t/properties.h)
+// RUN: %check-interop-cxx-header-in-clang(%t/properties.h -DSWIFT_CXX_INTEROP_HIDE_STL_OVERLAY)
 
 public struct IsHasProperties {
     public var isEmpty: Bool { return true }
@@ -42,13 +42,13 @@ public struct IsHasProperties {
 // CHECK-NEXT: return _impl::$s10Properties05IsHasA0V7isSolidSbvg(_getOpaquePointer());
 // CHECK-NEXT: }
 // CHECK-NEXT: SWIFT_INLINE_THUNK void IsHasProperties::setIsSolid(bool value) {
-// CHECK-NEXT: return _impl::$s10Properties05IsHasA0V7isSolidSbvs(value, _getOpaquePointer());
+// CHECK-NEXT: _impl::$s10Properties05IsHasA0V7isSolidSbvs(value, _getOpaquePointer());
 // CHECK-NEXT: }
 // CHECK-NEXT: SWIFT_INLINE_THUNK bool IsHasProperties::getFlag() const {
 // CHECK-NEXT: return _impl::$s10Properties05IsHasA0V4flagSbvg(_getOpaquePointer());
 // CHECK-NEXT: }
 // CHECK-NEXT: SWIFT_INLINE_THUNK void IsHasProperties::setFlag(bool value) {
-// CHECK-NEXT: return _impl::$s10Properties05IsHasA0V4flagSbvs(value, _getOpaquePointer());
+// CHECK-NEXT: _impl::$s10Properties05IsHasA0V4flagSbvs(value, _getOpaquePointer());
 // CHECK-NEXT: }
 // CHECK-NEXT: SWIFT_INLINE_THUNK bool IsHasProperties::getHas() const {
 // CHECK-NEXT: return _impl::$s10Properties05IsHasA0V3hasSbvg(_getOpaquePointer());

@@ -63,6 +63,7 @@ struct DemangleOptions {
   bool DisplayObjCModule = true;
   bool PrintForTypeName = false;
   bool ShowAsyncResumePartial = true;
+  bool ShowClosureSignature = true;
 
   /// If this is nonempty, entities in this module name will not be qualified.
   llvm::StringRef HidingCurrentModule;
@@ -135,6 +136,8 @@ enum class MangledDifferentiabilityKind : char {
   Linear = 'l',
 };
 
+enum class MangledLifetimeDependenceKind : char { Inherit = 'i', Scope = 's' };
+
 /// The pass that caused the specialization to occur. We use this to make sure
 /// that two passes that generate similar changes do not yield the same
 /// mangling. This currently cannot happen, so this is just a safety measure
@@ -204,7 +207,8 @@ private:
   Kind NodeKind;
 
   enum class PayloadKind : uint8_t {
-    None, Text, Index, OneChild, TwoChildren, ManyChildren
+    None = 0, OneChild = 1, TwoChildren = 2,
+    Text, Index, ManyChildren
   };
   PayloadKind NodePayloadKind;
 
@@ -225,6 +229,22 @@ private:
 public:
   Kind getKind() const { return NodeKind; }
 
+  bool isSimilarTo(const Node *other) const {
+    if (NodeKind != other->NodeKind
+        || NodePayloadKind != other->NodePayloadKind)
+      return false;
+    switch (NodePayloadKind) {
+    case PayloadKind::ManyChildren:
+      return Children.Number == other->Children.Number;
+    case PayloadKind::Index:
+      return Index == other->Index;
+    case PayloadKind::Text:
+      return Text == other->Text;
+    default:
+      return true;
+    }
+  }
+
   bool hasText() const { return NodePayloadKind == PayloadKind::Text; }
   llvm::StringRef getText() const {
     assert(hasText());
@@ -239,13 +259,41 @@ public:
 
   using iterator = const NodePointer *;
 
-  size_t getNumChildren() const;
+  size_t getNumChildren() const {
+    switch (NodePayloadKind) {
+    case PayloadKind::OneChild: return 1;
+    case PayloadKind::TwoChildren: return 2;
+    case PayloadKind::ManyChildren: return Children.Number;
+    default: return 0;
+    }
+  }
 
   bool hasChildren() const { return getNumChildren() != 0; }
 
-  iterator begin() const;
+  iterator begin() const {
+    switch (NodePayloadKind) {
+    case PayloadKind::OneChild:
+    case PayloadKind::TwoChildren:
+      return &InlineChildren[0];
+    case PayloadKind::ManyChildren:
+      return Children.Nodes;
+    default:
+      return nullptr;
+    }
+  }
 
-  iterator end() const;
+  iterator end() const {
+    switch (NodePayloadKind) {
+    case PayloadKind::OneChild:
+      return &InlineChildren[1];
+    case PayloadKind::TwoChildren:
+      return &InlineChildren[2];
+    case PayloadKind::ManyChildren:
+      return Children.Nodes + Children.Number;
+    default:
+      return nullptr;
+    }
+  }
 
   NodePointer getFirstChild() const {
     return getChild(0);
@@ -276,7 +324,7 @@ public:
   /// Prints the whole node tree in readable form to stderr.
   ///
   /// Useful to be called from the debugger.
-  void dump();
+  void dump() LLVM_ATTRIBUTE_USED;
 };
 
 /// Returns the length of the swift mangling prefix of the \p SymbolName.
@@ -551,8 +599,10 @@ struct [[nodiscard]] ManglingError {
     UnknownEncoding,
     InvalidImplCalleeConvention,
     InvalidImplDifferentiability,
+    InvalidImplCoroutineKind,
     InvalidImplFunctionAttribute,
     InvalidImplParameterConvention,
+    InvalidImplParameterSending,
     InvalidMetatypeRepresentation,
     MultiByteRelatedEntity,
     BadValueWitnessKind,

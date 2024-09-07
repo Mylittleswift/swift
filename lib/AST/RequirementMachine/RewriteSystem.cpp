@@ -12,6 +12,7 @@
 
 #include "swift/AST/Decl.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Assertions.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <vector>
@@ -33,6 +34,7 @@ RewriteSystem::RewriteSystem(RewriteContext &ctx)
   Frozen = 0;
   RecordLoops = 0;
   LongestInitialRule = 0;
+  DeepestInitialRule = 0;
 }
 
 RewriteSystem::~RewriteSystem() {
@@ -76,7 +78,7 @@ void RewriteSystem::initialize(
     std::vector<Rule> &&importedRules,
     std::vector<std::pair<MutableTerm, MutableTerm>> &&permanentRules,
     std::vector<std::pair<MutableTerm, MutableTerm>> &&requirementRules) {
-  assert(!Initialized);
+  ASSERT(!Initialized);
   Initialized = 1;
 
   RecordLoops = recordLoops;
@@ -88,6 +90,7 @@ void RewriteSystem::initialize(
 
   for (const auto &rule : getLocalRules()) {
     LongestInitialRule = std::max(LongestInitialRule, rule.getDepth());
+    DeepestInitialRule = std::max(DeepestInitialRule, rule.getNesting());
   }
 }
 
@@ -117,7 +120,7 @@ bool RewriteSystem::simplify(MutableTerm &term, RewritePath *path) const {
         const auto &rule = getRule(*ruleID);
 
         auto to = from + rule.getLHS().size();
-        assert(std::equal(from, to, rule.getLHS().begin()));
+        DEBUG_ASSERT(std::equal(from, to, rule.getLHS().begin()));
 
         unsigned startOffset = (unsigned)(from - term.begin());
         unsigned endOffset = term.size() - rule.getLHS().size() - startOffset;
@@ -152,7 +155,7 @@ bool RewriteSystem::simplify(MutableTerm &term, RewritePath *path) const {
   }
 
   if (path != nullptr) {
-    assert(changed != subpath.empty());
+    ASSERT(changed != subpath.empty());
     path->append(subpath);
   }
 
@@ -169,10 +172,10 @@ bool RewriteSystem::simplify(MutableTerm &term, RewritePath *path) const {
 /// \p lhs to \p rhs.
 bool RewriteSystem::addRule(MutableTerm lhs, MutableTerm rhs,
                             const RewritePath *path) {
-  assert(!Frozen);
+  ASSERT(!Frozen);
 
-  assert(!lhs.empty());
-  assert(!rhs.empty());
+  ASSERT(!lhs.empty());
+  ASSERT(!rhs.empty());
 
   if (Debug.contains(DebugFlags::Add)) {
     llvm::dbgs() << "# Adding rule " << lhs << " == " << rhs << "\n\n";
@@ -206,7 +209,7 @@ bool RewriteSystem::addRule(MutableTerm lhs, MutableTerm rhs,
 
   // If the left hand side and right hand side are already equivalent, we're
   // done.
-  llvm::Optional<int> result = lhs.compare(rhs, Context);
+  std::optional<int> result = lhs.compare(rhs, Context);
   if (*result == 0) {
     // If this rule is a consequence of existing rules, add a homotopy
     // generator.
@@ -232,7 +235,7 @@ bool RewriteSystem::addRule(MutableTerm lhs, MutableTerm rhs,
     loop.invert();
   }
 
-  assert(*lhs.compare(rhs, Context) > 0);
+  DEBUG_ASSERT(*lhs.compare(rhs, Context) > 0);
 
   if (Debug.contains(DebugFlags::Add)) {
     llvm::dbgs() << "## Simplified and oriented rule " << lhs << " => " << rhs << "\n\n";
@@ -358,7 +361,7 @@ void RewriteSystem::addRules(
 /// Must be run after the completion procedure, since the deletion of
 /// rules is only valid to perform if the rewrite system is confluent.
 void RewriteSystem::simplifyLeftHandSides() {
-  assert(Complete);
+  ASSERT(Complete);
 
   for (unsigned ruleID = FirstLocalRule, e = Rules.size(); ruleID < e; ++ruleID) {
     auto &rule = getRule(ruleID);
@@ -401,7 +404,7 @@ void RewriteSystem::simplifyLeftHandSides() {
 /// Must be run after the completion procedure, since the deletion of
 /// rules is only valid to perform if the rewrite system is confluent.
 void RewriteSystem::simplifyRightHandSides() {
-  assert(Complete);
+  ASSERT(Complete);
 
   for (unsigned ruleID = FirstLocalRule, e = Rules.size(); ruleID < e; ++ruleID) {
     auto &rule = getRule(ruleID);
@@ -428,8 +431,7 @@ void RewriteSystem::simplifyRightHandSides() {
     // Add a new rule with the simplified right hand side.
     Rules.emplace_back(lhs, Term::get(rhs, Context));
     auto oldRuleID = Trie.insert(lhs.begin(), lhs.end(), newRuleID);
-    assert(oldRuleID == ruleID);
-    (void) oldRuleID;
+    ASSERT(oldRuleID == ruleID);
 
     // Produce a loop at the original lhs.
     RewritePath loop;
@@ -466,7 +468,7 @@ void RewriteSystem::simplifyRightHandSides() {
 /// All other loops can be discarded since they do not encode redundancies
 /// that are relevant to us.
 bool RewriteSystem::isInMinimizationDomain(const ProtocolDecl *proto) const {
-  assert(Protos.empty() || proto != nullptr);
+  ASSERT(Protos.empty() || proto != nullptr);
 
   if (proto == nullptr && Protos.empty())
     return true;
@@ -479,7 +481,7 @@ bool RewriteSystem::isInMinimizationDomain(const ProtocolDecl *proto) const {
 
 void RewriteSystem::recordRewriteLoop(MutableTerm basepoint,
                                       RewritePath path) {
-  assert(!Frozen);
+  ASSERT(!Frozen);
 
   RewriteLoop loop(basepoint, path);
   loop.verify(*this);
@@ -553,7 +555,9 @@ void RewriteSystem::verifyRewriteRules(ValidityPolicy policy) const {
       }
 
       if (index != 0) {
-        ASSERT_RULE(symbol.getKind() != Symbol::Kind::GenericParam);
+        ASSERT_RULE(symbol.getKind() != Symbol::Kind::GenericParam ||
+                    (index == 1 &&
+                     lhs[index - 1].getKind() == Symbol::Kind::PackElement));
       }
 
       if (!rule.isLHSSimplified() &&
@@ -608,7 +612,9 @@ void RewriteSystem::verifyRewriteRules(ValidityPolicy policy) const {
       }
 
       if (index != 0) {
-        ASSERT_RULE(symbol.getKind() != Symbol::Kind::GenericParam);
+        ASSERT_RULE(symbol.getKind() != Symbol::Kind::GenericParam ||
+                    (index == 1 &&
+                     lhs[index - 1].getKind() == Symbol::Kind::PackElement));
       }
 
       if (!rule.isRHSSimplified() &&
@@ -635,8 +641,8 @@ void RewriteSystem::verifyRewriteRules(ValidityPolicy policy) const {
 /// (for a rewrite system built from a generic signature) or minimization
 /// (for a rewrite system built from user-written requirements).
 void RewriteSystem::freeze() {
-  assert(Complete);
-  assert(!Frozen);
+  ASSERT(Complete);
+  ASSERT(!Frozen);
 
   for (unsigned ruleID = FirstLocalRule, e = Rules.size();
        ruleID < e; ++ruleID) {

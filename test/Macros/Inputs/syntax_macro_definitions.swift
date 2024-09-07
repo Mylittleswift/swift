@@ -105,6 +105,20 @@ public struct StringifyAndTryMacro: ExpressionMacro {
   }
 }
 
+public struct TryCallThrowingFuncMacro: ExpressionMacro {
+  public static func expansion(
+    of macro: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) -> ExprSyntax {
+    return """
+      try await {
+        print("let's throw")
+        return try await throwingFunc()
+      }()
+      """
+  }
+}
+
 struct SimpleDiagnosticMessage: DiagnosticMessage {
   let message: String
   let diagnosticID: MessageID
@@ -209,6 +223,25 @@ public class NestedDeclInExprMacro: ExpressionMacro {
       return ()
     }
     """
+  }
+}
+
+public class NullaryFunctionCallMacro: ExpressionMacro {
+  public static func expansion(
+    of macro: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) -> ExprSyntax {
+    let calls = macro.arguments.compactMap(\.expression).map { "\($0)()" }
+    return "(\(raw: calls.joined(separator: ", ")))"
+  }
+}
+
+public class TupleMacro: ExpressionMacro {
+  public static func expansion(
+    of macro: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) -> ExprSyntax {
+    return "(\(raw: macro.arguments.map { "\($0)" }.joined()))"
   }
 }
 
@@ -1015,7 +1048,7 @@ public struct WrapInType: PeerMacro {
     }
 
     // Build a new function with the same signature that forwards arguments
-    // to the the original function.
+    // to the original function.
     let parameterList = funcDecl.signature.parameterClause.parameters
     let callArguments: [String] = parameterList.map { param in
       let argName = param.secondName ?? param.firstName
@@ -1986,6 +2019,74 @@ public struct NestedMagicLiteralMacro: ExpressionMacro {
   }
 }
 
+public struct NativeFileIDMacro: ExpressionMacro {
+  public static func expansion(
+    of node: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) -> ExprSyntax {
+    return context.location(
+        of: node, at: .afterLeadingTrivia, filePathMode: .fileID
+    )!.file
+  }
+}
+
+public struct NativeFilePathMacro: ExpressionMacro {
+  public static func expansion(
+    of node: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) -> ExprSyntax {
+    return context.location(
+        of: node, at: .afterLeadingTrivia, filePathMode: .filePath
+    )!.file
+  }
+}
+
+public struct NativeLineMacro: ExpressionMacro {
+  public static func expansion(
+    of node: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) -> ExprSyntax {
+    return context.location(of: node)!.line
+  }
+}
+
+public struct NativeColumnMacro: ExpressionMacro {
+  public static func expansion(
+    of node: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) -> ExprSyntax {
+    return context.location(of: node)!.column
+  }
+}
+
+public struct ClosureCallerMacro: ExpressionMacro {
+    public static func expansion(
+      of node: some FreestandingMacroExpansionSyntax,
+      in context: some MacroExpansionContext
+    ) -> ExprSyntax {
+        let location = context.location(of: node)!
+        return #"""
+        ClosureCaller({ (value, then) in
+            #sourceLocation(file: \#(location.file), line: \#(location.line))
+            print("\(value)@\(\#(location.file))#\(\#(location.line))")
+            then()
+            #sourceLocation()
+        })
+        """#
+    }
+}
+
+public struct PrependHelloToShadowedMacro: ExpressionMacro {
+    public static func expansion(
+      of node: some FreestandingMacroExpansionSyntax,
+      in context: some MacroExpansionContext
+    ) -> ExprSyntax {
+        #"""
+        "hello \(shadowed)"
+        """#
+    }
+}
+
 public struct InvalidIfExprMacro: MemberMacro {
   public static func expansion(
     of node: AttributeSyntax,
@@ -2131,7 +2232,64 @@ public struct SingleMemberStubMacro: DeclarationMacro {
   }
 }
 
-public struct FakeCodeItemMacro: DeclarationMacro, PeerMacro {
+public struct DeclMacroWithControlFlow: DeclarationMacro {
+  public static func expansion(
+    of node: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) throws -> [DeclSyntax] {
+    return ["let _ = .random() ? try throwingFn() : 0"]
+  }
+}
+
+public struct GenerateStubsForProtocolRequirementsMacro: PeerMacro, ExtensionMacro {
+  public static func expansion(
+    of node: AttributeSyntax,
+    attachedTo declaration: some DeclGroupSyntax,
+    providingExtensionsOf type: some TypeSyntaxProtocol,
+    conformingTo protocols: [TypeSyntax],
+    in context: some MacroExpansionContext
+  ) throws -> [ExtensionDeclSyntax] {
+    guard let proto = declaration.as(ProtocolDeclSyntax.self) else {
+      return []
+    }
+
+    let requirements =
+      proto.memberBlock.members.map { member in member.trimmed }
+    let requirementStubs = requirements
+      .map { req in
+        "\(req) { fatalError() }"
+      }
+      .joined(separator: "\n    ")
+
+    let extensionDecl: DeclSyntax =
+      """
+      extension \(proto.name) where Self: _TestStub {
+        \(raw: requirementStubs)
+      }
+      """
+    return [extensionDecl.cast(ExtensionDeclSyntax.self)]
+  }
+
+  public static func expansion(
+    of node: AttributeSyntax,
+    providingPeersOf declaration: some DeclSyntaxProtocol,
+    in context: some MacroExpansionContext
+  ) throws -> [DeclSyntax] {
+    guard let proto = declaration.as(ProtocolDeclSyntax.self) else {
+      return []
+    }
+
+    return [
+      """
+      struct __\(proto.name): \(proto.name), _TestStub {
+        init() {} 
+      }
+      """
+    ]
+  }
+}
+
+  public struct FakeCodeItemMacro: DeclarationMacro, PeerMacro {
   public static func expansion(
     of node: some FreestandingMacroExpansionSyntax,
     in context: some MacroExpansionContext
@@ -2211,6 +2369,20 @@ public struct RemoteBodyMacro: BodyMacro {
       """
       return try await remoteCall(function: \(literal: funcBaseName), arguments: \(passedArgs))
       """
+    ]
+  }
+}
+
+@_spi(ExperimentalLanguageFeature)
+public struct BodyMacroWithControlFlow: BodyMacro {
+  public static func expansion(
+    of node: AttributeSyntax,
+    providingBodyFor declaration: some DeclSyntaxProtocol & WithOptionalCodeBlockSyntax,
+    in context: some MacroExpansionContext
+  ) throws -> [CodeBlockItemSyntax] {
+    [
+      "guard .random() else { return }",
+      "_ = try throwingFn()"
     ]
   }
 }
@@ -2366,3 +2538,12 @@ public struct AllLexicalContextsMacro: DeclarationMacro {
   }
 }
 
+public struct AddGetterMacro: AccessorMacro {
+  public static func expansion(
+    of node: AttributeSyntax,
+    providingAccessorsOf declaration: some DeclSyntaxProtocol,
+    in context: some MacroExpansionContext
+  ) throws -> [AccessorDeclSyntax] {
+    return ["get { 0 }"]
+  }
+}

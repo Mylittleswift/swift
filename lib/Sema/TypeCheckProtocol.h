@@ -112,6 +112,9 @@ enum class ResolveWitnessResult {
 /// This helper class handles most of the details of checking whether a
 /// given type (\c Adoptee) conforms to a protocol (\c Proto).
 class ConformanceChecker : public WitnessChecker {
+  /// Whether we already suggested adding `@preconcurrency`.
+  bool suggestedPreconcurrency = false;
+
 public:
   NormalProtocolConformance *Conformance;
   SourceLoc Loc;
@@ -127,11 +130,15 @@ public:
 
   /// Check that the witness and requirement have compatible actor contexts.
   ///
+  /// \param usesPreconcurrency Will be set true if the conformance is
+  /// @preconcurrency and we made use of that fact.
+  ///
   /// \returns the isolation that needs to be enforced to invoke the witness
   /// from the requirement, used when entering an actor-isolated synchronous
   /// witness from an asynchronous requirement.
-  llvm::Optional<ActorIsolation> checkActorIsolation(ValueDecl *requirement,
-                                                     ValueDecl *witness);
+  std::optional<ActorIsolation> checkActorIsolation(ValueDecl *requirement,
+                                                    ValueDecl *witness,
+                                                    bool &usesPreconcurrency);
 
   /// Enforce restrictions on non-final classes witnessing requirements
   /// involving the protocol 'Self' type.
@@ -176,9 +183,9 @@ public:
 RequirementMatch matchWitness(
     DeclContext *dc, ValueDecl *req, ValueDecl *witness,
     llvm::function_ref<
-        std::tuple<llvm::Optional<RequirementMatch>, Type, Type>(void)>
+        std::tuple<std::optional<RequirementMatch>, Type, Type>(void)>
         setup,
-    llvm::function_ref<llvm::Optional<RequirementMatch>(Type, Type)> matchTypes,
+    llvm::function_ref<std::optional<RequirementMatch>(Type, Type)> matchTypes,
     llvm::function_ref<RequirementMatch(bool, ArrayRef<OptionalAdjustment>)>
         finalize);
 
@@ -222,6 +229,16 @@ void diagnoseConformanceFailure(Type T,
 AssociatedTypeDecl *findDefaultedAssociatedType(
     DeclContext *dc, NominalTypeDecl *adoptee,
     AssociatedTypeDecl *assocType);
+
+/// Determine whether this witness has an `@_implements` attribute whose
+/// name matches that of the given requirement.
+bool witnessHasImplementsAttrForRequiredName(ValueDecl *witness,
+                                             ValueDecl *requirement);
+
+/// Determine whether this witness has an `@_implements` attribute whose name
+/// and protocol match that of the requirement exactly.
+bool witnessHasImplementsAttrForExactRequirement(ValueDecl *witness,
+                                                 ValueDecl *requirement);
 
 }
 

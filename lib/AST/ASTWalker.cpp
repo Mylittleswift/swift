@@ -58,6 +58,7 @@
 #include "swift/AST/GenericParamList.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/PrettyStackTrace.h"
+#include "swift/Basic/Assertions.h"
 using namespace swift;
 
 void ASTWalker::anchor() {}
@@ -194,11 +195,7 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
   }
 
   bool visitPatternBindingDecl(PatternBindingDecl *PBD) {
-    bool isPropertyWrapperBackingProperty = false;
-    if (auto singleVar = PBD->getSingleVar()) {
-      isPropertyWrapperBackingProperty =
-        singleVar->getOriginalWrappedProperty() != nullptr;
-    }
+    auto *singleVar = PBD->getSingleVar();
 
     for (auto idx : range(PBD->getNumPatternEntries())) {
       if (Pattern *Pat = doIt(PBD->getPattern(idx)))
@@ -206,10 +203,14 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
       else
         return true;
 
-      if (!PBD->getInit(idx) || isPropertyWrapperBackingProperty)
+      if (!PBD->getInit(idx))
         continue;
 
-      if (PBD->isInitializerSubsumed(idx) &&
+      if (singleVar && singleVar->getOriginalWrappedProperty())
+        continue;
+
+      if (PBD->isInitializerSubsumed(idx) && singleVar &&
+          singleVar->getAttrs().hasAttribute<LazyAttr>() &&
           Walker.getLazyInitializerWalkingBehavior() !=
               LazyInitializerWalking::InPatternBinding) {
         break;
@@ -370,7 +371,7 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
     if (auto *E = P->getStructuralDefaultExpr()) {
       auto res = doIt(E);
       if (!res) return true;
-      P->setDefaultExpr(res, /*isTypeChecked*/ (bool)res->getType());
+      P->setDefaultExpr(res);
     }
 
     if (!Walker.shouldWalkAccessorsTheOldWay()) {
@@ -976,17 +977,8 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
 
   Expr *visitCaptureListExpr(CaptureListExpr *expr) {
     for (auto c : expr->getCaptureList()) {
-      if (Walker.shouldWalkCaptureInitializerExpressions()) {
-        for (auto entryIdx : range(c.PBD->getNumPatternEntries())) {
-          if (auto newInit = doIt(c.PBD->getInit(entryIdx)))
-            c.PBD->setInit(entryIdx, newInit);
-          else
-            return nullptr;
-        }
-      } else {
-        if (doIt(c.PBD))
-          return nullptr;
-      }
+      if (doIt(c.PBD))
+        return nullptr;
     }
 
     AbstractClosureExpr *body = expr->getClosureBody();
@@ -1010,12 +1002,6 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
       if (doIt(expr->getExplicitResultTypeRepr()))
         return nullptr;
     }
-
-    // If the closure was separately type checked and we don't want to
-    // visit separately-checked closure bodies, bail out now.
-    if (expr->isSeparatelyTypeChecked() &&
-        !Walker.shouldWalkIntoSeparatelyCheckedClosure(expr))
-      return expr;
 
     // Handle other closures.
     if (BraceStmt *body = cast_or_null<BraceStmt>(doIt(expr->getBody()))) {
@@ -1326,6 +1312,17 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
     return E;
   }
 
+  Expr *visitExtractFunctionIsolationExpr(ExtractFunctionIsolationExpr *E) {
+    if (auto fn = E->getFunctionExpr()) {
+      if (auto newFn = doIt(fn))
+        E->setFunctionExpr(newFn);
+      else
+        return nullptr;
+    }
+
+    return E;
+  }
+
   Expr *visitKeyPathDotExpr(KeyPathDotExpr *E) { return E; }
 
   Expr *visitSingleValueStmtExpr(SingleValueStmtExpr *E) {
@@ -1425,6 +1422,10 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
     return E;
   }
 
+  Expr *visitTypeValueExpr(TypeValueExpr *E) {
+    return E;
+  }
+
   //===--------------------------------------------------------------------===//
   //                           Everything Else
   //===--------------------------------------------------------------------===//
@@ -1437,6 +1438,8 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
 
 #define TYPEREPR(Id, Parent) bool visit##Id##TypeRepr(Id##TypeRepr *T);
 #include "swift/AST/TypeReprNodes.def"
+
+  bool visitDeclRefTypeRepr(DeclRefTypeRepr *T);
 
   using Action = ASTWalker::Action;
 
@@ -1624,9 +1627,24 @@ public:
     return false;
   }
 
+private:
+  /// Walk a `QualifiedIdentTypeRepr` in source order such that each subsequent
+  /// dot-separated component is a child of the previous one
+  [[nodiscard]] bool doItInSourceOrderRecursive(QualifiedIdentTypeRepr *T);
+
+public:
   /// Returns true on failure.
   [[nodiscard]]
   bool doIt(TypeRepr *T) {
+    if (auto *QualIdentTR = dyn_cast<QualifiedIdentTypeRepr>(T)) {
+      switch (Walker.getQualifiedIdentTypeReprWalkingScheme()) {
+      case QualifiedIdentTypeReprWalkingScheme::SourceOrderRecursive:
+        return doItInSourceOrderRecursive(QualIdentTR);
+      case QualifiedIdentTypeReprWalkingScheme::ASTOrderRecursive:
+        break;
+      }
+    }
+
     return traverse(
         Walker.walkToTypeReprPre(T),
         [&]() { return visit(T); },
@@ -1705,6 +1723,89 @@ public:
 };
 
 } // end anonymous namespace
+
+bool Traversal::doItInSourceOrderRecursive(QualifiedIdentTypeRepr *T) {
+  // Qualified types are modeled resursively such that each previous
+  // dot-separated component is a child of the next one. To walk a member type
+  // representation according to
+  // `QualifiedIdentTypeReprWalkingScheme::SourceOrderRecursive`:
+
+  // 1. Pre-walk the dot-separated components in source order. If asked to skip
+  //    the children of a given component:
+  //    1. Set the depth at which to start post-walking later.
+  //    2. Skip its generic arguments and subsequent components.
+  std::function<bool(TypeRepr *, std::optional<unsigned> &, unsigned)>
+      doItInSourceOrderPre = [&](TypeRepr *T,
+                                 std::optional<unsigned> &StartPostWalkDepth,
+                                 unsigned Depth) {
+        if (auto *QualIdentTR = dyn_cast<QualifiedIdentTypeRepr>(T)) {
+          if (doItInSourceOrderPre(QualIdentTR->getBase(), StartPostWalkDepth,
+                                   Depth + 1)) {
+            return true;
+          }
+
+          if (StartPostWalkDepth.has_value()) {
+            return false;
+          }
+        }
+
+        switch (this->Walker.walkToTypeReprPre(T).Action) {
+        case PreWalkAction::Stop:
+          return true;
+        case PreWalkAction::SkipChildren:
+          StartPostWalkDepth = Depth;
+          return false;
+        case PreWalkAction::SkipNode:
+          StartPostWalkDepth = Depth + 1;
+          return false;
+        case PreWalkAction::Continue:
+          break;
+        }
+
+        if (auto *DeclRefTR = dyn_cast<DeclRefTypeRepr>(T)) {
+          for (auto *Arg : DeclRefTR->getGenericArgs()) {
+            if (doIt(Arg)) {
+              return true;
+            }
+          }
+        } else if (visit(T)) {
+          return true;
+        }
+
+        return false;
+      };
+
+  // 2. Post-walk the components in reverse order, respecting the depth at which
+  //    to start post-walking if set.
+  std::function<bool(TypeRepr *, std::optional<unsigned>, unsigned)>
+      doItInSourceOrderPost = [&](TypeRepr *T,
+                                  std::optional<unsigned> StartPostWalkDepth,
+                                  unsigned Depth) {
+        if (!StartPostWalkDepth.has_value() || Depth >= *StartPostWalkDepth) {
+          switch (this->Walker.walkToTypeReprPost(T).Action) {
+          case PostWalkAction::Continue:
+            break;
+          case PostWalkAction::Stop:
+            return true;
+          }
+        }
+
+        if (auto *QualIdentTR = dyn_cast<QualifiedIdentTypeRepr>(T)) {
+          return doItInSourceOrderPost(QualIdentTR->getBase(),
+                                       StartPostWalkDepth, Depth + 1);
+        }
+
+        return false;
+      };
+
+  std::optional<unsigned> StartPostWalkDepth;
+
+  if (doItInSourceOrderPre(T, StartPostWalkDepth, 0)) {
+    return true;
+  }
+
+  return doItInSourceOrderPost(T, StartPostWalkDepth, 0);
+}
 
 #pragma mark Statement traversal
 Stmt *Traversal::visitBreakStmt(BreakStmt *BS) {
@@ -2130,27 +2231,28 @@ bool Traversal::visitAttributedTypeRepr(AttributedTypeRepr *T) {
   return doIt(T->getTypeRepr());
 }
 
-bool Traversal::visitSimpleIdentTypeRepr(SimpleIdentTypeRepr *T) {
+bool Traversal::visitDeclRefTypeRepr(DeclRefTypeRepr *T) {
+  if (auto *qualIdentTR = dyn_cast<QualifiedIdentTypeRepr>(T)) {
+    if (doIt(qualIdentTR->getBase())) {
+      return true;
+    }
+  }
+
+  for (auto *genericArg : T->getGenericArgs()) {
+    if (doIt(genericArg)) {
+      return true;
+    }
+  }
+
   return false;
 }
 
-bool Traversal::visitGenericIdentTypeRepr(GenericIdentTypeRepr *T) {
-  for (auto genArg : T->getGenericArgs()) {
-    if (doIt(genArg))
-      return true;
-  }
-  return false;
+bool Traversal::visitUnqualifiedIdentTypeRepr(UnqualifiedIdentTypeRepr *T) {
+  return visitDeclRefTypeRepr(T);
 }
 
-bool Traversal::visitMemberTypeRepr(MemberTypeRepr *T) {
-  if (doIt(T->getBaseComponent()))
-    return true;
-
-  for (auto comp : T->getMemberComponents()) {
-    if (doIt(comp))
-      return true;
-  }
-  return false;
+bool Traversal::visitQualifiedIdentTypeRepr(QualifiedIdentTypeRepr *T) {
+  return visitDeclRefTypeRepr(T);
 }
 
 bool Traversal::visitFunctionTypeRepr(FunctionTypeRepr *T) {
@@ -2224,11 +2326,11 @@ bool Traversal::visitIsolatedTypeRepr(IsolatedTypeRepr *T) {
   return doIt(T->getBase());
 }
 
-bool Traversal::visitCompileTimeConstTypeRepr(CompileTimeConstTypeRepr *T) {
+bool Traversal::visitSendingTypeRepr(SendingTypeRepr *T) {
   return doIt(T->getBase());
 }
 
-bool Traversal::visitResultDependsOnTypeRepr(ResultDependsOnTypeRepr *T) {
+bool Traversal::visitCompileTimeConstTypeRepr(CompileTimeConstTypeRepr *T) {
   return doIt(T->getBase());
 }
 
@@ -2272,9 +2374,12 @@ bool Traversal::visitSILBoxTypeRepr(SILBoxTypeRepr *T) {
   return false;
 }
 
-bool Traversal::visitLifetimeDependentReturnTypeRepr(
-    LifetimeDependentReturnTypeRepr *T) {
+bool Traversal::visitLifetimeDependentTypeRepr(LifetimeDependentTypeRepr *T) {
   return doIt(T->getBase());
+}
+
+bool Traversal::visitIntegerTypeRepr(IntegerTypeRepr *T) {
+  return false;
 }
 
 Expr *Expr::walk(ASTWalker &walker) {

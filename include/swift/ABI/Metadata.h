@@ -297,7 +297,6 @@ public:
     case MetadataKind::Class:
     case MetadataKind::ObjCClassWrapper:
     case MetadataKind::ForeignClass:
-    case MetadataKind::ForeignReferenceType:
       return true;
 
     default:
@@ -1236,7 +1235,7 @@ using ForeignClassMetadata = TargetForeignClassMetadata<InProcess>;
 /// The structure of metadata objects for foreign reference types.
 /// A foreign reference type is a non-Swift, non-Objective-C foreign type with
 /// reference semantics. Foreign reference types are pointers/reference to
-/// value types marked with the "import_as_ref" attribute.
+/// value types marked with the `swift_attr("import_reference")` attribute.
 ///
 /// Foreign reference types may have *custom* reference counting operations, or
 /// they may be immortal (and therefore trivial).
@@ -2146,7 +2145,7 @@ public:
 
   RuntimeGenericSignature<Runtime> getRequirementSignature() const {
     return {ReqSigHeader, getReqSigParams(), getReqSigRequirements(),
-            {0, 0}, nullptr};
+            {0, 0}, nullptr, {0}, nullptr};
   }
 
   unsigned getNumReqSigParams() const {
@@ -2226,7 +2225,8 @@ public:
   RuntimeGenericSignature<Runtime> getGeneralizationSignature() const {
     if (!hasGeneralizationSignature()) return RuntimeGenericSignature<Runtime>();
     return {*getGenSigHeader(), getGenSigParams(), getGenSigRequirements(),
-            getGenSigPackShapeHeader(), getGenSigPackShapeDescriptors()};
+            getGenSigPackShapeHeader(), getGenSigPackShapeDescriptors(),
+            {0}, nullptr};
   }
 
   unsigned getNumGenSigParams() const {
@@ -2928,6 +2928,9 @@ struct swift_ptrauth_struct_context_descriptor(ContextDescriptor)
 
   bool isGeneric() const { return Flags.isGeneric(); }
   bool isUnique() const { return Flags.isUnique(); }
+  bool hasInvertibleProtocols() const {
+    return Flags.hasInvertibleProtocols();
+  }
   ContextDescriptorKind getKind() const { return Flags.getKind(); }
 
   /// Get the generic context information for this context, or null if the
@@ -2936,6 +2939,15 @@ struct swift_ptrauth_struct_context_descriptor(ContextDescriptor)
 
   /// Get the module context for this context.
   const TargetModuleContextDescriptor<Runtime> *getModuleContext() const;
+
+  /// Retrieve the set of protocols that are inverted by this type's
+  /// primary definition.
+  ///
+  /// This type might still conditionally conform to any of the protocols
+  /// that are inverted here, but that information is recorded in the
+  /// conditional inverted protocols of the corresponding `GenericContext`.
+  const InvertibleProtocolSet *
+  getInvertedProtocols() const;
 
   /// Is this context part of a C-imported module?
   bool isCImportedContext() const;
@@ -3237,13 +3249,15 @@ struct swift_ptrauth_struct_context_descriptor(OpaqueTypeDescriptor)
     : TargetContextDescriptor<Runtime>,
     TrailingGenericContextObjects<TargetOpaqueTypeDescriptor<Runtime>,
                                   TargetGenericContextDescriptorHeader,
-                                  RelativeDirectPointer<const char>>
+                                  RelativeDirectPointer<const char>,
+                                  InvertibleProtocolSet>
 {
 private:
   using TrailingGenericContextObjects =
       swift::TrailingGenericContextObjects<TargetOpaqueTypeDescriptor<Runtime>,
                                            TargetGenericContextDescriptorHeader,
-                                           RelativeDirectPointer<const char>>;
+                                           RelativeDirectPointer<const char>,
+                                           InvertibleProtocolSet>;
   using TrailingObjects =
     typename TrailingGenericContextObjects::TrailingObjects;
   friend TrailingObjects;
@@ -3279,6 +3293,23 @@ public:
     assert(i < getNumUnderlyingTypeArguments());
     const char *ptr = getUnderlyingTypeArgumentMangledName(i);    
     return Demangle::makeSymbolicMangledNameStringRef(ptr);
+  }
+
+  /// Retrieve the set of protocols that are inverted by this type's
+  /// primary definition.
+  ///
+  /// This type might still conditionally conform to any of the protocols
+  /// that are inverted here, but that information is recorded in the
+  /// conditional inverted protocols of the corresponding `GenericContext`.
+  const InvertibleProtocolSet &
+  getInvertedProtocols() const {
+    assert(this->hasInvertibleProtocols());
+    return
+      *this->template getTrailingObjects<InvertibleProtocolSet>();
+  }
+  
+  size_t numTrailingObjects(OverloadToken<InvertibleProtocolSet>) const {
+    return this->hasInvertibleProtocols() ? 1 : 0;
   }
 
   static bool classof(const TargetContextDescriptor<Runtime> *cd) {
@@ -4052,7 +4083,8 @@ class swift_ptrauth_struct_context_descriptor(ClassDescriptor)
                               TargetCanonicalSpecializedMetadatasListCount<Runtime>,
                               TargetCanonicalSpecializedMetadatasListEntry<Runtime>,
                               TargetCanonicalSpecializedMetadataAccessorsListEntry<Runtime>,
-                              TargetCanonicalSpecializedMetadatasCachingOnceToken<Runtime>> {
+                              TargetCanonicalSpecializedMetadatasCachingOnceToken<Runtime>,
+                              InvertibleProtocolSet> {
 private:
   using TrailingGenericContextObjects =
     swift::TrailingGenericContextObjects<TargetClassDescriptor<Runtime>,
@@ -4068,7 +4100,8 @@ private:
                                          TargetCanonicalSpecializedMetadatasListCount<Runtime>,
                                          TargetCanonicalSpecializedMetadatasListEntry<Runtime>,
                                          TargetCanonicalSpecializedMetadataAccessorsListEntry<Runtime>,
-                                         TargetCanonicalSpecializedMetadatasCachingOnceToken<Runtime>>;
+                                         TargetCanonicalSpecializedMetadatasCachingOnceToken<Runtime>,
+                                         InvertibleProtocolSet>;
 
   using TrailingObjects =
     typename TrailingGenericContextObjects::TrailingObjects;
@@ -4418,6 +4451,23 @@ public:
     return box->token.get();
   }
 
+  /// Retrieve the set of protocols that are inverted by this type's
+  /// primary definition.
+  ///
+  /// This type might still conditionally conform to any of the protocols
+  /// that are inverted here, but that information is recorded in the
+  /// conditional inverted protocols of the corresponding `GenericContext`.
+  const InvertibleProtocolSet &
+  getInvertedProtocols() const {
+    assert(this->hasInvertibleProtocols());
+    return
+      *this->template getTrailingObjects<InvertibleProtocolSet>();
+  }
+
+  size_t numTrailingObjects(OverloadToken<InvertibleProtocolSet>) const {
+    return this->hasInvertibleProtocols() ? 1 : 0;
+  }
+
   static bool classof(const TargetContextDescriptor<Runtime> *cd) {
     return cd->getKind() == ContextDescriptorKind::Class;
   }
@@ -4447,7 +4497,8 @@ class swift_ptrauth_struct_context_descriptor(StructDescriptor)
                             TargetSingletonMetadataInitialization<Runtime>,
                             TargetCanonicalSpecializedMetadatasListCount<Runtime>,
                             TargetCanonicalSpecializedMetadatasListEntry<Runtime>,
-                            TargetCanonicalSpecializedMetadatasCachingOnceToken<Runtime>> {
+                            TargetCanonicalSpecializedMetadatasCachingOnceToken<Runtime>,
+                            InvertibleProtocolSet> {
 public:
   using ForeignMetadataInitialization =
     TargetForeignMetadataInitialization<Runtime>;
@@ -4470,7 +4521,8 @@ private:
                                            SingletonMetadataInitialization,
                                            MetadataListCount,
                                            MetadataListEntry,
-                                           MetadataCachingOnceToken>;
+                                           MetadataCachingOnceToken,
+                                           InvertibleProtocolSet>;
 
   using TrailingObjects =
     typename TrailingGenericContextObjects::TrailingObjects;
@@ -4557,6 +4609,23 @@ public:
     return box->token.get();
   }
 
+  /// Retrieve the set of protocols that are inverted by this type's
+  /// primary definition.
+  ///
+  /// This type might still conditionally conform to any of the protocols
+  /// that are inverted here, but that information is recorded in the
+  /// conditional inverted protocols of the corresponding `GenericContext`.
+  const InvertibleProtocolSet &
+  getInvertedProtocols() const {
+    assert(this->hasInvertibleProtocols());
+    return
+      *this->template getTrailingObjects<InvertibleProtocolSet>();
+  }
+
+  size_t numTrailingObjects(OverloadToken<InvertibleProtocolSet>) const {
+    return this->hasInvertibleProtocols() ? 1 : 0;
+  }
+
   static bool classof(const TargetContextDescriptor<Runtime> *cd) {
     return cd->getKind() == ContextDescriptorKind::Struct;
   }
@@ -4575,7 +4644,8 @@ class swift_ptrauth_struct_context_descriptor(EnumDescriptor)
                             TargetSingletonMetadataInitialization<Runtime>,
                             TargetCanonicalSpecializedMetadatasListCount<Runtime>,
                             TargetCanonicalSpecializedMetadatasListEntry<Runtime>,
-                            TargetCanonicalSpecializedMetadatasCachingOnceToken<Runtime>> {
+                            TargetCanonicalSpecializedMetadatasCachingOnceToken<Runtime>,
+                            InvertibleProtocolSet> {
 public:
   using SingletonMetadataInitialization =
     TargetSingletonMetadataInitialization<Runtime>;
@@ -4598,7 +4668,8 @@ private:
                                         SingletonMetadataInitialization,
                                         MetadataListCount,
                                         MetadataListEntry, 
-                                        MetadataCachingOnceToken>;
+                                        MetadataCachingOnceToken,
+                                        InvertibleProtocolSet>;
 
   using TrailingObjects =
     typename TrailingGenericContextObjects::TrailingObjects;
@@ -4699,6 +4770,23 @@ public:
     return box->token.get();
   }
 
+  /// Retrieve the set of protocols that are inverted by this type's
+  /// primary definition.
+  ///
+  /// This type might still conditionally conform to any of the protocols
+  /// that are inverted here, but that information is recorded in the
+  /// conditional inverted protocols of the corresponding `GenericContext`.
+  const InvertibleProtocolSet &
+  getInvertedProtocols() const {
+    assert(this->hasInvertibleProtocols());
+    return
+      *this->template getTrailingObjects<InvertibleProtocolSet>();
+  }
+               
+  size_t numTrailingObjects(OverloadToken<InvertibleProtocolSet>) const {
+    return this->hasInvertibleProtocols() ? 1 : 0;
+  }
+
   static bool classof(const TargetContextDescriptor<Runtime> *cd) {
     return cd->getKind() == ContextDescriptorKind::Enum;
   }
@@ -4739,6 +4827,31 @@ TargetContextDescriptor<Runtime>::getGenericContext() const {
     return llvm::cast<TargetOpaqueTypeDescriptor<Runtime>>(this)
         ->getGenericContext();
   default:    
+    // We don't know about this kind of descriptor.
+    return nullptr;
+  }
+}
+
+template<typename Runtime>
+inline const InvertibleProtocolSet *
+TargetContextDescriptor<Runtime>::getInvertedProtocols() const {
+  if (!this->hasInvertibleProtocols())
+    return nullptr;
+
+  switch (getKind()) {
+  case ContextDescriptorKind::Class:
+    return &llvm::cast<TargetClassDescriptor<Runtime>>(this)
+        ->getInvertedProtocols();
+  case ContextDescriptorKind::Enum:
+    return &llvm::cast<TargetEnumDescriptor<Runtime>>(this)
+        ->getInvertedProtocols();
+  case ContextDescriptorKind::Struct:
+    return &llvm::cast<TargetStructDescriptor<Runtime>>(this)
+        ->getInvertedProtocols();
+  case ContextDescriptorKind::OpaqueType:
+    return &llvm::cast<TargetOpaqueTypeDescriptor<Runtime>>(this)
+        ->getInvertedProtocols();
+  default:
     // We don't know about this kind of descriptor.
     return nullptr;
   }
@@ -4970,7 +5083,7 @@ public:
 /// and then called through a fully-abstracted entry point whose arguments
 /// can be constructed in code.
 template <typename Runtime>
-struct TargetAccessibleFunctionRecord final {
+struct TargetAccessibleFunctionRecord {
 public:
   /// The name of the function, which is a unique string assigned to the
   /// function so it can be looked up later.

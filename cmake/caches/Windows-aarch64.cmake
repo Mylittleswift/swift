@@ -96,6 +96,7 @@ set(LLVM_TOOLCHAIN_TOOLS
       llvm-dwp
       llvm-lib
       llvm-lipo
+      llvm-ml
       llvm-mt
       llvm-nm
       llvm-objcopy
@@ -124,6 +125,7 @@ set(CLANG_TOOLS
       clang
       clangd
       clang-deps-launcher
+      clang-features-file
       clang-format
       clang-resource-headers
       clang-scan-deps

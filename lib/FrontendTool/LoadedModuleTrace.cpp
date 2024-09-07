@@ -17,6 +17,7 @@
 #include "swift/AST/Module.h"
 #include "swift/AST/ModuleLoader.h"
 #include "swift/AST/PluginRegistry.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/FileTypes.h"
 #include "swift/Basic/JSONSerialization.h"
 #include "swift/Frontend/FrontendOptions.h"
@@ -658,7 +659,7 @@ static void computeSwiftModuleTraceInfo(
     //
     // FIXME: This is incorrect if both paths are not relative w.r.t. to the
     // same root.
-    if (StringRef(depPath).startswith(prebuiltCachePath))
+    if (StringRef(depPath).starts_with(prebuiltCachePath))
       continue;
 
     // If we have a swiftmodule next to an interface, that interface path will

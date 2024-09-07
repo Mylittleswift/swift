@@ -16,6 +16,7 @@
 #include "swift/AST/DiagnosticsSema.h"
 #include "swift/AST/Requirement.h"
 #include "swift/AST/Type.h"
+#include "swift/Basic/Assertions.h"
 #include "RequirementMachine.h"
 #include "RewriteSystem.h"
 
@@ -108,26 +109,22 @@ bool swift::rewriting::diagnoseRequirementErrors(
     }
 
     case RequirementError::Kind::InvalidInverseSubject: {
-      auto requirement = error.getRequirement();
-      if (requirement.hasError())
-        break;
+      auto inverse = error.getInverse();
+      auto subjectType = inverse.subject;
+      auto protoKind = getKnownProtocolKind(inverse.getKind());
 
-      assert(requirement.getKind() == RequirementKind::Conformance);
+      StringRef name = getProtocolName(protoKind);
 
-      auto subjectType = requirement.getFirstType();
-      auto constraintType = requirement.getSecondType();
+      if (subjectType->is<DependentMemberType>()) {
+        // explain that associated types can't have inverses
+        ctx.Diags.diagnose(loc, diag::inverse_associatedtype_restriction,
+                           name);
+      } else {
+        // generic diagnostic
+        ctx.Diags.diagnose(loc, diag::requires_not_suitable_inverse_subject,
+                           subjectType, name);
+      }
 
-      assert(constraintType->is<ProtocolCompositionType>());
-
-      // Pick one of the inverses to diagnose.
-      auto inverses =
-          constraintType->getAs<ProtocolCompositionType>()->getInverses();
-      assert(!inverses.empty());
-
-      StringRef name = getProtocolName(getKnownProtocolKind(*inverses.begin()));
-
-      ctx.Diags.diagnose(loc, diag::requires_not_suitable_inverse_subject,
-                         subjectType, name);
       diagnosedError = true;
       break;
     }
@@ -206,7 +203,7 @@ bool swift::rewriting::diagnoseRequirementErrors(
       if (requirement.hasError())
         break;
 
-      assert(requirement.getKind() == RequirementKind::SameType ||
+      ASSERT(requirement.getKind() == RequirementKind::SameType ||
              requirement.getKind() == RequirementKind::Superclass);
 
       ctx.Diags.diagnose(loc,
@@ -225,6 +222,42 @@ bool swift::rewriting::diagnoseRequirementErrors(
         break;
 
       ctx.Diags.diagnose(loc, diag::unsupported_same_element);
+      diagnosedError = true;
+      break;
+    }
+
+    case RequirementError::Kind::InvalidValueGenericType: {
+      auto req = error.getRequirement();
+
+      if (req.hasError())
+        break;
+
+      ctx.Diags.diagnose(loc, diag::invalid_value_type_value_generic,
+                         req.getSecondType(), req.getFirstType());
+      diagnosedError = true;
+      break;
+    }
+
+    case RequirementError::Kind::InvalidValueGenericConformance: {
+      auto req = error.getRequirement();
+
+      if (req.hasError())
+        break;
+
+      ctx.Diags.diagnose(loc, diag::invalid_value_generic_conformance,
+                         req.getFirstType(), req.getSecondType());
+      diagnosedError = true;
+      break;
+    }
+
+    case RequirementError::Kind::InvalidValueGenericSameType: {
+      auto req = error.getRequirement();
+
+      if (req.hasError())
+        break;
+
+      ctx.Diags.diagnose(loc, diag::invalid_value_generic_same_type,
+                         req.getFirstType(), req.getSecondType());
       diagnosedError = true;
       break;
     }
@@ -276,7 +309,7 @@ void RewriteSystem::computeConflictingRequirementDiagnostics(
     const auto &firstRule = getRule(pair.first);
     const auto &secondRule = getRule(pair.second);
 
-    assert(firstRule.isPropertyRule() && secondRule.isPropertyRule());
+    ASSERT(firstRule.isPropertyRule() && secondRule.isPropertyRule());
 
     if (firstRule.isSubstitutionSimplified() ||
         secondRule.isSubstitutionSimplified())
@@ -312,7 +345,7 @@ void RewriteSystem::computeRecursiveRequirementDiagnostics(
   for (unsigned ruleID : RecursiveRules) {
     const auto &rule = getRule(ruleID);
 
-    assert(isInMinimizationDomain(rule.getRHS()[0].getRootProtocol()));
+    ASSERT(isInMinimizationDomain(rule.getRHS()[0].getRootProtocol()));
 
     Type subjectType = propertyMap.getTypeForTerm(rule.getRHS(), genericParams);
     errors.push_back(RequirementError::forRecursiveRequirement(

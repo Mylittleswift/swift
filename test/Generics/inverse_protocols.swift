@@ -1,6 +1,6 @@
-// RUN: %target-typecheck-verify-swift -enable-experimental-feature NoncopyableGenerics
+// RUN: %target-typecheck-verify-swift
 
-// REQUIRES: noncopyable_generics
+
 
 protocol Eq: ~Copyable {
   func same(as: borrowing Self) -> Bool

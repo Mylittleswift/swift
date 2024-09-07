@@ -27,6 +27,7 @@
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/IRGenOptions.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/Subsystems.h"
 
@@ -115,8 +116,8 @@ static void addYAMLTypeInfoNode(NominalTypeDecl *NTD,
   Result.push_back(createYAMLTypeInfoNode(NTD, IGM, fixedTI));
 }
 
-static llvm::Optional<YAMLModuleNode> createYAMLModuleNode(ModuleDecl *Mod,
-                                                           IRGenModule &IGM) {
+static std::optional<YAMLModuleNode> createYAMLModuleNode(ModuleDecl *Mod,
+                                                          IRGenModule &IGM) {
   std::vector<NominalTypeDecl *> Decls;
   NominalTypeWalker Walker(Decls);
 
@@ -137,7 +138,7 @@ static llvm::Optional<YAMLModuleNode> createYAMLModuleNode(ModuleDecl *Mod,
   }
 
   if (Nodes.empty())
-    return llvm::None;
+    return std::nullopt;
 
   std::sort(Nodes.begin(), Nodes.end());
 

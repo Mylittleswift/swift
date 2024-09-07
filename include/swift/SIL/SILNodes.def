@@ -543,6 +543,8 @@ ABSTRACT_VALUE_AND_INST(SingleValueInstruction, ValueBase, SILInstruction)
                     SingleValueInstruction, MayRead, DoesNotRelease)
   SINGLE_VALUE_INST(BeginBorrowInst, begin_borrow,
                     SingleValueInstruction, MayHaveSideEffects, DoesNotRelease)
+  SINGLE_VALUE_INST(BorrowedFromInst, borrowed,
+                    SingleValueInstruction, None, DoesNotRelease)
   SINGLE_VALUE_INST(StoreBorrowInst, store_borrow,
                     SILInstruction, MayWrite, DoesNotRelease)
   // begin_access may trap. Trapping is unordered with respect to memory access,
@@ -561,13 +563,17 @@ ABSTRACT_VALUE_AND_INST(SingleValueInstruction, ValueBase, SILInstruction)
   SINGLE_VALUE_INST(ProjectExistentialBoxInst, project_existential_box,
                     SingleValueInstruction, None, DoesNotRelease)
 
-  // Function Application
+  // Functions
   SINGLE_VALUE_INST(ApplyInst, apply,
                     SingleValueInstruction, MayHaveSideEffects, MayRelease)
   SINGLE_VALUE_INST(BuiltinInst, builtin,
                     SingleValueInstruction, MayHaveSideEffects, MayRelease)
   SINGLE_VALUE_INST(PartialApplyInst, partial_apply,
                     SingleValueInstruction, MayHaveSideEffects, DoesNotRelease)
+  SINGLE_VALUE_INST(EndApplyInst, end_apply,
+                    SILInstruction, MayHaveSideEffects, MayRelease)  
+  SINGLE_VALUE_INST(FunctionExtractIsolationInst, function_extract_isolation,
+                    SingleValueInstruction, None, DoesNotRelease)
 
   // Metatypes
   SINGLE_VALUE_INST(MetatypeInst, metatype,
@@ -577,6 +583,8 @@ ABSTRACT_VALUE_AND_INST(SingleValueInstruction, ValueBase, SILInstruction)
   SINGLE_VALUE_INST(ExistentialMetatypeInst, existential_metatype,
                     SingleValueInstruction, MayRead, DoesNotRelease)
   SINGLE_VALUE_INST(ObjCProtocolInst, objc_protocol,
+                    SingleValueInstruction, None, DoesNotRelease)
+  SINGLE_VALUE_INST(TypeValueInst, type_value,
                     SingleValueInstruction, None, DoesNotRelease)
 
   // Aggregate Types
@@ -858,6 +866,8 @@ NON_VALUE_INST(DestroyAddrInst, destroy_addr,
                SILInstruction, MayHaveSideEffects, MayRelease)
 NON_VALUE_INST(EndLifetimeInst, end_lifetime,
                SILInstruction, MayHaveSideEffects, MayRelease)
+NON_VALUE_INST(ExtendLifetimeInst, extend_lifetime,
+               SILInstruction, None, DoesNotRelease)
 NON_VALUE_INST(InjectEnumAddrInst, inject_enum_addr,
                SILInstruction, MayWrite, DoesNotRelease)
 NON_VALUE_INST(DeinitExistentialAddrInst, deinit_existential_addr,
@@ -871,8 +881,6 @@ NON_VALUE_INST(UncheckedRefCastAddrInst, unchecked_ref_cast_addr,
                SILInstruction, MayHaveSideEffects, DoesNotRelease)
 NON_VALUE_INST(AllocGlobalInst, alloc_global,
                SILInstruction, MayHaveSideEffects, DoesNotRelease)
-NON_VALUE_INST(EndApplyInst, end_apply,
-               SILInstruction, MayHaveSideEffects, MayRelease)
 NON_VALUE_INST(AbortApplyInst, abort_apply,
                SILInstruction, MayHaveSideEffects, MayRelease)
 NON_VALUE_INST(PackElementSetInst, pack_element_set,

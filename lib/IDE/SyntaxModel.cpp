@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/IDE/SyntaxModel.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Defer.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTWalker.h"
@@ -58,11 +59,11 @@ struct SyntaxModelContext::Implementation {
 /// If the given tokens start with the expected tokens and they all appear on
 ///  the same line, the source location beyond the final matched token and
 ///  number of matched tokens are returned. Otherwise None is returned.
-static llvm::Optional<Located<unsigned>>
+static std::optional<Located<unsigned>>
 matchImageOrFileLiteralArg(ArrayRef<Token> Tokens) {
   const unsigned NUM_TOKENS = 5;
   if (Tokens.size() < NUM_TOKENS)
-    return llvm::None;
+    return std::nullopt;
   const tok kinds[NUM_TOKENS] = {
       tok::l_paren,
       tok::identifier, tok::colon, tok::string_literal,
@@ -72,10 +73,10 @@ matchImageOrFileLiteralArg(ArrayRef<Token> Tokens) {
     // FIXME: some editors don't handle multi-line object literals very well,
     // so don't report them as object literals for now.
     if (Tokens[i].getKind() != kinds[i] || Tokens[i].isAtStartOfLine())
-      return llvm::None;
+      return std::nullopt;
   }
   if (Tokens[1].getText() != "resourceName")
-    return llvm::None;
+    return std::nullopt;
   auto EndToken = Tokens[NUM_TOKENS-1];
   return Located<unsigned>(NUM_TOKENS, EndToken.getLoc().getAdvancedLoc(EndToken.getLength()));
 }
@@ -86,11 +87,11 @@ matchImageOrFileLiteralArg(ArrayRef<Token> Tokens) {
 /// If the given tokens start with the expected tokens and they all appear on
 /// the same line, the source location beyond the final matched token and number
 /// of matched tokens are returned. Otherwise None is returned.
-static llvm::Optional<Located<unsigned>>
+static std::optional<Located<unsigned>>
 matchColorLiteralArg(ArrayRef<Token> Tokens) {
   const unsigned NUM_TOKENS = 17;
   if (Tokens.size() < NUM_TOKENS)
-    return llvm::None;
+    return std::nullopt;
   const tok kinds[NUM_TOKENS] = {
     tok::l_paren,
     tok::identifier, tok::colon, tok::floating_literal, tok::comma,
@@ -106,11 +107,11 @@ matchColorLiteralArg(ArrayRef<Token> Tokens) {
     // FIXME: some editors don't handle multi-line object literals very well,
     // so don't report them as object literals for now.
     if (Kind != kinds[i] || Tokens[i].isAtStartOfLine())
-      return llvm::None;
+      return std::nullopt;
   }
   if (Tokens[1].getText() != "red" || Tokens[5].getText() != "green" ||
       Tokens[9].getText() != "blue" || Tokens[13].getText() != "alpha")
-    return llvm::None;
+    return std::nullopt;
   auto EndToken = Tokens[NUM_TOKENS-1];
   return Located<unsigned>(NUM_TOKENS, EndToken.getLoc().getAdvancedLoc(EndToken.getLength()));
 }
@@ -130,7 +131,7 @@ SyntaxModelContext::SyntaxModelContext(SourceFile &SrcFile)
         continue;
     SyntaxNodeKind Kind;
     SourceLoc Loc;
-    llvm::Optional<unsigned> Length;
+    std::optional<unsigned> Length;
     if (AttrLoc.isValid()) {
       // This token is following @, see if it's a known attribute name.
       // Type attribute, decl attribute, or '@unknown' for swift case statement.
@@ -207,7 +208,7 @@ SyntaxModelContext::SyntaxModelContext(SourceFile &SrcFile)
         Kind = SyntaxNodeKind::Keyword;
         break;
       case tok::identifier:
-        if (Tok.getText().startswith("<#"))
+        if (Tok.getText().starts_with("<#"))
           Kind = SyntaxNodeKind::EditorPlaceholder;
         else
           Kind = SyntaxNodeKind::Identifier;
@@ -247,13 +248,13 @@ SyntaxModelContext::SyntaxModelContext(SourceFile &SrcFile)
         break;
 
       case tok::comment:
-        if (Tok.getText().startswith("///") ||
-            (IsPlayground && Tok.getText().startswith("//:")))
+        if (Tok.getText().starts_with("///") ||
+            (IsPlayground && Tok.getText().starts_with("//:")))
           Kind = SyntaxNodeKind::DocCommentLine;
-        else if (Tok.getText().startswith("/**") ||
-                 (IsPlayground && Tok.getText().startswith("/*:")))
+        else if (Tok.getText().starts_with("/**") ||
+                 (IsPlayground && Tok.getText().starts_with("/*:")))
           Kind = SyntaxNodeKind::DocCommentBlock;
-        else if (Tok.getText().startswith("//"))
+        else if (Tok.getText().starts_with("//"))
           Kind = SyntaxNodeKind::CommentLine;
         else
           Kind = SyntaxNodeKind::CommentBlock;
@@ -270,7 +271,7 @@ SyntaxModelContext::SyntaxModelContext(SourceFile &SrcFile)
       }
 
       case tok::unknown: {
-        if (Tok.getRawText().ltrim('#').startswith("\"")) {
+        if (Tok.getRawText().ltrim('#').starts_with("\"")) {
           // This is likely an invalid single-line ("), multi-line ("""),
           // or raw (#", ##", #""", etc.) string literal.
           Kind = SyntaxNodeKind::String;
@@ -350,8 +351,8 @@ class ModelASTWalker : public ASTWalker {
   SourceLoc LastLoc;
   static const std::regex &getURLRegex(StringRef Protocol);
 
-  llvm::Optional<SyntaxNode> parseFieldNode(StringRef Text, StringRef OrigText,
-                                            SourceLoc OrigLoc);
+  std::optional<SyntaxNode> parseFieldNode(StringRef Text, StringRef OrigText,
+                                           SourceLoc OrigLoc);
   llvm::DenseSet<ASTNode> NodesVisitedBefore;
   /// When non-zero, we should avoid passing tokens as syntax nodes since a parent of several tokens
   /// is considered as one, e.g. object literal expression.
@@ -402,7 +403,14 @@ public:
   PostWalkResult<Stmt *> walkToStmtPost(Stmt *S) override;
   PreWalkAction walkToDeclPre(Decl *D) override;
   PostWalkAction walkToDeclPost(Decl *D) override;
+
+  QualifiedIdentTypeReprWalkingScheme
+  getQualifiedIdentTypeReprWalkingScheme() const override {
+    return QualifiedIdentTypeReprWalkingScheme::SourceOrderRecursive;
+  }
+
   PreWalkAction walkToTypeReprPre(TypeRepr *T) override;
+
   bool shouldWalkIntoGenericParams() override { return true; }
 
 private:
@@ -430,7 +438,7 @@ private:
   };
   struct PassUntilResult {
     bool shouldContinue;
-    llvm::Optional<SyntaxNode> MatchedToken;
+    std::optional<SyntaxNode> MatchedToken;
   };
 
   PassUntilResult
@@ -1122,12 +1130,12 @@ ASTWalker::PreWalkAction ModelASTWalker::walkToTypeReprPre(TypeRepr *T) {
     if (!handleAttrs(AttrT->getAttrs()))
       return Action::SkipNode();
 
-  } else if (auto IdT = dyn_cast<IdentTypeRepr>(T)) {
-    if (!passTokenNodesUntil(IdT->getStartLoc(),
-                             ExcludeNodeAtLocation).shouldContinue)
+  } else if (auto *DeclRefT = dyn_cast<DeclRefTypeRepr>(T)) {
+    if (!passTokenNodesUntil(DeclRefT->getLoc(), ExcludeNodeAtLocation)
+             .shouldContinue)
       return Action::SkipNode();
     if (TokenNodes.empty() ||
-        TokenNodes.front().Range.getStart() != IdT->getStartLoc())
+        TokenNodes.front().Range.getStart() != DeclRefT->getLoc())
       return Action::SkipNode();
     if (!passNode({SyntaxNodeKind::TypeId, TokenNodes.front().Range}))
       return Action::SkipNode();
@@ -1333,7 +1341,7 @@ ModelASTWalker::passTokenNodesUntil(SourceLoc Loc,
                                     PassNodesBehavior Behavior) {
   assert(Loc.isValid());
   unsigned I = 0;
-  llvm::Optional<SyntaxNode> MatchedToken;
+  std::optional<SyntaxNode> MatchedToken;
   for (unsigned E = TokenNodes.size(); I != E; ++I) {
     SourceLoc StartLoc = TokenNodes[I].Range.getStart();
     if (SM.isBeforeInBuffer(Loc, StartLoc)) {
@@ -1352,7 +1360,7 @@ ModelASTWalker::passTokenNodesUntil(SourceLoc Loc,
     }
     if (!AvoidPassingSyntaxToken) {
       if (!passNode(TokenNodes[I]))
-        return {false, llvm::None};
+        return {false, std::nullopt};
     }
   }
 
@@ -1451,8 +1459,8 @@ bool ModelASTWalker::processComment(CharSourceRange Range) {
 
     Text = Text.substr(Pos);
     Loc = Loc.getAdvancedLoc(Pos);
-    if (Text.startswith("FIXME:") || Text.startswith("TODO:") ||
-        Text.startswith("MARK:"))
+    if (Text.starts_with("FIXME:") || Text.starts_with("TODO:") ||
+        Text.starts_with("MARK:"))
       break;
     Text = Text.substr(1);
     Loc = Loc.getAdvancedLoc(1);
@@ -1462,7 +1470,7 @@ bool ModelASTWalker::processComment(CharSourceRange Range) {
   if (NewLinePos != StringRef::npos) {
     Text = Text.substr(0, NewLinePos);
   }
-  if (Text.endswith("*/")) {
+  if (Text.ends_with("*/")) {
     Text = Text.drop_back(2);
   }
   Text = Text.rtrim();
@@ -1496,7 +1504,7 @@ bool ModelASTWalker::findUrlStartingLoc(StringRef Text,
       Text.substr(Index - Name.size(), Name.size()) == Name;
   };
 
-  auto HasSlash = Text.substr(Index).startswith("://");
+  auto HasSlash = Text.substr(Index).starts_with("://");
 
   if (HasSlash) {
     for (auto It = URLProtocols.begin(); It < URLProtocols.end(); ++ It) {
@@ -1599,15 +1607,15 @@ public:
   // ^[ ]?- (parameter) [^:]*:
   // ^[ ]?- (Parameters):
   // ^[ ]*- (...MarkupSimpleFields.def...|returns):
-  llvm::Optional<StringRef> parseFieldName() {
+  std::optional<StringRef> parseFieldName() {
     unsigned numSpaces = 0;
     while (advanceIf(' '))
       ++numSpaces;
     if (!advanceIf('-') || !advanceIf(' '))
-      return llvm::None;
+      return std::nullopt;
 
     if (ptr == end || !clang::isAsciiIdentifierContinue(*ptr))
-      return llvm::None;
+      return std::nullopt;
     const char *identStart = ptr++;
     while (advanceIf([](char c) { return clang::isAsciiIdentifierContinue(c); }))
       ;
@@ -1615,16 +1623,16 @@ public:
 
     if (ident.equals_insensitive("parameter")) {
       if (numSpaces > 1 || !advanceIf(' '))
-        return llvm::None;
+        return std::nullopt;
       while (advanceIf([](char c) { return c != ':'; }))
         ;
       if (!advanceIf(':'))
-        return llvm::None;
+        return std::nullopt;
       return ident;
 
     } else if (advanceIf(':')) {
       if (ident.equals_insensitive("parameters") && numSpaces > 1)
-        return llvm::None;
+        return std::nullopt;
       auto lowerIdent = ident.lower();
       bool isField = llvm::StringSwitch<bool>(lowerIdent)
 #define MARKUP_SIMPLE_FIELD(Id, Keyword, XMLKind) .Case(#Keyword, true)
@@ -1636,20 +1644,20 @@ public:
         return ident;
     }
 
-    return llvm::None;
+    return std::nullopt;
   }
 };
 } // end anonymous namespace
 
-llvm::Optional<SyntaxNode> ModelASTWalker::parseFieldNode(StringRef Text,
-                                                          StringRef OrigText,
-                                                          SourceLoc OrigLoc) {
-  llvm::Optional<SyntaxNode> Node;
+std::optional<SyntaxNode> ModelASTWalker::parseFieldNode(StringRef Text,
+                                                         StringRef OrigText,
+                                                         SourceLoc OrigLoc) {
+  std::optional<SyntaxNode> Node;
   DocFieldParser parser(Text);
   if (auto ident = parser.parseFieldName()) {
     auto loc = OrigLoc.getAdvancedLoc(ident->data() - OrigText.data());
     CharSourceRange range(loc, ident->size());
-    Node = llvm::Optional<SyntaxNode>({SyntaxNodeKind::DocCommentField, range});
+    Node = std::optional<SyntaxNode>({SyntaxNodeKind::DocCommentField, range});
   }
   return Node;
 }
@@ -1674,13 +1682,13 @@ bool ModelASTWalker::findFieldsInDocCommentBlock(SyntaxNode Node) {
   auto OrigText = SM.extractText(Node.Range, BufferID);
   auto OrigLoc = Node.Range.getStart();
 
-  if (!OrigText.startswith("/**") &&
-      !(LangOpts.Playground && OrigText.startswith("/*:")))
+  if (!OrigText.starts_with("/**") &&
+      !(LangOpts.Playground && OrigText.starts_with("/*:")))
     return true;
 
   auto Text = OrigText.drop_front(3); // Drop "^/**" or "/*:"
 
-  if (!Text.endswith("*/"))
+  if (!Text.ends_with("*/"))
     return true;
 
   Text = Text.drop_back(2); // Drop "*/"

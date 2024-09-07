@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Basic/Assertions.h"
 #include "swift/IDE/ArgumentCompletion.h"
 #include "swift/IDE/CodeCompletion.h"
 #include "swift/IDE/CompletionLookup.h"
@@ -50,7 +51,8 @@ bool ArgumentTypeCheckCompletionCallback::addPossibleParams(
     const AnyFunctionType::Param *TypeParam = &ParamsToPass[Idx];
     bool Required = !Res.DeclParamIsOptional[Idx];
 
-    if (Res.FirstTrailingClosureIndex && Idx > *Res.FirstTrailingClosureIndex &&
+    if (Res.FirstTrailingClosureIndex &&
+        Res.ArgIdx > *Res.FirstTrailingClosureIndex &&
         !TypeParam->getPlainType()
              ->lookThroughAllOptionalTypes()
              ->is<AnyFunctionType>()) {
@@ -89,41 +91,16 @@ bool ArgumentTypeCheckCompletionCallback::addPossibleParams(
   return ShowGlobalCompletions;
 }
 
-/// Applies heuristic to determine whether the result type of \p E is
-/// unconstrained, that is if the constraint system is satisfiable for any
-/// result type of \p E.
-static bool isExpressionResultTypeUnconstrained(const Solution &S, Expr *E) {
-  ConstraintSystem &CS = S.getConstraintSystem();
-  if (auto ParentExpr = CS.getParentExpr(E)) {
-    if (auto Assign = dyn_cast<AssignExpr>(ParentExpr)) {
-      if (isa<DiscardAssignmentExpr>(Assign->getDest())) {
-        // _ = <expr> is unconstrained
-        return true;
-      }
-    } else if (isa<RebindSelfInConstructorExpr>(ParentExpr)) {
-      // super.init() is unconstrained (it always produces the correct result
-      // by definition)
+/// Returns whether `E` has a parent expression with arguments.
+static bool hasParentCallLikeExpr(Expr *E, ConstraintSystem &CS) {
+  E = CS.getParentExpr(E);
+  while (E) {
+    if (E->getArgs() || isa<ParenExpr>(E) || isa<TupleExpr>(E) || isa<CollectionExpr>(E)) {
       return true;
     }
+    E = CS.getParentExpr(E);
   }
-  auto target = S.getTargetFor(E);
-  if (!target)
-    return false;
-
-  assert(target->kind == SyntacticElementTarget::Kind::expression);
-  switch (target->getExprContextualTypePurpose()) {
-  case CTP_Unused:
-    // If we aren't using the contextual type, its unconstrained by definition.
-    return true;
-  case CTP_Initialization: {
-    // let x = <expr> is unconstrained
-    auto contextualType = target->getExprContextualType();
-    return !contextualType || contextualType->is<UnresolvedType>();
-  }
-  default:
-    // Assume that it's constrained by default.
-    return false;
-  }
+  return false;
 }
 
 void ArgumentTypeCheckCompletionCallback::sawSolutionImpl(const Solution &S) {
@@ -160,10 +137,21 @@ void ArgumentTypeCheckCompletionCallback::sawSolutionImpl(const Solution &S) {
   auto ArgIdx = ArgInfo->completionIdx;
 
   Type ExpectedCallType;
-  if (!isExpressionResultTypeUnconstrained(S, ParentCall)) {
-    ExpectedCallType = getTypeForCompletion(S, ParentCall);
+  if (auto ArgLoc = S.getConstraintSystem().getArgumentLocator(ParentCall)) {
+    if (auto FuncArgApplyInfo = S.getFunctionArgApplyInfo(ArgLoc)) {
+      Type ParamType = FuncArgApplyInfo->getParamInterfaceType();
+      ExpectedCallType = S.simplifyTypeForCodeCompletion(ParamType);
+    }
   }
-
+  if (!ExpectedCallType) {
+    if (auto ContextualType = S.getContextualType(ParentCall)) {
+      ExpectedCallType = ContextualType;
+    }
+  }
+  if (ExpectedCallType && ExpectedCallType->hasUnresolvedType()) {
+    ExpectedCallType = Type();
+  }
+  
   auto *CallLocator = CS.getConstraintLocator(ParentCall);
   auto *CalleeLocator = S.getCalleeLocator(CallLocator);
 
@@ -182,7 +170,7 @@ void ArgumentTypeCheckCompletionCallback::sawSolutionImpl(const Solution &S) {
   // Find the parameter the completion was bound to (if any), as well as which
   // parameters are already bound (so we don't suggest them even when the args
   // are out of order).
-  llvm::Optional<unsigned> ParamIdx;
+  std::optional<unsigned> ParamIdx;
   std::set<unsigned> ClaimedParams;
   bool IsNoninitialVariadic = false;
 
@@ -216,7 +204,7 @@ void ArgumentTypeCheckCompletionCallback::sawSolutionImpl(const Solution &S) {
   }
 
   bool HasLabel = false;
-  llvm::Optional<unsigned> FirstTrailingClosureIndex = llvm::None;
+  std::optional<unsigned> FirstTrailingClosureIndex = std::nullopt;
   if (auto PE = CS.getParentExpr(CompletionExpr)) {
     if (auto Args = PE->getArgs()) {
       HasLabel = !Args->getLabel(ArgIdx).empty();
@@ -284,6 +272,15 @@ void ArgumentTypeCheckCompletionCallback::sawSolutionImpl(const Solution &S) {
     // and the code completion token doesn’t have a label, we have a case like
     // `Point(|)`. Suggest the entire function signature.
     IncludeSignature = true;
+  } else if (!ParentCall->getArgs()->empty() &&
+             ParentCall->getArgs()->getExpr(0) == CompletionExpr &&
+             !ParentCall->getArgs()->get(0).hasLabel()) {
+    if (hasParentCallLikeExpr(ParentCall, CS)) {
+      // We are completing in cases like `bar(arg: foo(|, option: 1)`
+      // In these cases, we don’t know if `option` belongs to the call to `foo`
+      // or `bar`. Be defensive and also suggest the signature.
+      IncludeSignature = true;
+    }
   }
 
   Results.push_back(

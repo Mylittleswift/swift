@@ -118,6 +118,10 @@ public:
   /// Controls whether to run async demotion pass.
   bool EnableAsyncDemotion = false;
 
+  /// Controls whether to always assume that functions rarely throw an Error
+  /// within the optimizer. This influences static branch prediction.
+  bool EnableThrowsPrediction = false;
+
   /// Should we run any SIL performance optimizations
   ///
   /// Useful when you want to enable -O LLVM opts but not -O SIL opts.
@@ -125,6 +129,12 @@ public:
 
   /// Controls whether cross module optimization is enabled.
   CrossModuleOptimizationMode CMOMode = CrossModuleOptimizationMode::Off;
+
+  /// Optimization to perform default mode CMO within a package boundary.
+  /// Package CMO can be performed for resiliently built modules as package
+  /// modules are required to be built together in the same project. To enable
+  /// this optimization, the module also needs -allow-non-resilient-access.
+  bool EnableSerializePackage = false;
 
   /// Enables the emission of stack protectors in functions.
   bool EnableStackProtection = true;
@@ -136,6 +146,13 @@ public:
   /// Enables codegen support for clang imported ptrauth qualified field
   /// function pointers.
   bool EnableImportPtrauthFieldFunctionPointers = false;
+
+  /// Enables SIL-level diagnostics for NonescapableTypes.
+  bool EnableLifetimeDependenceDiagnostics = true;
+
+  /// Enables SIL-level performance diagnostics (for @noLocks, @noAllocation
+  /// annotations and for Embedded Swift).
+  bool EnablePerformanceDiagnostics = true;
 
   /// Controls whether or not paranoid verification checks are run.
   bool VerifyAll = false;
@@ -171,8 +188,11 @@ public:
   /// If set to true, compile with the SIL Opaque Values enabled.
   bool EnableSILOpaqueValues = false;
 
-  /// Require linear OSSA lifetimes after SILGen
-  bool OSSACompleteLifetimes = false;
+  /// Introduce linear OSSA lifetimes after SILGen
+  bool OSSACompleteLifetimes = true;
+
+  /// Verify linear OSSA lifetimes throughout OSSA pipeline.
+  bool OSSAVerifyComplete = false;
 
   /// Enable pack metadata stack "promotion".
   ///
@@ -270,17 +290,15 @@ public:
   /// Are we parsing the stdlib, i.e. -parse-stdlib?
   bool ParseStdlib = false;
 
-  /// If true, check for leaking instructions when the SILModule is destructed.
-  ///
-  /// Warning: this is not thread safe. It can only be enabled in case there
-  /// is a single SILModule in a single thread.
-  bool checkSILModuleLeaks = false;
-
   /// Are we building in embedded Swift mode?
   bool EmbeddedSwift = false;
 
   /// Are we building in embedded Swift + -no-allocations?
   bool NoAllocations = false;
+
+  /// Should we use the experimental Swift based closure-specialization
+  /// optimization pass instead of the existing C++ one.
+  bool EnableExperimentalSwiftBasedClosureSpecialization = false;
 
   /// The name of the file to which the backend should save optimization
   /// records.
@@ -292,6 +310,10 @@ public:
 
   /// The format used for serializing remarks (default: YAML)
   llvm::remarks::Format OptRecordFormat = llvm::remarks::Format::YAML;
+
+  /// Are there any options that indicate that functions should not be preserved
+  /// for the debugger?
+  bool ShouldFunctionsBePreservedToDebugger = true;
 
   SILOptions() {}
 

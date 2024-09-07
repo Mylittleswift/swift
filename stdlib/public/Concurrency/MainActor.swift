@@ -20,20 +20,12 @@ import Swift
 
   @inlinable
   public nonisolated var unownedExecutor: UnownedSerialExecutor {
-    #if compiler(>=5.5) && $BuiltinBuildMainExecutor
     return UnownedSerialExecutor(Builtin.buildMainActorExecutorRef())
-    #else
-    fatalError("Swift compiler is incompatible with this SDK version")
-    #endif
   }
 
   @inlinable
   public static var sharedUnownedExecutor: UnownedSerialExecutor {
-    #if compiler(>=5.5) && $BuiltinBuildMainExecutor
     return UnownedSerialExecutor(Builtin.buildMainActorExecutorRef())
-    #else
-    fatalError("Swift compiler is incompatible with this SDK version")
-    #endif
   }
 
   @inlinable
@@ -50,20 +42,12 @@ import Swift
 
   @inlinable
   public nonisolated var unownedExecutor: UnownedSerialExecutor {
-    #if compiler(>=5.5) && $BuiltinBuildMainExecutor
     return UnownedSerialExecutor(Builtin.buildMainActorExecutorRef())
-    #else
-    fatalError("Swift compiler is incompatible with this SDK version")
-    #endif
   }
 
   @inlinable
   public static var sharedUnownedExecutor: UnownedSerialExecutor {
-    #if compiler(>=5.5) && $BuiltinBuildMainExecutor
     return UnownedSerialExecutor(Builtin.buildMainActorExecutorRef())
-    #else
-    fatalError("Swift compiler is incompatible with this SDK version")
-    #endif
   }
 
   @inlinable
@@ -137,13 +121,12 @@ extension MainActor {
   /// - Returns: the return value of the `operation`
   /// - Throws: rethrows the `Error` thrown by the operation if it threw
   @available(SwiftStdlib 5.1, *)
-  @backDeployed(before: SwiftStdlib 5.9)
+  @_alwaysEmitIntoClient
   @_unavailableFromAsync(message: "await the call to the @MainActor closure directly")
-  public static func assumeIsolated<T>(
+  public static func assumeIsolated<T : Sendable>(
       _ operation: @MainActor () throws -> T,
       file: StaticString = #fileID, line: UInt = #line
   ) rethrows -> T {
-
     typealias YesActor = @MainActor () throws -> T
     typealias NoActor = () throws -> T
 
@@ -161,6 +144,16 @@ extension MainActor {
       let rawFn = unsafeBitCast(fn, to: NoActor.self)
       return try rawFn()
     }
+  }
+
+  @available(SwiftStdlib 5.9, *)
+  @usableFromInline
+  @_silgen_name("$sScM14assumeIsolated_4file4linexxyKScMYcXE_s12StaticStringVSutKlFZ")
+  internal static func __abi__assumeIsolated<T : Sendable>(
+      _ operation: @MainActor () throws -> T,
+      _ file: StaticString, _ line: UInt
+  ) rethrows -> T {
+    try assumeIsolated(operation, file: file, line: line)
   }
 }
 #endif

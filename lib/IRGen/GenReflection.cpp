@@ -21,6 +21,7 @@
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/SubstitutionMap.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Platform.h"
 #include "swift/IRGen/Linking.h"
 #include "swift/RemoteInspection/MetadataSourceBuilder.h"
@@ -174,62 +175,92 @@ public:
   }
 };
 
-llvm::Optional<llvm::VersionTuple>
+std::optional<llvm::VersionTuple>
 getRuntimeVersionThatSupportsDemanglingType(CanType type) {
-  // The Swift 5.11 runtime is the first version able to demangle types
-  // that involve typed throws.
-  bool usesTypedThrows = type.findIf([](CanType t) -> bool {
+  enum VersionRequirement {
+    None,
+    Swift_5_2,
+    Swift_5_5,
+    Swift_6_0,
+
+    // Short-circuit if we find this requirement.
+    Latest = Swift_6_0
+  };
+
+  VersionRequirement latestRequirement = None;
+  auto addRequirement = [&](VersionRequirement req) -> bool {
+    if (req > latestRequirement) {
+      latestRequirement = req;
+      return req == Latest;
+    }
+    return false;
+  };
+
+  (void) type.findIf([&](CanType t) -> bool {
     if (auto fn = dyn_cast<AnyFunctionType>(t)) {
-      if (!fn.getThrownError().isNull())
-        return true;
+      // The Swift 6.0 runtime is the first version able to demangle types
+      // that involve typed throws or @isolated(any), or for that matter
+      // represent them at all at runtime.
+      if (!fn.getThrownError().isNull() || fn->getIsolation().isErased())
+        return addRequirement(Swift_6_0);
+
+      // The Swift 5.5 runtime is the first version able to demangle types
+      // related to concurrency.
+      if (fn->isAsync() || fn->isSendable() ||
+          !fn->getIsolation().isNonIsolated())
+        return addRequirement(Swift_5_5);
+
+      return false;
+    }
+
+    if (auto opaqueArchetype = dyn_cast<OpaqueTypeArchetypeType>(t)) {
+      // Associated types of opaque types weren't mangled in a usable
+      // form by the Swift 5.1 runtime, so we needed to add a new
+      // mangling in 5.2.
+      if (opaqueArchetype->getInterfaceType()->is<DependentMemberType>())
+        return addRequirement(Swift_5_2);
+
+      // Although opaque types in general were only added in Swift 5.1,
+      // declarations that use them are already covered by availability
+      // guards, so we don't need to limit availability of mangled names
+      // involving them.
+    }
+
+    /// Any nominal type that has an inverse requirement in its generic
+    /// signature uses NoncopyableGenerics. Since inverses are mangled into
+    /// symbols, a Swift 6.0+ runtime is generally needed to demangle them.
+    ///
+    /// We make an exception for types in the stdlib, like Optional, since the
+    /// runtime should still be able to demangle them, based on the availability
+    /// of the type.
+    if (auto nominalTy = dyn_cast<NominalOrBoundGenericNominalType>(t)) {
+      auto *nom = nominalTy->getDecl();
+      if (auto sig = nom->getGenericSignature()) {
+        SmallVector<InverseRequirement, 2> inverses;
+        SmallVector<Requirement, 2> reqs;
+        sig->getRequirementsWithInverses(reqs, inverses);
+        if (!inverses.empty() && !nom->getModuleContext()->isStdlibModule()) {
+          return addRequirement(Swift_6_0);
+        }
+      }
+    }
+
+    // Any composition with an inverse will need the 6.0 runtime to demangle.
+    if (auto pct = dyn_cast<ProtocolCompositionType>(t)) {
+      if (pct->hasInverse())
+        return addRequirement(Swift_6_0);
     }
 
     return false;
   });
-  if (usesTypedThrows) {
-    return llvm::VersionTuple(5, 11);
+
+  switch (latestRequirement) {
+  case Swift_6_0: return llvm::VersionTuple(6, 0);
+  case Swift_5_5: return llvm::VersionTuple(5, 5);
+  case Swift_5_2: return llvm::VersionTuple(5, 2);
+  case None: return std::nullopt;
   }
-
-  // The Swift 5.5 runtime is the first version able to demangle types
-  // related to concurrency.
-  bool needsConcurrency = type.findIf([](CanType t) -> bool {
-    if (auto fn = dyn_cast<AnyFunctionType>(t)) {
-      if (fn->isAsync() || fn->isSendable() || fn->hasGlobalActor())
-        return true;
-
-      for (const auto &param : fn->getParams()) {
-        if (param.isIsolated())
-          return true;
-      }
-
-      return false;
-    }
-    return false;
-  });
-  if (needsConcurrency) {
-    return llvm::VersionTuple(5, 5);
-  }
-
-  // Associated types of opaque types weren't mangled in a usable form by the
-  // Swift 5.1 runtime, so we needed to add a new mangling in 5.2.
-  if (type->hasOpaqueArchetype()) {
-    auto hasOpaqueAssocType = type.findIf([](CanType t) -> bool {
-      if (auto a = dyn_cast<ArchetypeType>(t)) {
-        return isa<OpaqueTypeArchetypeType>(a) &&
-          a->getInterfaceType()->is<DependentMemberType>();
-      }
-      return false;
-    });
-    
-    if (hasOpaqueAssocType)
-      return llvm::VersionTuple(5, 2);
-    // Although opaque types in general were only added in Swift 5.1,
-    // declarations that use them are already covered by availability
-    // guards, so we don't need to limit availability of mangled names
-    // involving them.
-  }
-
-  return llvm::None;
+  llvm_unreachable("bad kind");
 }
 
 // Produce a fallback mangled type name that uses an open-coded callback
@@ -406,10 +437,38 @@ getTypeRefImpl(IRGenModule &IGM,
     // signal from future runtimes whether they support noncopyable types before
     // exposing their metadata to them.
     Type contextualTy = type;
-    if (sig)
+    if (sig) {
       contextualTy = sig.getGenericEnvironment()->mapTypeIntoContext(type);
+    }
 
+    bool isAlwaysNoncopyable = false;
     if (contextualTy->isNoncopyable()) {
+      isAlwaysNoncopyable = true;
+
+      // If the contextual type has any archetypes in it, it's plausible that
+      // we could end up with a copyable type in some instances. Look for those
+      // so we can permit unsafe reflection of the field, by assuming it could
+      // be Copyable.
+      if (contextualTy->hasArchetype()) {
+        // If this is a nominal type, check whether it can ever be copyable.
+        if (auto nominal = contextualTy->getAnyNominal()) {
+          // If it's a nominal that can ever be Copyable _and_ it's defined in
+          // the stdlib, assume that we could end up with a Copyable type.
+          if (nominal->canBeCopyable()
+              && nominal->getModuleContext()->isStdlibModule())
+            isAlwaysNoncopyable = false;
+        } else {
+          // Assume that we could end up with a Copyable type somehow.
+          // This allows you to reflect a 'T: ~Copyable' stored in a type.
+          isAlwaysNoncopyable = false;
+        }
+      }
+    }
+
+    // The getTypeRefByFunction strategy will emit a forward-compatible runtime
+    // check to see if the runtime can safely reflect such fields. Otherwise,
+    // the field will be artificially hidden to reflectors.
+    if (isAlwaysNoncopyable) {
       IGM.IRGen.noteUseOfTypeMetadata(type);
       return getTypeRefByFunction(IGM, sig, type);
     }
@@ -699,7 +758,7 @@ protected:
   using GetAddrOfEntityFn = llvm::Constant* (IRGenModule &, ConstantInit);
 
   llvm::GlobalVariable *
-  emit(llvm::Optional<llvm::function_ref<GetAddrOfEntityFn>> getAddr,
+  emit(std::optional<llvm::function_ref<GetAddrOfEntityFn>> getAddr,
        const char *section) {
     layout();
 
@@ -733,8 +792,8 @@ protected:
     return var;
   }
 
-  llvm::GlobalVariable *emit(llvm::NoneType none, const char *section) {
-    return emit(llvm::Optional<llvm::function_ref<GetAddrOfEntityFn>>(),
+  llvm::GlobalVariable *emit(std::nullopt_t none, const char *section) {
+    return emit(std::optional<llvm::function_ref<GetAddrOfEntityFn>>(),
                 section);
   }
 
@@ -1172,7 +1231,7 @@ public:
 
   llvm::GlobalVariable *emit() {
     auto section = IGM.getMultiPayloadEnumDescriptorSectionName();
-    return ReflectionMetadataBuilder::emit(llvm::None, section);
+    return ReflectionMetadataBuilder::emit(std::nullopt, section);
   }
 };
 
@@ -1198,7 +1257,7 @@ public:
 
   llvm::GlobalVariable *emit() {
     auto section = IGM.getCaptureDescriptorMetadataSectionName();
-    return ReflectionMetadataBuilder::emit(llvm::None, section);
+    return ReflectionMetadataBuilder::emit(std::nullopt, section);
   }
 };
 
@@ -1234,7 +1293,8 @@ public:
   struct Entry {
     enum Kind {
       Metadata,
-      Shape
+      Shape,
+      Value
     };
 
     Kind kind;
@@ -1255,6 +1315,9 @@ public:
       SmallString<16> EncodeBuffer;
       llvm::raw_svector_ostream OS(EncodeBuffer);
       switch (Kind) {
+      case Entry::Kind::Value:
+        OS << "v";
+        break;
       case Entry::Kind::Shape:
         OS << "s";
         break;
@@ -1331,10 +1394,18 @@ public:
       switch (Bindings[i].getKind()) {
       case GenericRequirement::Kind::Shape:
       case GenericRequirement::Kind::Metadata:
-      case GenericRequirement::Kind::MetadataPack: {
-        auto Kind = (Bindings[i].getKind() == GenericRequirement::Kind::Shape
-                     ? Entry::Kind::Shape
-                     : Entry::Kind::Metadata);
+      case GenericRequirement::Kind::MetadataPack:
+      case GenericRequirement::Kind::Value: {
+        auto Kind = Entry::Kind::Metadata;
+
+        if (Bindings[i].getKind() == GenericRequirement::Kind::Shape) {
+          Kind = Entry::Kind::Shape;
+        }
+
+        if (Bindings[i].getKind() == GenericRequirement::Kind::Value) {
+          Kind = Entry::Kind::Value;
+        }
+
         auto Source = SourceBuilder.createClosureBinding(i);
         auto BindingType = Bindings[i].getTypeParameter().subst(Subs);
         auto InterfaceType = BindingType->mapTypeOutOfContext();
@@ -1391,6 +1462,10 @@ public:
         Kind = Entry::Kind::Metadata;
         break;
 
+      case GenericRequirement::Kind::Value:
+        Kind = Entry::Kind::Value;
+        break;
+
       case GenericRequirement::Kind::WitnessTable:
       case GenericRequirement::Kind::WitnessTablePack:
         llvm_unreachable("Bad kind");
@@ -1420,12 +1495,12 @@ public:
 
       // Erase pseudogeneric captures down to AnyObject.
       if (OrigCalleeType->isPseudogeneric()) {
-        SwiftType = SwiftType.transform([&](Type t) -> Type {
+        SwiftType = SwiftType.transformRec([&](Type t) -> std::optional<Type> {
           if (auto *archetype = t->getAs<ArchetypeType>()) {
             assert(archetype->requiresClass() && "don't know what to do");
             return IGM.Context.getAnyObjectType();
           }
-          return t;
+          return std::nullopt;
         })->getCanonicalType();
       }
       
@@ -1470,7 +1545,7 @@ public:
 
   llvm::GlobalVariable *emit() {
     auto section = IGM.getCaptureDescriptorMetadataSectionName();
-    return ReflectionMetadataBuilder::emit(llvm::None, section);
+    return ReflectionMetadataBuilder::emit(std::nullopt, section);
   }
 };
 
@@ -1644,6 +1719,11 @@ llvm::ArrayRef<CanType> IRGenModule::getOrCreateSpecialStlibBuiltinTypes() {
 }
 
 void IRGenModule::emitBuiltinReflectionMetadata() {
+  if (getSILModule().getOptions().StopOptimizationAfterSerialization) {
+    // We're asked to emit an empty IR module
+    return;
+  }
+
   if (getSwiftModule()->isStdlibModule()) {
     auto SpecialBuiltins = getOrCreateSpecialStlibBuiltinTypes();
     BuiltinTypes.insert(SpecialBuiltins.begin(), SpecialBuiltins.end());

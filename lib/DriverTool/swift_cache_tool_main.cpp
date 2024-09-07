@@ -187,9 +187,9 @@ private:
     }
     // drop swift-frontend executable path and leading `-frontend` from
     // command-line.
-    if (StringRef(FrontendArgs[0]).endswith("swift-frontend"))
+    if (StringRef(FrontendArgs[0]).ends_with("swift-frontend"))
       FrontendArgs.erase(FrontendArgs.begin());
-    if (StringRef(FrontendArgs[0]).equals("-frontend"))
+    if (StringRef(FrontendArgs[0]) == "-frontend")
       FrontendArgs.erase(FrontendArgs.begin());
 
     SmallVector<std::unique_ptr<llvm::MemoryBuffer>, 4>
@@ -220,7 +220,7 @@ private:
                              MainExecutablePath))
       return true;
 
-    if (!Invocation.getFrontendOptions().EnableCaching) {
+    if (!Invocation.getCASOptions().EnableCaching) {
       llvm::errs() << "Requested command-line arguments do not enable CAS\n";
       return true;
     }
@@ -240,12 +240,12 @@ private:
     return false;
   }
 
-  llvm::Optional<ObjectRef> getBaseKey() {
+  std::optional<ObjectRef> getBaseKey() {
     auto BaseKey = Instance.getCompilerBaseKey();
     if (!BaseKey) {
       Instance.getDiags().diagnose(SourceLoc(), diag::error_cas,
                                    "Base Key doesn't exist");
-      return llvm::None;
+      return std::nullopt;
     }
 
     return *BaseKey;

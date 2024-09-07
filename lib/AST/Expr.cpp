@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/AST/Expr.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Statistic.h"
 #include "swift/Basic/Unicode.h"
 #include "swift/AST/ASTContext.h"
@@ -378,6 +379,7 @@ ConcreteDeclRef Expr::getReferencedDecl(bool stopAtParenExpr) const {
   PASS_THROUGH_REFERENCE(Try, getSubExpr);
   PASS_THROUGH_REFERENCE(ForceTry, getSubExpr);
   PASS_THROUGH_REFERENCE(OptionalTry, getSubExpr);
+  PASS_THROUGH_REFERENCE(ExtractFunctionIsolation, getFunctionExpr);
 
   NO_REFERENCE(Tuple);
   SIMPLE_REFERENCE(Array, getInitializer);
@@ -477,6 +479,7 @@ ConcreteDeclRef Expr::getReferencedDecl(bool stopAtParenExpr) const {
   NO_REFERENCE(Tap);
   NO_REFERENCE(TypeJoin);
   SIMPLE_REFERENCE(MacroExpansion, getMacroRef);
+  NO_REFERENCE(TypeValue);
 
 #undef SIMPLE_REFERENCE
 #undef NO_REFERENCE
@@ -723,6 +726,7 @@ bool Expr::canAppendPostfixExpression(bool appendingPostfixOperator) const {
   case ExprKind::UnresolvedSpecialize:
   case ExprKind::UnresolvedMember:
   case ExprKind::UnresolvedDot:
+  case ExprKind::ExtractFunctionIsolation:
     return true;
 
   case ExprKind::Sequence:
@@ -824,6 +828,7 @@ bool Expr::canAppendPostfixExpression(bool appendingPostfixOperator) const {
   case ExprKind::UnderlyingToOpaque:
   case ExprKind::Unreachable:
   case ExprKind::ActorIsolationErasure:
+  case ExprKind::TypeValue:
     // Implicit conversion nodes have no syntax of their own; defer to the
     // subexpression.
     return cast<ImplicitConversionExpr>(this)->getSubExpr()
@@ -914,6 +919,7 @@ bool Expr::isValidParentOfTypeExpr(Expr *typeExpr) const {
   case ExprKind::DotSyntaxBaseIgnored:
   case ExprKind::UnresolvedSpecialize:
   case ExprKind::OpenExistential:
+  case ExprKind::TypeValue:
     return true;
 
   // For these cases we need to ensure the type expr is the function or base.
@@ -1032,6 +1038,7 @@ bool Expr::isValidParentOfTypeExpr(Expr *typeExpr) const {
   case ExprKind::MacroExpansion:
   case ExprKind::CurrentContextIsolation:
   case ExprKind::ActorIsolationErasure:
+  case ExprKind::ExtractFunctionIsolation:
     return false;
   }
 
@@ -1350,21 +1357,28 @@ VarDecl *CaptureListEntry::getVar() const {
   return PBD->getSingleVar();
 }
 
-bool CaptureListEntry::isSimpleSelfCapture() const {
+bool CaptureListEntry::isSimpleSelfCapture(bool excludeWeakCaptures) const {
   auto *Var = getVar();
   auto &ctx = Var->getASTContext();
 
   if (Var->getName() != ctx.Id_self)
     return false;
 
-  if (auto *attr = Var->getAttrs().getAttribute<ReferenceOwnershipAttr>())
-    if (attr->get() == ReferenceOwnership::Weak)
-      return false;
-
   if (PBD->getPatternList().size() != 1)
     return false;
 
   auto *expr = PBD->getInit(0);
+
+  if (auto *attr = Var->getAttrs().getAttribute<ReferenceOwnershipAttr>()) {
+    if (attr->get() == ReferenceOwnership::Weak && excludeWeakCaptures) {
+      return false;
+    }
+  }
+
+  // Look through any ImplicitConversionExpr that may contain the DRE
+  if (auto conversion = dyn_cast_or_null<ImplicitConversionExpr>(expr)) {
+    expr = conversion->getSubExpr();
+  }
 
   if (auto *DRE = dyn_cast<DeclRefExpr>(expr)) {
     if (auto *VD = dyn_cast<VarDecl>(DRE->getDecl())) {
@@ -1917,14 +1931,19 @@ unsigned AbstractClosureExpr::getDiscriminator() const {
   // then assign the next discriminator now.
   if (getRawDiscriminator() == InvalidDiscriminator &&
       (ctx.Diags.hadAnyError() ||
-       getParentSourceFile()->getFulfilledMacroRole() != llvm::None)) {
+       getParentSourceFile()->getFulfilledMacroRole() != std::nullopt)) {
     auto discriminator = ctx.getNextDiscriminator(getParent());
     ctx.setMaxAssignedDiscriminator(getParent(), discriminator + 1);
     const_cast<AbstractClosureExpr *>(this)->
         Bits.AbstractClosureExpr.Discriminator = discriminator;
   }
 
-  assert(getRawDiscriminator() != InvalidDiscriminator);
+  if (getRawDiscriminator() == InvalidDiscriminator) {
+    llvm::errs() << "Closure does not have an assigned discriminator:\n";
+    dump(llvm::errs());
+    abort();
+  }
+
   return getRawDiscriminator();
 }
 
@@ -1953,11 +1972,11 @@ Type AbstractClosureExpr::getResultType(
   return T->castTo<FunctionType>()->getResult();
 }
 
-llvm::Optional<Type> AbstractClosureExpr::getEffectiveThrownType() const {
+std::optional<Type> AbstractClosureExpr::getEffectiveThrownType() const {
   if (auto fnType = getType()->getAs<AnyFunctionType>())
     return fnType->getEffectiveThrownErrorType();
 
-  return llvm::None;
+  return std::nullopt;
 }
 
 bool AbstractClosureExpr::isBodyThrowing() const {
@@ -2211,7 +2230,7 @@ TypeExpr *TypeExpr::createForDecl(DeclNameLoc Loc, TypeDecl *Decl,
                                   DeclContext *DC) {
   ASTContext &C = Decl->getASTContext();
   assert(Loc.isValid());
-  auto *Repr = new (C) SimpleIdentTypeRepr(Loc, Decl->createNameRef());
+  auto *Repr = UnqualifiedIdentTypeRepr::create(C, Loc, Decl->createNameRef());
   Repr->setValue(Decl, DC);
   return new (C) TypeExpr(Repr);
 }
@@ -2219,7 +2238,7 @@ TypeExpr *TypeExpr::createForDecl(DeclNameLoc Loc, TypeDecl *Decl,
 TypeExpr *TypeExpr::createImplicitForDecl(DeclNameLoc Loc, TypeDecl *Decl,
                                           DeclContext *DC, Type ty) {
   ASTContext &C = Decl->getASTContext();
-  auto *Repr = new (C) SimpleIdentTypeRepr(Loc, Decl->createNameRef());
+  auto *Repr = UnqualifiedIdentTypeRepr::create(C, Loc, Decl->createNameRef());
   Repr->setValue(Decl, DC);
   auto result = new (C) TypeExpr(Repr);
   assert(ty && !ty->hasTypeParameter());
@@ -2236,57 +2255,47 @@ TypeExpr *TypeExpr::createForMemberDecl(DeclNameLoc ParentNameLoc,
   assert(ParentNameLoc.isValid());
   assert(NameLoc.isValid());
 
-  // The base component is the parent type.
-  auto *ParentComp = new (C) SimpleIdentTypeRepr(ParentNameLoc,
-                                                 Parent->createNameRef());
-  ParentComp->setValue(Parent, nullptr);
+  // The base is the parent type.
+  auto *BaseTR = UnqualifiedIdentTypeRepr::create(C, ParentNameLoc,
+                                                  Parent->createNameRef());
+  BaseTR->setValue(Parent, nullptr);
 
-  // The member component is the member we just found.
-  auto *MemberComp =
-      new (C) SimpleIdentTypeRepr(NameLoc, Decl->createNameRef());
-  MemberComp->setValue(Decl, nullptr);
+  auto *QualIdentTR =
+      QualifiedIdentTypeRepr::create(C, BaseTR, NameLoc, Decl->createNameRef());
+  QualIdentTR->setValue(Decl, nullptr);
 
-  auto *TR = MemberTypeRepr::create(C, ParentComp, {MemberComp});
-  return new (C) TypeExpr(TR);
+  return new (C) TypeExpr(QualIdentTR);
 }
 
 TypeExpr *TypeExpr::createForMemberDecl(TypeRepr *ParentTR, DeclNameLoc NameLoc,
                                         TypeDecl *Decl) {
   ASTContext &C = Decl->getASTContext();
 
-  // Add a new component for the member we just found.
-  auto *NewComp = new (C) SimpleIdentTypeRepr(NameLoc, Decl->createNameRef());
-  NewComp->setValue(Decl, nullptr);
+  auto *QualIdentTR = QualifiedIdentTypeRepr::create(C, ParentTR, NameLoc,
+                                                     Decl->createNameRef());
+  QualIdentTR->setValue(Decl, nullptr);
 
-  TypeRepr *TR = nullptr;
-  if (auto *DeclRefTR = dyn_cast<DeclRefTypeRepr>(ParentTR)) {
-    // Create a new list of components.
-    SmallVector<IdentTypeRepr *, 4> Components;
-    if (auto *MemberTR = dyn_cast<MemberTypeRepr>(ParentTR)) {
-      auto MemberComps = MemberTR->getMemberComponents();
-      Components.append(MemberComps.begin(), MemberComps.end());
-    }
-
-    Components.push_back(NewComp);
-    TR = MemberTypeRepr::create(C, DeclRefTR->getBaseComponent(), Components);
-  } else {
-    TR = MemberTypeRepr::create(C, ParentTR, NewComp);
-  }
-
-  return new (C) TypeExpr(TR);
+  return new (C) TypeExpr(QualIdentTR);
 }
 
 TypeExpr *TypeExpr::createForSpecializedDecl(DeclRefTypeRepr *ParentTR,
                                              ArrayRef<TypeRepr *> Args,
                                              SourceRange AngleLocs,
                                              ASTContext &C) {
-  auto *lastComp = ParentTR->getLastComponent();
+  DeclRefTypeRepr *specializedTR = nullptr;
 
-  if (!isa<SimpleIdentTypeRepr>(lastComp) || !lastComp->getBoundDecl())
+  auto *boundDecl = ParentTR->getBoundDecl();
+  if (!boundDecl || ParentTR->hasGenericArgList()) {
     return nullptr;
+  }
 
-  if (isa<TypeAliasDecl>(lastComp->getBoundDecl())) {
-    if (auto *memberTR = dyn_cast<MemberTypeRepr>(ParentTR)) {
+  if (isa<UnqualifiedIdentTypeRepr>(ParentTR)) {
+    specializedTR = UnqualifiedIdentTypeRepr::create(
+        C, ParentTR->getNameLoc(), ParentTR->getNameRef(), Args, AngleLocs);
+    specializedTR->setValue(boundDecl, ParentTR->getDeclContext());
+  } else {
+    auto *const qualIdentTR = cast<QualifiedIdentTypeRepr>(ParentTR);
+    if (isa<TypeAliasDecl>(boundDecl)) {
       // If any of our parent types are unbound, bail out and let
       // the constraint solver can infer generic parameters for them.
       //
@@ -2299,50 +2308,30 @@ TypeExpr *TypeExpr::createForSpecializedDecl(DeclRefTypeRepr *ParentTR,
       //
       // FIXME: Once we can model generic typealiases properly, rip
       // this out.
-      auto isUnboundGenericComponent = [](IdentTypeRepr *ITR) -> bool {
-        if (isa<SimpleIdentTypeRepr>(ITR)) {
-          auto *decl = dyn_cast_or_null<GenericTypeDecl>(ITR->getBoundDecl());
+      QualifiedIdentTypeRepr *currTR = qualIdentTR;
+      while (auto *declRefBaseTR =
+                 dyn_cast<DeclRefTypeRepr>(currTR->getBase())) {
+        if (!declRefBaseTR->hasGenericArgList()) {
+          auto *decl =
+              dyn_cast_or_null<GenericTypeDecl>(declRefBaseTR->getBoundDecl());
           if (decl && decl->isGeneric())
-            return true;
+            return nullptr;
         }
 
-        return false;
-      };
-
-      for (auto *comp : memberTR->getMemberComponents().drop_back()) {
-        if (isUnboundGenericComponent(comp))
-          return nullptr;
-      }
-
-      if (auto *identBase =
-              dyn_cast<IdentTypeRepr>(memberTR->getBaseComponent())) {
-        if (isUnboundGenericComponent(identBase))
-          return nullptr;
+        currTR = dyn_cast<QualifiedIdentTypeRepr>(declRefBaseTR);
+        if (!currTR) {
+          break;
+        }
       }
     }
+
+    specializedTR = QualifiedIdentTypeRepr::create(
+        C, qualIdentTR->getBase(), ParentTR->getNameLoc(),
+        ParentTR->getNameRef(), Args, AngleLocs);
+    specializedTR->setValue(boundDecl, ParentTR->getDeclContext());
   }
 
-  auto *genericComp = GenericIdentTypeRepr::create(
-      C, lastComp->getNameLoc(), lastComp->getNameRef(), Args, AngleLocs);
-  genericComp->setValue(lastComp->getBoundDecl(), lastComp->getDeclContext());
-
-  TypeRepr *TR = nullptr;
-  if (auto *memberTR = dyn_cast<MemberTypeRepr>(ParentTR)) {
-    auto oldMemberComps = memberTR->getMemberComponents().drop_back();
-
-    // Create a new list of member components, replacing the last one with the
-    // new specialized one.
-    SmallVector<IdentTypeRepr *, 2> newMemberComps;
-    newMemberComps.append(oldMemberComps.begin(), oldMemberComps.end());
-    newMemberComps.push_back(genericComp);
-
-    TR =
-        MemberTypeRepr::create(C, memberTR->getBaseComponent(), newMemberComps);
-  } else {
-    TR = genericComp;
-  }
-
-  return new (C) TypeExpr(TR);
+  return new (C) TypeExpr(specializedTR);
 }
 
 // Create an implicit TypeExpr, with location information even though it
@@ -2380,6 +2369,15 @@ bool Expr::isSelfExprOf(const AbstractFunctionDecl *AFD, bool sameBase) const {
     return DRE->getDecl() == AFD->getImplicitSelfDecl();
 
   return false;
+}
+
+TypeValueExpr *TypeValueExpr::createForDecl(DeclNameLoc Loc, TypeDecl *Decl,
+                                            DeclContext *DC) {
+  ASTContext &C = Decl->getASTContext();
+  assert(Loc.isValid());
+  auto *Repr = UnqualifiedIdentTypeRepr::create(C, Loc, Decl->createNameRef());
+  Repr->setValue(Decl, DC);
+  return new (C) TypeValueExpr(Repr);
 }
 
 OpenedArchetypeType *OpenExistentialExpr::getOpenedArchetype() const {
@@ -2466,14 +2464,14 @@ KeyPathExpr::setComponents(ASTContext &C,
   Components = Components.slice(0, newComponents.size());
 }
 
-llvm::Optional<unsigned> KeyPathExpr::findComponentWithSubscriptArg(Expr *arg) {
+std::optional<unsigned> KeyPathExpr::findComponentWithSubscriptArg(Expr *arg) {
   for (auto idx : indices(getComponents())) {
     if (auto *args = getComponents()[idx].getSubscriptArgs()) {
       if (args->findArgumentExpr(arg))
         return idx;
     }
   }
-  return llvm::None;
+  return std::nullopt;
 }
 
 BoundGenericType *KeyPathExpr::getKeyPathType() const {

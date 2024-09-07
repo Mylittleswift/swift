@@ -272,6 +272,32 @@ func throwAndPatternMatchCatch<E: Error>(_ body: () throws(E) -> Void) throws(E)
   }
 }
 
+enum MyResult<Success, Failure: Error> {
+  case success(Success)
+  case failure(Failure)
+
+  @inlinable
+  init(catching body: () throws(Failure) -> Success) {
+    do {
+      self = .success(try body())
+    } catch {
+      self = .failure(error)
+    }
+  }
+}
+
+func formerReabstractionCrash() {
+  // CHECK-LABEL: sil private [ossa] @$s12typed_throws24formerReabstractionCrashyyFAA8MyResultOySSs5Error_pGyXEfU_ : $@convention(thin) () -> @owned MyResult<String, any Error> {
+  // CHECK: function_ref @$s12typed_throws24formerReabstractionCrashyyFAA8MyResultOySSs5Error_pGyXEfU_SSyXEfU_ : $@convention(thin) () -> @owned String
+  // CHECK-NEXT: thin_to_thick_function
+  // CHECK-NEXT: // function_ref thunk
+  // CHECK-NEXT: function_ref @$sSSIgo_SSs5Error_pIegrzr_TR : $@convention(thin) (@guaranteed @noescape @callee_guaranteed () -> @owned String) -> (@out String, @error_indirect any Error)
+  // CHECK-NEXT: partial_apply
+  let _: MyResult<String, Error>? = {
+    return MyResult{"hello"}
+  }()
+}
+
 // CHECK-LABEL:      sil_vtable MySubclass {
 // CHECK-NEXT:   #MyClass.init!allocator: <E where E : Error> (MyClass.Type) -> (() throws(E) -> ()) throws(E) -> MyClass : @$s12typed_throws10MySubclassC4bodyACyyxYKXE_txYKcs5ErrorRzlufC [override]
 // CHECK-NEXT:  #MyClass.f: (MyClass) -> () throws -> () : @$s12typed_throws10MySubclassC1fyyAA0C5ErrorOYKFAA0C5ClassCADyyKFTV [override]

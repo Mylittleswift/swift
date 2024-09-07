@@ -13,8 +13,8 @@
 #ifndef SWIFT_RULE_H
 #define SWIFT_RULE_H
 
-#include "llvm/ADT/Optional.h"
-#include "llvm/ADT/None.h"
+#include "swift/Basic/Assertions.h"
+#include <optional>
 
 #include "Symbol.h"
 #include "Term.h"
@@ -111,7 +111,7 @@ public:
   const Term &getLHS() const { return LHS; }
   const Term &getRHS() const { return RHS; }
 
-  llvm::Optional<Symbol> isPropertyRule() const;
+  std::optional<Symbol> isPropertyRule() const;
 
   const ProtocolDecl *isProtocolConformanceRule() const;
 
@@ -122,6 +122,8 @@ public:
   bool isProtocolRefinementRule(RewriteContext &ctx) const;
 
   bool isCircularConformanceRule() const;
+
+  bool isSameElementRule() const;
 
   /// See above for an explanation of these predicates.
   bool isPermanent() const {
@@ -165,45 +167,45 @@ public:
             RHS.containsUnresolvedSymbols());
   }
 
-  llvm::Optional<Identifier> isProtocolTypeAliasRule() const;
+  std::optional<Identifier> isProtocolTypeAliasRule() const;
 
   bool isDerivedFromConcreteProtocolTypeAliasRule() const;
 
   void markLHSSimplified() {
-    assert(!Frozen);
-    assert(!LHSSimplified);
+    ASSERT(!Frozen);
+    ASSERT(!LHSSimplified);
     LHSSimplified = true;
   }
 
   void markRHSSimplified() {
-    assert(!Frozen);
-    assert(!RHSSimplified);
+    ASSERT(!Frozen);
+    ASSERT(!RHSSimplified);
     RHSSimplified = true;
   }
 
   void markSubstitutionSimplified() {
-    assert(!Frozen);
-    assert(!SubstitutionSimplified);
+    ASSERT(!Frozen);
+    ASSERT(!SubstitutionSimplified);
     SubstitutionSimplified = true;
   }
 
   void markPermanent() {
-    assert(!Frozen);
-    assert(!Explicit && !Permanent &&
+    ASSERT(!Frozen);
+    ASSERT(!Explicit && !Permanent &&
            "Permanent and explicit are mutually exclusive");
     Permanent = true;
   }
 
   void markExplicit() {
-    assert(!Frozen);
-    assert(!Explicit && !Permanent &&
+    ASSERT(!Frozen);
+    ASSERT(!Explicit && !Permanent &&
            "Permanent and explicit are mutually exclusive");
     Explicit = true;
   }
 
   void markRedundant() {
-    assert(!Frozen);
-    assert(!Redundant);
+    ASSERT(!Frozen);
+    ASSERT(!Redundant);
     Redundant = true;
   }
 
@@ -212,15 +214,15 @@ public:
     if (Conflicting)
       return;
 
-    assert(!Frozen);
-    assert(!Permanent && "Permanent rule should not conflict with anything");
+    ASSERT(!Frozen);
+    ASSERT(!Permanent && "Permanent rule should not conflict with anything");
     Conflicting = true;
   }
 
   void markRecursive() {
-    assert(!Frozen);
-    assert(!Permanent && "Permanent rule should not be recursive");
-    assert(!Recursive);
+    ASSERT(!Frozen);
+    ASSERT(!Permanent && "Permanent rule should not be recursive");
+    ASSERT(!Recursive);
     Recursive = true;
   }
 
@@ -234,7 +236,7 @@ public:
 
   unsigned getNesting() const;
 
-  llvm::Optional<int> compare(const Rule &other, RewriteContext &ctx) const;
+  std::optional<int> compare(const Rule &other, RewriteContext &ctx) const;
 
   void dump(llvm::raw_ostream &out) const;
 

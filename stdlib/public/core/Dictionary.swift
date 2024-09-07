@@ -344,7 +344,7 @@
 ///     } else {
 ///         print("No glyphs found!")
 ///     }
-///     // Prints "The 'star' image is a glyph.")
+///     // Prints "The 'star' image is a glyph."
 ///
 /// Note that in this example, `imagePaths` is subscripted using a dictionary
 /// index. Unlike the key-based subscript, the index-based subscript returns
@@ -1191,7 +1191,7 @@ extension Dictionary {
   ///     } else {
   ///         print("No value found for that key.")
   ///     }
-  ///     // Prints "No value found for that key.""
+  ///     // Prints "No value found for that key."
   ///
   /// - Parameter key: The key to remove along with its associated value.
   /// - Returns: The value that was removed, or `nil` if the key was not
@@ -1702,9 +1702,15 @@ extension Collection {
       } else {
         result += ", "
       }
+      #if !$Embedded
       debugPrint(k, terminator: "", to: &result)
       result += ": "
       debugPrint(v, terminator: "", to: &result)
+      #else
+      "(cannot print value in embedded Swift)".write(to: &result)
+      result += ": "
+      "(cannot print value in embedded Swift)".write(to: &result)
+      #endif
     }
     result += "]"
     return result
@@ -1788,6 +1794,8 @@ extension Dictionary {
 #endif
   }
 }
+
+extension Dictionary.Index._Variant: @unchecked Sendable {}
 
 extension Dictionary.Index {
 #if _runtime(_ObjC)
@@ -1967,6 +1975,9 @@ extension Dictionary {
   }
 }
 
+extension Dictionary.Iterator._Variant: @unchecked Sendable
+  where Key: Sendable, Value: Sendable {}
+
 extension Dictionary.Iterator {
 #if _runtime(_ObjC)
   @usableFromInline @_transparent
@@ -2119,16 +2130,16 @@ public typealias DictionaryIterator<Key: Hashable, Value> =
   Dictionary<Key, Value>.Iterator
 
 extension Dictionary: @unchecked Sendable
-  where Key: Sendable, Value: Sendable { }
+  where Key: Sendable, Value: Sendable {}
 extension Dictionary.Keys: @unchecked Sendable
-  where Key: Sendable, Value: Sendable { }
+  where Key: Sendable, Value: Sendable {}
 extension Dictionary.Values: @unchecked Sendable
-  where Key: Sendable, Value: Sendable { }
+  where Key: Sendable, Value: Sendable {}
 extension Dictionary.Keys.Iterator: @unchecked Sendable
-  where Key: Sendable, Value: Sendable { }
+  where Key: Sendable, Value: Sendable {}
 extension Dictionary.Values.Iterator: @unchecked Sendable
-  where Key: Sendable, Value: Sendable { }
+  where Key: Sendable, Value: Sendable {}
 extension Dictionary.Index: @unchecked Sendable
-  where Key: Sendable, Value: Sendable { }
+  where Key: Sendable, Value: Sendable {}
 extension Dictionary.Iterator: @unchecked Sendable
-  where Key: Sendable, Value: Sendable { }
+  where Key: Sendable, Value: Sendable {}

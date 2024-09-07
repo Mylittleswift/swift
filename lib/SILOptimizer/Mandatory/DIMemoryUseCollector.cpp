@@ -14,6 +14,7 @@
 
 #include "DIMemoryUseCollector.h"
 #include "swift/AST/Expr.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/ApplySite.h"
 #include "swift/SIL/InstructionUtils.h"
 #include "swift/SIL/SILArgument.h"
@@ -959,7 +960,8 @@ void ElementUseCollector::collectUses(SILValue Pointer, unsigned BaseEltNo) {
       unsigned ArgumentNumber = Op->getOperandNumber() - 1;
 
       // If this is an out-parameter, it is like a store.
-      unsigned NumIndirectResults = substConv.getNumIndirectSILResults();
+      unsigned NumIndirectResults = substConv.getNumIndirectSILResults() +
+                                    substConv.getNumIndirectSILErrorResults();
       if (ArgumentNumber < NumIndirectResults) {
         assert(!InStructSubElement && "We're initializing sub-members?");
         addElementUses(BaseEltNo, PointeeType, User, DIUseKind::Initialization);
@@ -983,6 +985,7 @@ void ElementUseCollector::collectUses(SILValue Pointer, unsigned BaseEltNo) {
         llvm_unreachable("address value passed to indirect parameter");
 
       // If this is an in-parameter, it is like a load.
+      case ParameterConvention::Indirect_In_CXX:
       case ParameterConvention::Indirect_In:
       case ParameterConvention::Indirect_In_Guaranteed:
         addElementUses(BaseEltNo, PointeeType, User, DIUseKind::IndirectIn);
@@ -1508,7 +1511,7 @@ static bool isSelfInitUse(SILInstruction *I) {
   if (I->getLoc().isSILFile()) {
     if (auto *AI = dyn_cast<ApplyInst>(I))
       if (auto *Fn = AI->getReferencedFunctionOrNull())
-        if (Fn->getName().startswith("selfinit"))
+        if (Fn->getName().starts_with("selfinit"))
           return true;
 
     return false;
@@ -1706,6 +1709,19 @@ void ElementUseCollector::collectClassSelfUses(
         continue;
 
       Kind = DIUseKind::Escape;
+    }
+
+    // Track flow-sensitive 'self' isolation builtins separately, because they
+    // aren't really uses of 'self' until after DI, once we've decided whether
+    // they have a fully-formed 'self' to use.
+    if (auto builtin = dyn_cast<BuiltinInst>(User)) {
+      if (auto builtinKind = builtin->getBuiltinKind()) {
+        if (*builtinKind == BuiltinValueKind::FlowSensitiveSelfIsolation ||
+            *builtinKind ==
+              BuiltinValueKind::FlowSensitiveDistributedSelfIsolation) {
+          Kind = DIUseKind::FlowSensitiveSelfIsolation;
+        }
+      }
     }
 
     trackUse(DIMemoryUse(User, Kind, 0, TheMemory.getNumElements()));

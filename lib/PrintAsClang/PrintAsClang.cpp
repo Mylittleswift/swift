@@ -19,6 +19,7 @@
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/PrettyStackTrace.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Version.h"
 #include "swift/ClangImporter/ClangImporter.h"
 #include "swift/Frontend/FrontendOptions.h"
@@ -284,7 +285,7 @@ static void collectClangModuleHeaderIncludes(
     llvm::SmallString<128> containingSearchDirPath;
 
     for (auto &includeDir : includeDirs) {
-      if (textualInclude.startswith(includeDir)) {
+      if (textualInclude.str().starts_with(includeDir)) {
         if (includeDir.size() > containingSearchDirPath.size()) {
           containingSearchDirPath = includeDir;
         }
@@ -314,10 +315,12 @@ static void collectClangModuleHeaderIncludes(
     requiredTextualIncludes.insert(textualInclude);
   };
 
-  if (llvm::Optional<clang::Module::Header> umbrellaHeader = clangModule->getUmbrellaHeaderAsWritten()) {
+  if (std::optional<clang::Module::Header> umbrellaHeader =
+          clangModule->getUmbrellaHeaderAsWritten()) {
     addHeader(umbrellaHeader->Entry.getFileEntry().tryGetRealPathName(),
         umbrellaHeader->PathRelativeToRootModuleDirectory);
-  } else if (llvm::Optional<clang::Module::DirectoryName> umbrellaDir = clangModule->getUmbrellaDirAsWritten()) {
+  } else if (std::optional<clang::Module::DirectoryName> umbrellaDir =
+                 clangModule->getUmbrellaDirAsWritten()) {
     SmallString<128> nativeUmbrellaDirPath;
     std::error_code errorCode;
     llvm::sys::path::native(umbrellaDir->Entry.getName(),
@@ -621,7 +624,9 @@ bool swift::printAsClangHeader(raw_ostream &os, ModuleDecl *M,
         !frontendOpts.ClangHeaderExposedDecls.has_value() ||
         *frontendOpts.ClangHeaderExposedDecls ==
             FrontendOptions::ClangHeaderExposeBehavior::
-                HasExposeAttrOrImplicitDeps;
+                HasExposeAttrOrImplicitDeps ||
+        *frontendOpts.ClangHeaderExposedDecls ==
+            FrontendOptions::ClangHeaderExposeBehavior::AllPublic;
 
     std::string moduleContentsBuf;
     llvm::raw_string_ostream moduleContents{moduleContentsBuf};

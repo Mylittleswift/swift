@@ -26,6 +26,7 @@
 #define SWIFT_IRGEN_TYPEINFO_H
 
 #include "IRGen.h"
+#include "Outlining.h"
 #include "swift/AST/ReferenceCounting.h"
 #include "llvm/ADT/MapVector.h"
 
@@ -207,9 +208,12 @@ public:
   /// actually possible to do ABI operations on it from this current SILModule.
   /// See SILModule::isTypeABIAccessible.
   ///
-  /// All fixed-size types are currently ABI-accessible, although this would
+  /// Almost all fixed-size types are currently ABI-accessible, although this would
   /// not be difficult to change (e.g. if we had an archetype size constraint
   /// that didn't say anything about triviality).
+  /// The exception to this is non-copyable types, which need to be able to call
+  /// the metadata to get to the deinit and so their type metadata
+  /// needs to be accessible.
   IsABIAccessible_t isABIAccessible() const {
     return IsABIAccessible_t(Bits.TypeInfo.ABIAccessible);
   }
@@ -374,7 +378,8 @@ public:
   /// the old object is actually no longer permitted to be destroyed.
   virtual void initializeWithTake(IRGenFunction &IGF, Address destAddr,
                                   Address srcAddr, SILType T,
-                                  bool isOutlined) const = 0;
+                                  bool isOutlined,
+                                  bool zeroizeIfSensitive) const = 0;
 
   /// Perform a copy-initialization from the given object.
   virtual void initializeWithCopy(IRGenFunction &IGF, Address destAddr,
@@ -569,12 +574,25 @@ public:
   virtual void verify(IRGenTypeVerifierFunction &IGF,
                       llvm::Value *typeMetadata,
                       SILType T) const;
+  /// Perform \p invocation with the appropriate metadata collector for use in
+  /// emitting an outlined value function of a value operation that can be
+  /// performed with a value witness.
+  ///
+  /// Returns whether there was an appropriate emitter (and whether \p
+  /// invocation was called).
+  bool withWitnessableMetadataCollector(
+      IRGenFunction &IGF, SILType T, LayoutIsNeeded_t needsLayout,
+      DeinitIsNeeded_t needsDeinit,
+      llvm::function_ref<void(OutliningMetadataCollector &)> invocation) const;
 
   void callOutlinedCopy(IRGenFunction &IGF, Address dest, Address src,
                         SILType T, IsInitialization_t isInit,
                         IsTake_t isTake) const;
 
   void callOutlinedDestroy(IRGenFunction &IGF, Address addr, SILType T) const;
+
+  void callOutlinedRelease(IRGenFunction &IGF, Address addr, SILType T,
+                           Atomicity atomicity) const;
 };
 
 } // end namespace irgen

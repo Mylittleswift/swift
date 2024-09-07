@@ -58,6 +58,8 @@ static SILFunction *specializeVTableMethod(SILFunction *origMethod,
                                            SILModule &module,
                                            SILTransform *transform);
 
+static bool specializeVTablesOfSuperclasses(SILModule &module, SILTransform *transform);
+
 static bool specializeVTablesInFunction(SILFunction &func, SILModule &module,
                                         SILTransform *transform) {
   bool changed = false;
@@ -71,7 +73,7 @@ static bool specializeVTablesInFunction(SILFunction &func, SILModule &module,
                                             transform) != nullptr);
       } else if (auto *metatype = dyn_cast<MetatypeInst>(&inst)) {
         changed |= (specializeVTableForType(
-                        metatype->getType().getInstanceTypeOfMetatype(&func),
+                        metatype->getType().getLoweredInstanceTypeOfMetatype(&func),
                         module, transform) != nullptr);
       } else if (auto *cm = dyn_cast<ClassMethodInst>(&inst)) {
         changed |= specializeClassMethodInst(cm);
@@ -85,8 +87,10 @@ static bool specializeVTablesInFunction(SILFunction &func, SILModule &module,
 bool VTableSpecializer::specializeVTables(SILModule &module) {
   bool changed = false;
   for (SILFunction &func : module) {
-    specializeVTablesInFunction(func, module, this);
+    changed |= specializeVTablesInFunction(func, module, this);
   }
+
+  changed |= specializeVTablesOfSuperclasses(module, this);
 
   for (SILVTable *vtable : module.getVTables()) {
     if (vtable->getClass()->isGenericContext()) continue;
@@ -112,35 +116,106 @@ bool VTableSpecializer::specializeVTables(SILModule &module) {
   return changed;
 }
 
+static bool specializeVTablesOfSuperclasses(SILVTable *vtable,
+                                            SILModule &module,
+                                            SILTransform *transform) {
+  if (vtable->getClass()->isGenericContext() && !vtable->getClassType())
+    return false;
+
+  SILType superClassTy;
+  if (SILType classTy = vtable->getClassType()) {
+    superClassTy = classTy.getSuperclass();
+  } else {
+    if (Type superTy = vtable->getClass()->getSuperclass())
+      superClassTy =
+          SILType::getPrimitiveObjectType(superTy->getCanonicalType());
+  }
+  if (superClassTy) {
+    return (specializeVTableForType(superClassTy, module, transform) !=
+            nullptr);
+  }
+
+  return false;
+}
+
+static bool specializeVTablesOfSuperclasses(SILModule &module,
+                                            SILTransform *transform) {
+  bool changed = false;
+  // The module's vtable table can grow while we are specializing superclass
+  // vtables.
+  for (unsigned i = 0; i < module.getVTables().size(); ++i) {
+    SILVTable *vtable = module.getVTables()[i];
+    specializeVTablesOfSuperclasses(vtable, module, transform);
+  }
+  return changed;
+}
+
+static SubstitutionMap getMethodSubs(SILFunction *method, SubstitutionMap classContextSubs) {
+  GenericSignature genericSig =
+    method->getLoweredFunctionType()->getInvocationGenericSignature();
+
+  if (!genericSig || genericSig->areAllParamsConcrete())
+    return SubstitutionMap();
+
+  return SubstitutionMap::get(genericSig,
+           QuerySubstitutionMap{classContextSubs},
+           LookUpConformanceInModule());
+}
+
+static bool hasInvalidConformance(SubstitutionMap subs) {
+  for (auto substConf : subs.getConformances()) {
+    if (substConf.isInvalid())
+      return true;
+  }
+  return false;
+}
+
 SILVTable *swift::specializeVTableForType(SILType classTy, SILModule &module,
                                 SILTransform *transform) {
   CanType astType = classTy.getASTType();
-  BoundGenericClassType *genClassTy = dyn_cast<BoundGenericClassType>(astType);
-  if (!genClassTy) return nullptr;
+  if (!astType->isSpecialized())
+    return nullptr;
+  NominalOrBoundGenericNominalType *genClassTy = dyn_cast<NominalOrBoundGenericNominalType>(astType);
+  ClassDecl *classDecl = astType->getClassOrBoundGenericClass();
+  if (!classDecl)
+    return nullptr;
 
   if (module.lookUpSpecializedVTable(classTy)) return nullptr;
 
   LLVM_DEBUG(llvm::errs() << "specializeVTableFor "
-                          << genClassTy->getDecl()->getName() << ' '
+                          << classDecl->getName() << ' '
                           << genClassTy->getString() << '\n');
 
-  ClassDecl *classDecl = genClassTy->getDecl();
   SILVTable *origVtable = module.lookUpVTable(classDecl);
   if (!origVtable) {
-    llvm::errs() << "No vtable available for "
-                 << genClassTy->getDecl()->getName() << '\n';
-    llvm::report_fatal_error("no vtable");
+    // This cannot occur in regular builds - only if built without wmo, which
+    // can only happen in SourceKit.
+    // Not ideal, but better than a SourceKit crash.
+    module.getASTContext().Diags.diagnose(
+        SourceLoc(), diag::cannot_specialize_class, classTy.getASTType());
+    return nullptr;
   }
 
-  SubstitutionMap subs = astType->getContextSubstitutionMap(
-      classDecl->getParentModule(), classDecl);
+  SubstitutionMap subs = astType->getContextSubstitutionMap();
 
   llvm::SmallVector<SILVTableEntry, 8> newEntries;
 
   for (const SILVTableEntry &entry : origVtable->getEntries()) {
     SILFunction *origMethod = entry.getImplementation();
+
+    auto methodSubs = getMethodSubs(origMethod, subs);
+
+    // If the resulting substitution map is not valid this means that the method
+    // itself has generic parameters.
+    if (hasInvalidConformance(methodSubs)) {
+      module.getASTContext().Diags.diagnose(
+          entry.getMethod().getDecl()->getLoc(), diag::non_final_generic_class_function);
+      continue;
+    }
+
     SILFunction *specializedMethod =
-        specializeVTableMethod(origMethod, subs, module, transform);
+        specializeVTableMethod(origMethod, methodSubs, module, transform);
+
     newEntries.push_back(SILVTableEntry(entry.getMethod(), specializedMethod,
                                         entry.getKind(),
                                         entry.isNonOverridden()));
@@ -148,6 +223,9 @@ SILVTable *swift::specializeVTableForType(SILType classTy, SILModule &module,
 
   SILVTable *vtable = SILVTable::create(module, classDecl, classTy,
                                         IsNotSerialized, newEntries);
+
+  specializeVTablesOfSuperclasses(vtable, module, transform);
+
   return vtable;
 }
 
@@ -189,7 +267,7 @@ static SILFunction *specializeVTableMethod(SILFunction *origMethod,
   module.linkFunction(SpecializedF, SILModule::LinkingMode::LinkAll);
 
   SpecializedF->setLinkage(SILLinkage::Public);
-  SpecializedF->setSerialized(IsNotSerialized);
+  SpecializedF->setSerializedKind(IsNotSerialized);
 
   return SpecializedF;
 }
@@ -201,12 +279,10 @@ bool swift::specializeClassMethodInst(ClassMethodInst *cm) {
   SILValue instance = cm->getOperand();
   SILType classTy = instance->getType();
   CanType astType = classTy.getASTType();
-  BoundGenericClassType *genClassTy = dyn_cast<BoundGenericClassType>(astType);
-  if (!genClassTy) return false;
+  if (!astType->isSpecialized())
+    return false;
 
-  ClassDecl *classDecl = genClassTy->getDecl();
-  SubstitutionMap subs = astType->getContextSubstitutionMap(
-      classDecl->getParentModule(), classDecl);
+  SubstitutionMap subs = astType->getContextSubstitutionMap();
 
   SILType funcTy = cm->getType();
   SILType substitutedType =

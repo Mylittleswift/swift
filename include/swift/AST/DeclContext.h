@@ -29,11 +29,11 @@
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/STLExtras.h"
 #include "swift/Basic/SourceLoc.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/PointerEmbeddedInt.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/PointerUnion.h"
 #include "llvm/Support/raw_ostream.h"
+#include <optional>
 
 #include <type_traits>
 
@@ -82,6 +82,7 @@ namespace swift {
   class SerializedTopLevelCodeDecl;
   class StructDecl;
   class AccessorDecl;
+  class ClosureExpr;
 
   template <typename T>
   struct AvailableDuringLoweringDeclFilter;
@@ -495,6 +496,16 @@ public:
     return const_cast<DeclContext *>(this)->getTopmostDeclarationDeclContext();
   }
 
+  /// This routine looks through closure, initializer, and local function
+  /// contexts to find the outermost function declaration.
+  ///
+  /// \returns the outermost function, or null if there is no such context.
+  LLVM_READONLY
+  DeclContext *getOutermostFunctionContext();
+  const DeclContext *getOutermostFunctionContext() const {
+    return const_cast<DeclContext *>(this)->getOutermostFunctionContext();
+  }
+
   /// Returns the innermost context that is an AbstractFunctionDecl whose
   /// body has been skipped.
   LLVM_READONLY
@@ -502,6 +513,14 @@ public:
   const DeclContext *getInnermostSkippedFunctionContext() const {
     return
         const_cast<DeclContext *>(this)->getInnermostSkippedFunctionContext();
+  }
+
+  /// Returns the innermost context that is a ClosureExpr, which defines how
+  /// self behaves, unless within a type context that redefines self.
+  LLVM_READONLY
+  ClosureExpr *getInnermostClosureForSelfCapture();
+  const ClosureExpr *getInnermostClosureForSelfCapture() const {
+    return const_cast<DeclContext *>(this)->getInnermostClosureForSelfCapture();
   }
 
   /// Returns the semantic parent of this context.  A context has a
@@ -949,7 +968,7 @@ public:
 
   /// Return a hash of all tokens in the body for dependency analysis, if
   /// available.
-  llvm::Optional<Fingerprint> getBodyFingerprint() const;
+  std::optional<Fingerprint> getBodyFingerprint() const;
 
 private:
   /// Add a member to the list for iteration purposes, but do not notify the

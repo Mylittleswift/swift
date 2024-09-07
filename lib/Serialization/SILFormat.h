@@ -173,6 +173,7 @@ namespace sil_block {
     SIL_OPEN_PACK_ELEMENT,
     SIL_PACK_ELEMENT_GET,
     SIL_PACK_ELEMENT_SET,
+    SIL_TYPE_VALUE,
   };
 
   using SILInstNoOperandLayout = BCRecordLayout<
@@ -183,7 +184,7 @@ namespace sil_block {
   using VTableLayout = BCRecordLayout<
     SIL_VTABLE,
     DeclIDField,   // Class Decl
-    BCFixed<1>     // IsSerialized.
+    BCFixed<2>     // SerializedKind.
   >;
 
   using VTableEntryLayout = BCRecordLayout<
@@ -198,13 +199,13 @@ namespace sil_block {
     SIL_MOVEONLY_DEINIT,
     DeclIDField,          // Class Decl
     DeclIDField,          // SILFunction name
-    BCFixed<1>            // IsSerialized.
+    BCFixed<2>            // SerializedKind.
   >;
   
   using PropertyLayout = BCRecordLayout<
     SIL_PROPERTY,
     DeclIDField,          // Property decl
-    BCFixed<1>,           // Is serialized
+    BCFixed<2>,           // SerializedKind
     BCArray<ValueIDField> // Encoded key path component
     // Any substitutions or conformances required for the key path component
     // follow.
@@ -216,7 +217,7 @@ namespace sil_block {
     BCFixed<1>,          // Is this a declaration. We represent this separately
                          // from whether or not we have entries since we can
                          // have empty witness tables.
-    BCFixed<1>,          // IsSerialized.
+    BCFixed<2>,          // SerializedKind.
     ProtocolConformanceIDField   // conformance
     // Witness table entries will be serialized after.
   >;
@@ -266,7 +267,7 @@ namespace sil_block {
   using SILGlobalVarLayout = BCRecordLayout<
     SIL_GLOBALVAR,
     SILLinkageField,
-    BCFixed<1>,          // serialized
+    BCFixed<2>,          // serialized
     BCFixed<1>,          // Is this a declaration.
     BCFixed<1>,          // Is this a let variable.
     TypeIDField,
@@ -278,7 +279,7 @@ namespace sil_block {
     DeclIDField,                // Original function name
     SILLinkageField,            // Linkage
     BCFixed<1>,                 // Is declaration?
-    BCFixed<1>,                 // Is serialized?
+    BCFixed<2>,                 // Is serialized?
     DifferentiabilityKindField, // Differentiability kind
     GenericSignatureIDField,    // Derivative function generic signature
     DeclIDField,                // JVP function name
@@ -291,8 +292,8 @@ namespace sil_block {
   using SILFunctionLayout =
       BCRecordLayout<SIL_FUNCTION, SILLinkageField,
                      BCFixed<1>,  // transparent
-                     BCFixed<1>,  // serialized
-                     BCFixed<2>,  // thunks: signature optimized/reabstraction
+                     BCFixed<2>,  // serializedKind
+                     BCFixed<3>,  // thunk kind
                      BCFixed<1>,  // without_actually_escaping
                      BCFixed<3>,  // specialPurpose
                      BCFixed<2>,  // inlineStrategy
@@ -587,6 +588,13 @@ namespace sil_block {
     SIL_INST_HAS_SYMBOL,
     ValueIDField,               // decl
     BCArray<IdentifierIDField>  // referenced functions
+  >;
+
+  using SILTypeValueLayout = BCRecordLayout<
+    SIL_TYPE_VALUE,
+    TypeIDField,          // Value type
+    SILTypeCategoryField,
+    TypeIDField           // Generic type
   >;
 
 // clang-format on

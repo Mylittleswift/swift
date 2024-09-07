@@ -18,6 +18,7 @@
 #include "TypeChecker.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/TypeWalker.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Sema/ConstraintGraph.h"
 #include "swift/Sema/ConstraintSystem.h"
@@ -168,7 +169,10 @@ Solution ConstraintSystem::finalize() {
   }
 
   // Remember the opened existential types.
-  for (const auto &openedExistential : OpenedExistentialTypes) {
+  for (auto &openedExistential : OpenedExistentialTypes) {
+    openedExistential.second = simplifyType(openedExistential.second)
+        ->castTo<OpenedArchetypeType>();
+
     assert(solution.OpenedExistentialTypes.count(openedExistential.first) == 0||
            solution.OpenedExistentialTypes[openedExistential.first]
              == openedExistential.second &&
@@ -253,6 +257,10 @@ Solution ConstraintSystem::finalize() {
 
   for (const auto &packEltGenericEnv : PackElementGenericEnvironments)
     solution.PackElementGenericEnvironments.push_back(packEltGenericEnv);
+
+  for (const auto &synthesized : SynthesizedConformances) {
+    solution.SynthesizedConformances.insert(synthesized);
+  }
 
   return solution;
 }
@@ -404,6 +412,10 @@ void ConstraintSystem::applySolution(const Solution &solution) {
 
   for (auto &implicitRoot : solution.ImplicitCallAsFunctionRoots) {
     ImplicitCallAsFunctionRoots.insert(implicitRoot);
+  }
+
+  for (auto &synthesized : solution.SynthesizedConformances) {
+    SynthesizedConformances.insert(synthesized);
   }
 
   // Register any fixes produced along this path.
@@ -686,6 +698,7 @@ ConstraintSystem::SolverScope::SolverScope(ConstraintSystem &cs)
   numImplicitValueConversions = cs.ImplicitValueConversions.size();
   numArgumentLists = cs.ArgumentLists.size();
   numImplicitCallAsFunctionRoots = cs.ImplicitCallAsFunctionRoots.size();
+  numSynthesizedConformances = cs.SynthesizedConformances.size();
 
   PreviousScore = cs.CurrentScore;
 
@@ -832,6 +845,9 @@ ConstraintSystem::SolverScope::~SolverScope() {
   // which are no longer in scope.
   truncate(cs.ImplicitCallAsFunctionRoots, numImplicitCallAsFunctionRoots);
 
+  // Remove any implicitly synthesized conformances.
+  truncate(cs.SynthesizedConformances, numSynthesizedConformances);
+
   // Reset the previous score.
   cs.CurrentScore = PreviousScore;
 
@@ -846,7 +862,7 @@ ConstraintSystem::SolverScope::~SolverScope() {
 ///
 /// \returns a solution if a single unambiguous one could be found, or None if
 /// ambiguous or unsolvable.
-llvm::Optional<Solution>
+std::optional<Solution>
 ConstraintSystem::solveSingle(FreeTypeVariableBinding allowFreeTypeVariables,
                               bool allowFixes) {
 
@@ -858,7 +874,7 @@ ConstraintSystem::solveSingle(FreeTypeVariableBinding allowFreeTypeVariables,
   filterSolutions(solutions);
 
   if (solutions.size() != 1)
-    return llvm::Optional<Solution>();
+    return std::optional<Solution>();
 
   return std::move(solutions[0]);
 }
@@ -890,7 +906,7 @@ bool ConstraintSystem::Candidate::solve(
   };
 
   // Allocate new constraint system for sub-expression.
-  ConstraintSystem cs(DC, llvm::None);
+  ConstraintSystem cs(DC, std::nullopt);
 
   // Set up expression type checker timer for the candidate.
   cs.Timer.emplace(E, cs);
@@ -1265,14 +1281,19 @@ void ConstraintSystem::shrink(Expr *expr) {
     bool isSuitableCollection(TypeRepr *collectionTypeRepr) {
       // Only generic identifier, array or dictionary.
       switch (collectionTypeRepr->getKind()) {
-      case TypeReprKind::GenericIdent:
+      case TypeReprKind::UnqualifiedIdent:
+        return cast<UnqualifiedIdentTypeRepr>(collectionTypeRepr)
+            ->hasGenericArgList();
+
       case TypeReprKind::Array:
       case TypeReprKind::Dictionary:
         return true;
 
       default:
-        return false;
+        break;
       }
+
+      return false;
     }
 
     void visitCoerceExpr(CoerceExpr *coerceExpr) {
@@ -1302,7 +1323,7 @@ void ConstraintSystem::shrink(Expr *expr) {
 
           if (typeRepr && isSuitableCollection(typeRepr)) {
             const auto coercionType = TypeResolution::resolveContextualType(
-                typeRepr, CS.DC, llvm::None,
+                typeRepr, CS.DC, std::nullopt,
                 // FIXME: Should we really be unconditionally complaining
                 // about unbound generics and placeholders here? For
                 // example:
@@ -1442,7 +1463,7 @@ static bool debugConstraintSolverForTarget(ASTContext &C,
   return startBound != endBound;
 }
 
-llvm::Optional<std::vector<Solution>>
+std::optional<std::vector<Solution>>
 ConstraintSystem::solve(SyntacticElementTarget &target,
                         FreeTypeVariableBinding allowFreeTypeVariables) {
   llvm::SaveAndRestore<ConstraintSystemOptions> debugForExpr(Options);
@@ -1509,7 +1530,7 @@ ConstraintSystem::solve(SyntacticElementTarget &target,
 
     case SolutionResult::Error:
       maybeProduceFallbackDiagnostic(target);
-      return llvm::None;
+      return std::nullopt;
 
     case SolutionResult::TooComplex: {
       auto affectedRange = solution.getTooComplexAt();
@@ -1524,7 +1545,7 @@ ConstraintSystem::solve(SyntacticElementTarget &target,
           .highlight(*affectedRange);
 
       solution.markAsDiagnosed();
-      return llvm::None;
+      return std::nullopt;
     }
 
     case SolutionResult::Ambiguous:
@@ -1536,7 +1557,7 @@ ConstraintSystem::solve(SyntacticElementTarget &target,
       if (stage == 1 || Context.SolutionCallback) {
         reportSolutionsToSolutionCallback(solution);
         solution.markAsDiagnosed();
-        return llvm::None;
+        return std::nullopt;
       }
 
       if (Options.contains(
@@ -1556,7 +1577,7 @@ ConstraintSystem::solve(SyntacticElementTarget &target,
         diagnoseFailureFor(target);
         reportSolutionsToSolutionCallback(solution);
         solution.markAsDiagnosed();
-        return llvm::None;
+        return std::nullopt;
       }
 
       // Loop again to try to salvage.
@@ -1957,7 +1978,7 @@ static Constraint *selectBestBindingDisjunction(
   return firstBindDisjunction;
 }
 
-llvm::Optional<std::pair<Constraint *, unsigned>>
+std::optional<std::pair<Constraint *, unsigned>>
 ConstraintSystem::findConstraintThroughOptionals(
     TypeVariableType *typeVar, OptionalWrappingDirection optionalDirection,
     llvm::function_ref<bool(Constraint *, TypeVariableType *)> predicate) {
@@ -2014,9 +2035,9 @@ ConstraintSystem::findConstraintThroughOptionals(
     }
 
     // Otherwise we're done.
-    return llvm::None;
+    return std::nullopt;
   }
-  return llvm::None;
+  return std::nullopt;
 }
 
 Constraint *ConstraintSystem::getUnboundBindOverloadDisjunction(
@@ -2047,9 +2068,20 @@ Constraint *ConstraintSystem::getUnboundBindOverloadDisjunction(
 
 // Performance hack: if there are two generic overloads, and one is
 // more specialized than the other, prefer the more-specialized one.
-static Constraint *tryOptimizeGenericDisjunction(
-                                          DeclContext *dc,
-                                          ArrayRef<Constraint *> constraints) {
+static Constraint *
+tryOptimizeGenericDisjunction(ConstraintSystem &cs, Constraint *disjunction,
+                              ArrayRef<Constraint *> constraints) {
+  auto *dc = cs.DC;
+
+  // If we're solving for code completion, and have a child completion token,
+  // skip this optimization since the completion token being a placeholder can
+  // allow us to prefer an unhelpful disjunction choice.
+  if (cs.isForCodeCompletion()) {
+    auto anchor = disjunction->getLocator()->getAnchor();
+    if (cs.containsIDEInspectionTarget(cs.includingParentApply(anchor)))
+      return nullptr;
+  }
+
   llvm::SmallVector<Constraint *, 4> choices;
   for (auto *choice : constraints) {
     if (choices.size() > 2)
@@ -2294,7 +2326,7 @@ void DisjunctionChoiceProducer::partitionDisjunction(
     SmallVectorImpl<unsigned> &PartitionBeginning) {
   // Apply a special-case rule for favoring one generic function over
   // another.
-  if (auto favored = tryOptimizeGenericDisjunction(CS.DC, Choices)) {
+  if (auto favored = tryOptimizeGenericDisjunction(CS, Disjunction, Choices)) {
     CS.favorConstraint(favored);
   }
 
@@ -2346,6 +2378,18 @@ void DisjunctionChoiceProducer::partitionDisjunction(
     if (constraint->isFavored()) {
       favored.push_back(index);
       return true;
+    }
+
+    // Order VarDecls before other kinds of declarations because they are
+    // effectively favored over functions when the two are in the same
+    // overload set. This disjunction order allows SK_UnappliedFunction
+    // to prune later overload choices that are functions when a solution
+    // has already been found with a property.
+    if (auto *decl = getOverloadChoiceDecl(constraint)) {
+      if (isa<VarDecl>(decl)) {
+        everythingElse.push_back(index);
+        return true;
+      }
     }
 
     return false;

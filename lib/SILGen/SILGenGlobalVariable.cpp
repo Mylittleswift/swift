@@ -16,6 +16,7 @@
 #include "Scope.h"
 #include "swift/AST/ASTMangler.h"
 #include "swift/AST/GenericSignature.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/SIL/FormalLinkage.h"
 
 using namespace swift;
@@ -42,6 +43,7 @@ SILGlobalVariable *SILGenModule::getSILGlobalVariable(VarDecl *gDecl,
 
   // Get the linkage for SILGlobalVariable.
   FormalLinkage formalLinkage;
+  // sil_global linkage should be kept private if its decl is resilient.
   if (gDecl->isResilient())
     formalLinkage = FormalLinkage::Private;
   else
@@ -69,7 +71,7 @@ SILGlobalVariable *SILGenModule::getSILGlobalVariable(VarDecl *gDecl,
     M.Types.getLoweredTypeOfGlobal(gDecl));
 
   auto *silGlobal = SILGlobalVariable::create(
-      M, silLinkage, IsNotSerialized, mangledName, silTy, llvm::None, gDecl);
+      M, silLinkage, IsNotSerialized, mangledName, silTy, std::nullopt, gDecl);
   silGlobal->setDeclaration(!forDef);
 
   return silGlobal;
@@ -77,7 +79,7 @@ SILGlobalVariable *SILGenModule::getSILGlobalVariable(VarDecl *gDecl,
 
 ManagedValue
 SILGenFunction::emitGlobalVariableRef(SILLocation loc, VarDecl *var,
-                                      llvm::Optional<ActorIsolation> actorIso) {
+                                      std::optional<ActorIsolation> actorIso) {
   assert(!VarLocs.count(var));
   if (var->isLazilyInitializedGlobal()) {
     // Call the global accessor to get the variable's address.
@@ -89,8 +91,9 @@ SILGenFunction::emitGlobalVariableRef(SILLocation loc, VarDecl *var,
     // The accessor to obtain a global's address may need to initialize the
     // variable first. So, we must call this accessor with the same
     // isolation that the variable itself requires during access.
-    ExecutorBreadcrumb prevExecutor = emitHopToTargetActor(loc, actorIso,
-                                                           /*base=*/llvm::None);
+    ExecutorBreadcrumb prevExecutor =
+        emitHopToTargetActor(loc, actorIso,
+                             /*base=*/std::nullopt);
 
     SILValue addr = B.createApply(loc, accessor, SubstitutionMap(), {});
 

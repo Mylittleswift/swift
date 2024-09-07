@@ -18,6 +18,7 @@ endif()
 # Add unique ABI prefix to swift-syntax libraries so that compiler libraries (e.g. sourcekitdInProc)
 # can be used from tools that has its own swift-syntax libraries as SwiftPM dependencies.
 set(SWIFT_MODULE_ABI_NAME_PREFIX "Compiler")
+set(SWIFTSYNTAX_PACKAGE_NAME "Toolchain")
 
 file(TO_CMAKE_PATH "${SWIFT_PATH_TO_SWIFT_SYNTAX_SOURCE}" swift_syntax_path)
 FetchContent_Declare(SwiftSyntax SOURCE_DIR "${swift_syntax_path}")
@@ -37,6 +38,9 @@ set(SWIFT_SYNTAX_MODULES
   SwiftCompilerPluginMessageHandling
   # Support for LSP
   SwiftIDEUtils
+  SwiftRefactor
+  # For swift-plugin-server
+  SwiftLibraryPluginProvider
 )
 
 # Install shared runtime libraries
@@ -70,6 +74,10 @@ endif()
 
 add_dependencies(swift-syntax-lib
   ${SWIFT_SYNTAX_MODULES})
+
+if(BOOTSTRAPPING_MODE STREQUAL "CROSSCOMPILE")
+    add_dependencies(swift-syntax-lib swift-stdlib-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH})
+endif()
 
 # Install Swift module interface files.
 foreach(module ${SWIFT_SYNTAX_MODULES})

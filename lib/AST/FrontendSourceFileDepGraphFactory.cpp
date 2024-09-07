@@ -33,6 +33,7 @@
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/FileSystem.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/ReferenceDependencyKeys.h"
@@ -534,7 +535,7 @@ class ExternalDependencyEnumerator {
 public:
   using UseEnumerator =
       llvm::function_ref<void(const DependencyKey &, const DependencyKey &,
-                              llvm::Optional<Fingerprint>)>;
+                              std::optional<Fingerprint>)>;
 
   ExternalDependencyEnumerator(const DependencyTracker &depTracker,
                                StringRef swiftDeps)
@@ -548,17 +549,18 @@ public:
                                              id.fingerprint);
     }
     for (StringRef s : depTracker.getDependencies()) {
-      enumerateUse<NodeKind::externalDepend>(enumerator, s, llvm::None);
+      enumerateUse<NodeKind::externalDepend>(enumerator, s, std::nullopt);
     }
     for (const auto &dep : depTracker.getMacroPluginDependencies()) {
-      enumerateUse<NodeKind::externalDepend>(enumerator, dep.path, llvm::None);
+      enumerateUse<NodeKind::externalDepend>(enumerator, dep.path,
+                                             std::nullopt);
     }
   }
 
 private:
   template <NodeKind kind>
   void enumerateUse(UseEnumerator createDefUse, StringRef name,
-                    llvm::Optional<Fingerprint> maybeFP) {
+                    std::optional<Fingerprint> maybeFP) {
     static_assert(kind == NodeKind::externalDepend,
                   "Not a kind of external dependency!");
     createDefUse(DependencyKey(kind, DeclAspect::interface, "", name.str()),
@@ -576,7 +578,7 @@ void FrontendSourceFileDepGraphFactory::addAllUsedDecls() {
   ExternalDependencyEnumerator(depTracker, swiftDeps)
       .enumerateExternalUses([&](const DependencyKey &def,
                                  const DependencyKey &use,
-                                 llvm::Optional<Fingerprint> maybeFP) {
+                                 std::optional<Fingerprint> maybeFP) {
         addAnExternalDependency(def, use, maybeFP);
       });
 }

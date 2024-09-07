@@ -16,6 +16,7 @@
 #include "swift/AST/Module.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Assertions.h"
 
 using namespace swift;
 using namespace swift::index;
@@ -75,7 +76,7 @@ static bool isUnitTest(const ValueDecl *D) {
     return false;
 
   // 6. ...and starts with "test".
-  if (FD->getBaseIdentifier().str().startswith("test"))
+  if (FD->getBaseIdentifier().str().starts_with("test"))
     return true;
 
   return false;
@@ -267,6 +268,7 @@ SymbolInfo index::getSymbolInfoForDecl(const Decl *D) {
 SymbolSubKind index::getSubKindForAccessor(AccessorKind AK) {
   switch (AK) {
   case AccessorKind::Get:    return SymbolSubKind::AccessorGetter;
+  case AccessorKind::DistributedGet:    return SymbolSubKind::AccessorGetter;
   case AccessorKind::Set:    return SymbolSubKind::AccessorSetter;
   case AccessorKind::WillSet:   return SymbolSubKind::SwiftAccessorWillSet;
   case AccessorKind::DidSet:    return SymbolSubKind::SwiftAccessorDidSet;

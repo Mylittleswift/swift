@@ -22,6 +22,7 @@
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/TypeCheckRequests.h"
 #include "swift/AST/TypeRefinementContext.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/SourceManager.h"
 
 using namespace swift;
@@ -42,8 +43,8 @@ TypeRefinementContext::TypeRefinementContext(ASTContext &Ctx, IntroNode Node,
 }
 
 TypeRefinementContext *
-TypeRefinementContext::createRoot(SourceFile *SF,
-                                  const AvailabilityContext &Info) {
+TypeRefinementContext::createForSourceFile(SourceFile *SF,
+                                           const AvailabilityContext &Info) {
   assert(SF);
 
   ASTContext &Ctx = SF->getASTContext();
@@ -51,15 +52,29 @@ TypeRefinementContext::createRoot(SourceFile *SF,
   SourceRange range;
   TypeRefinementContext *parentContext = nullptr;
   AvailabilityContext availabilityContext = Info;
-  if (auto parentExpansion = SF->getMacroExpansion()) {
+  switch (SF->Kind) {
+  case SourceFileKind::MacroExpansion:
+  case SourceFileKind::DefaultArgument: {
+    // Look up the parent context in the enclosing file that this file's
+    // root context should be nested under.
     if (auto parentTRC =
             SF->getEnclosingSourceFile()->getTypeRefinementContext()) {
       auto charRange = Ctx.SourceMgr.getRangeForBuffer(*SF->getBufferID());
       range = SourceRange(charRange.getStart(), charRange.getEnd());
-      parentContext = parentTRC->findMostRefinedSubContext(
-          parentExpansion.getStartLoc(), Ctx);
-      availabilityContext = parentContext->getAvailabilityInfo();
+      auto originalNode = SF->getNodeInEnclosingSourceFile();
+      parentContext =
+          parentTRC->findMostRefinedSubContext(originalNode.getStartLoc(), Ctx);
+      if (parentContext)
+        availabilityContext = parentContext->getAvailabilityInfo();
     }
+    break;
+  }
+  case SourceFileKind::Library:
+  case SourceFileKind::Main:
+  case SourceFileKind::Interface:
+    break;
+  case SourceFileKind::SIL:
+    llvm_unreachable("unexpected SourceFileKind");
   }
 
   return new (Ctx)
@@ -167,10 +182,13 @@ TypeRefinementContext::createForWhileStmtBody(ASTContext &Ctx, WhileStmt *S,
 /// range.
 static bool rangeContainsTokenLocWithGeneratedSource(
     SourceManager &sourceMgr, SourceRange parentRange, SourceLoc childLoc) {
-  auto parentBuffer = sourceMgr.findBufferContainingLoc(parentRange.Start);
+  if (sourceMgr.rangeContainsTokenLoc(parentRange, childLoc))
+    return true;
+
   auto childBuffer = sourceMgr.findBufferContainingLoc(childLoc);
-  while (parentBuffer != childBuffer) {
-    auto info = sourceMgr.getGeneratedSourceInfo(childBuffer);
+  while (!sourceMgr.rangeContainsTokenLoc(
+      sourceMgr.getRangeForBuffer(childBuffer), parentRange.Start)) {
+    auto *info = sourceMgr.getGeneratedSourceInfo(childBuffer);
     if (!info)
       return false;
 
@@ -342,12 +360,22 @@ TypeRefinementContext::getAvailabilityConditionVersionSourceRange(
   llvm_unreachable("Unhandled Reason in switch.");
 }
 
+static std::string
+stringForAvailability(const AvailabilityContext &availability) {
+  if (availability.isAlwaysAvailable())
+    return "all";
+  if (availability.isKnownUnreachable())
+    return "none";
+
+  return availability.getVersionString();
+}
+
 void TypeRefinementContext::print(raw_ostream &OS, SourceManager &SrcMgr,
                                   unsigned Indent) const {
   OS.indent(Indent);
   OS << "(" << getReasonName(getReason());
 
-  OS << " versions=" << AvailabilityInfo.getOSVersion().getAsString();
+  OS << " version=" << stringForAvailability(AvailabilityInfo);
 
   if (getReason() == Reason::Decl || getReason() == Reason::DeclImplicit) {
     Decl *D = Node.getAsDecl();
@@ -372,8 +400,8 @@ void TypeRefinementContext::print(raw_ostream &OS, SourceManager &SrcMgr,
   }
 
   if (!ExplicitAvailabilityInfo.isAlwaysAvailable())
-    OS << " explicit_versions="
-       << ExplicitAvailabilityInfo.getOSVersion().getAsString();
+    OS << " explicit_version="
+       << stringForAvailability(ExplicitAvailabilityInfo);
 
   for (TypeRefinementContext *Child : Children) {
     OS << '\n';
@@ -425,11 +453,11 @@ void swift::simple_display(
   out << "TRC @" << trc;
 }
 
-llvm::Optional<std::vector<TypeRefinementContext *>>
+std::optional<std::vector<TypeRefinementContext *>>
 ExpandChildTypeRefinementContextsRequest::getCachedResult() const {
   auto *TRC = std::get<0>(getStorage());
   if (TRC->getNeedsExpansion())
-    return llvm::None;
+    return std::nullopt;
   return TRC->Children;
 }
 

@@ -1,7 +1,7 @@
 // RUN: %target-swift-frontend -enable-experimental-concurrency -disable-availability-checking -emit-sil -o /dev/null -verify %s
 // RUN: %target-swift-frontend -enable-experimental-concurrency -disable-availability-checking -emit-sil -o /dev/null -verify -strict-concurrency=targeted %s
 // RUN: %target-swift-frontend -enable-experimental-concurrency -disable-availability-checking -emit-sil -o /dev/null -verify -strict-concurrency=complete %s -verify-additional-prefix complete-and-tns-
-// RUN: %target-swift-frontend -enable-experimental-concurrency -disable-availability-checking -emit-sil -o /dev/null -verify -strict-concurrency=complete -enable-experimental-feature RegionBasedIsolation %s -verify-additional-prefix complete-and-tns-
+// RUN: %target-swift-frontend -enable-experimental-concurrency -disable-availability-checking -emit-sil -o /dev/null -verify -strict-concurrency=complete -enable-upcoming-feature RegionBasedIsolation %s -verify-additional-prefix complete-and-tns-
 
 // REQUIRES: concurrency
 // REQUIRES: asserts
@@ -158,9 +158,9 @@ struct Location {
 }
 
 protocol DefaultConstructable {
-  init() // expected-note {{protocol requires initializer 'init()' with type '()'; add a stub for conformance}} {{+2:43-43=\n    init() {\n        <#code#>\n    \}\n}}
+  init() // expected-note {{protocol requires initializer 'init()' with type '()'}} 
 }
-extension Location: DefaultConstructable {} // expected-error {{type 'Location' does not conform to protocol 'DefaultConstructable'}}
+extension Location: DefaultConstructable {} // expected-error {{type 'Location' does not conform to protocol 'DefaultConstructable'}} expected-note {{add stubs for conformance}} {{43-43=\n    init() {\n        <#code#>\n    \}\n}}
 
 extension Location: AsyncDefaultConstructable {}
 

@@ -14,7 +14,6 @@ import ASTBridging
 import BasicBridging
 import SwiftOperators
 import SwiftSyntax
-import SwiftSyntaxMacros
 
 /// A source manager that keeps track of the source files in the program.
 class SourceManager {
@@ -37,6 +36,7 @@ class SourceManager {
 }
 
 /// MARK: Source file management
+
 extension SourceManager {
   /// Inserts a new source file into the source manager.
   ///

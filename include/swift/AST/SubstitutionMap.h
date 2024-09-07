@@ -24,7 +24,7 @@
 #include "swift/Basic/Debug.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMapInfo.h"
-#include "llvm/ADT/Optional.h"
+#include <optional>
 
 namespace llvm {
   class FoldingSetNodeID;
@@ -34,16 +34,12 @@ namespace swift {
 
 class GenericEnvironment;
 class GenericParamList;
+class RecursiveTypeProperties;
 class SubstitutableType;
 typedef CanTypeWrapper<GenericTypeParamType> CanGenericTypeParamType;
 
 template<class Type> class CanTypeWrapper;
 typedef CanTypeWrapper<SubstitutableType> CanSubstitutableType;
-
-enum class CombineSubstitutionMaps {
-  AtDepth,
-  AtIndex
-};
 
 /// SubstitutionMap is a data structure type that describes the mapping of
 /// abstract types to replacement types, together with associated conformances
@@ -72,22 +68,6 @@ private:
   /// When null, this substitution map is empty, having neither a generic
   /// signature nor any replacement types/conformances.
   Storage *storage = nullptr;
-
-public:
-  /// Retrieve the array of replacement types, which line up with the
-  /// generic parameters.
-  ///
-  /// Note that the types may be null, for cases where the generic parameter
-  /// is concrete but hasn't been queried yet.
-  ///
-  /// Prefer \c getReplacementTypes, this is public for printing purposes.
-  ArrayRef<Type> getReplacementTypesBuffer() const;
-
-private:
-  MutableArrayRef<Type> getReplacementTypesBuffer();
-
-  /// Retrieve a mutable reference to the buffer of conformances.
-  MutableArrayRef<ProtocolConformanceRef> getConformancesBuffer();
 
   /// Form a substitution map for the given generic signature with the
   /// specified replacement types and conformances.
@@ -123,6 +103,15 @@ public:
   static SubstitutionMap get(GenericSignature genericSig,
                              ArrayRef<Type> replacementTypes,
                              LookupConformanceFn lookupConformance);
+
+  /// Build a substitution map from the substitutions represented by
+  /// the given in-flight substitution.
+  ///
+  /// This function should generally only be used by the substitution
+  /// subsystem.
+  static SubstitutionMap get(GenericSignature genericSig,
+                             ArrayRef<Type> replacementTypes,
+                             InFlightSubstitution &IFS);
 
   /// Build a substitution map from the substitutions represented by
   /// the given in-flight substitution.
@@ -166,15 +155,7 @@ public:
   /// parameters.
   ArrayRef<Type> getInnermostReplacementTypes() const;
 
-  /// Query whether any replacement types in the map contain archetypes.
-  bool hasArchetypes() const;
-
-  /// Query whether any replacement types in the map contain an opened
-  /// existential.
-  bool hasLocalArchetypes() const;
-
-  /// Query whether any replacement types in the map contain dynamic Self.
-  bool hasDynamicSelf() const;
+  RecursiveTypeProperties getRecursiveProperties() const;
 
   /// Whether the replacement types are all canonical.
   bool isCanonical() const;
@@ -185,13 +166,13 @@ public:
   /// Apply a substitution to all replacement types in the map. Does not
   /// change keys.
   SubstitutionMap subst(SubstitutionMap subMap,
-                        SubstOptions options = llvm::None) const;
+                        SubstOptions options = std::nullopt) const;
 
   /// Apply a substitution to all replacement types in the map. Does not
   /// change keys.
   SubstitutionMap subst(TypeSubstitutionFn subs,
                         LookupConformanceFn conformances,
-                        SubstOptions options = llvm::None) const;
+                        SubstOptions options = std::nullopt) const;
 
   /// Apply an in-flight substitution to all replacement types in the map.
   /// Does not change keys.
@@ -227,26 +208,6 @@ public:
                            const NominalTypeDecl *derivedNominal,
                            GenericSignature baseSig,
                            const GenericParamList *derivedParams);
-
-  /// Combine two substitution maps as follows.
-  ///
-  /// The result is written in terms of the generic parameters of 'genericSig'.
-  ///
-  /// Generic parameters with a depth or index less than 'firstDepthOrIndex'
-  /// come from 'firstSubMap'.
-  ///
-  /// Generic parameters with a depth greater than 'firstDepthOrIndex' come
-  /// from 'secondSubMap', but are looked up starting with a depth or index of
-  /// 'secondDepthOrIndex'.
-  ///
-  /// The 'how' parameter determines if we're looking at the depth or index.
-  static SubstitutionMap
-  combineSubstitutionMaps(SubstitutionMap firstSubMap,
-                          SubstitutionMap secondSubMap,
-                          CombineSubstitutionMaps how,
-                          unsigned baseDepthOrIndex,
-                          unsigned origDepthOrIndex,
-                          GenericSignature genericSig);
 
   /// Swap archetypes in the substitution map's replacement types with their
   /// interface types.
@@ -300,7 +261,7 @@ private:
   /// Note that this only finds replacements for maps that are directly
   /// stored inside the map. In most cases, you should call Type::subst()
   /// instead, since that will resolve member types also.
-  Type lookupSubstitution(CanSubstitutableType type) const;
+  Type lookupSubstitution(GenericTypeParamType *type) const;
 };
 
 inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
@@ -370,6 +331,19 @@ struct LookUpConformanceInOverrideSubs {
   ProtocolConformanceRef operator()(CanType type,
                                     Type substType,
                                     ProtocolDecl *proto) const;
+};
+
+// Substitute the outer generic parameters from a substitution map, ignoring
+/// inner generic parameters with a given depth.
+struct OuterSubstitutions {
+  SubstitutionMap subs;
+  unsigned depth;
+
+  bool isUnsubstitutedTypeParameter(Type type) const;
+  Type operator()(SubstitutableType *type) const;
+  ProtocolConformanceRef operator()(CanType dependentType,
+                                    Type conformingReplacementType,
+                                    ProtocolDecl *conformedProtocol) const;
 };
 
 } // end namespace swift

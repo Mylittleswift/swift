@@ -10,7 +10,7 @@ struct TestInit {
   var full: (Int, Int)
 
   var point: (Int, Int) {
-    // CHECK-LABEL: sil private [ossa] @$s14init_accessors8TestInitV5pointSi_Sitvi : $@convention(thin) (Int, Int, @inout Int, @thin TestInit.Type) -> (@out Int, @out (Int, Int))
+    // CHECK-LABEL: sil hidden [ossa] @$s14init_accessors8TestInitV5pointSi_Sitvi : $@convention(thin) (Int, Int, @inout Int, @thin TestInit.Type) -> (@out Int, @out (Int, Int))
     // CHECK: bb0([[Y_REF:%.*]] : $*Int, [[FULL_REF:%.*]] : $*(Int, Int), [[X_VAL:%.*]] : $Int, [[Y_VAL:%.*]] : $Int, [[X_REF:%.*]] : $*Int, [[METATYPE:%.*]] : $@thin TestInit.Type):
     //
     // CHECK: [[INITIAL_VALUE:%.*]] = tuple ([[X_VAL]] : $Int, [[Y_VAL]] : $Int)
@@ -185,7 +185,7 @@ struct TestNoInitAndInit {
 
   var pointX: Int {
     @storageRestrictions(accesses: x)
-    init(initalValue) {
+    init(initialValue) {
     }
 
     get { x }
@@ -230,7 +230,7 @@ class TestClass {
   var y: (Int, [String])
 
   var data: (Int, (Int, [String])) {
-    // CHECK-LABEL: sil private [ossa] @$s14init_accessors9TestClassC4dataSi_Si_SaySSGttvi : $@convention(thin) (Int, Int, @owned Array<String>, @thick TestClass.Type) -> (@out Int, @out (Int, Array<String>))
+    // CHECK-LABEL: sil hidden [ossa] @$s14init_accessors9TestClassC4dataSi_Si_SaySSGttvi : $@convention(thin) (Int, Int, @owned Array<String>, @thick TestClass.Type) -> (@out Int, @out (Int, Array<String>))
     // CHECK: bb0([[X_REF:%.*]] : $*Int, [[Y_REF:%.*]] : $*(Int, Array<String>), [[X_VAL:%.*]] : $Int, [[Y_VAL_0:%.*]] : $Int, [[Y_VAL_1:%.*]] : @owned $Array<String>, [[METATYPE:%.*]] : $@thick TestClass.Type):
     //
     // CHECK: ([[X_VAL:%.*]], [[Y_VAL:%.*]]) = destructure_tuple {{.*}} : $(Int, (Int, Array<String>))
@@ -277,7 +277,7 @@ struct TestGeneric<T, U> {
   var b: T
   var c: U
 
-  // CHECK-LABEL: sil private [ossa] @$s14init_accessors11TestGenericV4datax_xtvi : $@convention(thin) <T, U> (@in T, @in T, @inout U, @thin TestGeneric<T, U>.Type) -> (@out T, @out T)
+  // CHECK-LABEL: sil hidden [ossa] @$s14init_accessors11TestGenericV4datax_xtvi : $@convention(thin) <T, U> (@in T, @in T, @inout U, @thin TestGeneric<T, U>.Type) -> (@out T, @out T)
   //
   // CHECK: bb0([[A_REF:%.*]] : $*T, [[B_REF:%.*]] : $*T, [[A_VALUE:%.*]] : $*T, [[B_VALUE:%.*]] : $*T, [[C_REF:%.*]] : $*U, [[METATYPE:%.*]] : $@thin TestGeneric<T, U>.Type):
   //
@@ -326,17 +326,17 @@ struct TestGenericTuple<T, U> {
   var a: T
   var b: (T, U)
 
-  // CHECK-LABEL: sil private [ossa] @$s14init_accessors16TestGenericTupleV4datax_x_q_ttvi : $@convention(thin) <T, U> (@in T, @in T, @in U, @thin TestGenericTuple<T, U>.Type) -> (@out T, @out (T, U)) {
+  // CHECK-LABEL: sil hidden [ossa] @$s14init_accessors16TestGenericTupleV4datax_x_q_ttvi : $@convention(thin) <T, U> (@in T, @in T, @in U, @thin TestGenericTuple<T, U>.Type) -> (@out T, @out (T, U)) {
   //
   // CHECK: bb0([[A_REF:%.*]] : $*T, [[B_REF:%.*]] : $*(T, U), [[A_VALUE:%.*]] : $*T, [[B_VALUE:%.*]] : $*T, [[C_VALUE:%.*]] : $*U, [[METATYPE:%.*]] : $@thin TestGenericTuple<T, U>.Type):
   //
-  // CHECK: [[INIT_VALUE_1:%.*]] = alloc_stack $(T, U), let, name "initialValue"
+  // CHECK: [[INIT_VALUE_1:%.*]] = alloc_stack $(T, U)
   // CHECK-NEXT: [[INIT_VALUE_1_0:%.*]] = tuple_element_addr [[INIT_VALUE_1]] : $*(T, U), 0
   // CHECK-NEXT: copy_addr [take] [[B_VALUE]] to [init] [[INIT_VALUE_1_0]]
   // CHECK-NEXT: [[INIT_VALUE_1_1:%.*]] = tuple_element_addr [[INIT_VALUE_1]] : $*(T, U), 1
   // CHECK-NEXT: copy_addr [take] [[C_VALUE]] to [init] [[INIT_VALUE_1_1]]
 
-  // CHECK-NEXT: [[INIT_VALUE_2:%.*]] = alloc_stack [lexical] $(T, (T, U))
+  // CHECK-NEXT: [[INIT_VALUE_2:%.*]] = alloc_stack [lexical] [var_decl] $(T, (T, U))
   // CHECK-NEXT: [[INIT_VALUE_2_0:%.*]] = tuple_element_addr [[INIT_VALUE_2]] : $*(T, (T, U)), 0
   // CHECK-NEXT: copy_addr [take] [[A_VALUE]] to [init] [[INIT_VALUE_2_0]]
   // CHECK-NEXT: [[INIT_VALUE_2_1:%.*]] = tuple_element_addr [[INIT_VALUE_2]] : $*(T, (T, U)), 1

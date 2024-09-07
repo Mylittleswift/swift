@@ -142,7 +142,7 @@ public:
   };
 
   /// Set target decl for attribute if the CC token is in attribute of the decl.
-  virtual void setAttrTargetDeclKind(llvm::Optional<DeclKind> DK) {}
+  virtual void setAttrTargetDeclKind(std::optional<DeclKind> DK) {}
 
   /// Set that the code completion token occurred in a custom attribute. This
   /// allows us to type check the custom attribute even if it is not attached to
@@ -177,6 +177,12 @@ public:
   /// provide context. This will be \c NULL if no components of the
   /// #keyPath argument have been parsed yet.
   virtual void completeExprKeyPath(KeyPathExpr *KPE, SourceLoc DotLoc) {};
+
+  /// Complete the beginning of the type for a parameter of a
+  /// func/subscript/closure, or the type for a parameter in a function type.
+  /// For the latter, we cannot know for sure whether the user is trying to
+  /// write a function type, so will complete for e.g `let x: (#^COMPLETE^#`.
+  virtual void completeTypePossibleFunctionParamBeginning() {}
 
   /// Complete the beginning of the type of result of func/var/let/subscript.
   virtual void completeTypeDeclResultBeginning() {};
@@ -262,10 +268,10 @@ public:
   /// index means that the completion is within the parentheses and is
   /// for a specific yield value.
   virtual void completeYieldStmt(CodeCompletionExpr *E,
-                                 llvm::Optional<unsigned> yieldIndex){};
+                                 std::optional<unsigned> yieldIndex){};
 
   virtual void completeAfterPoundExpr(CodeCompletionExpr *E,
-                                      llvm::Optional<StmtKind> ParentKind){};
+                                      std::optional<StmtKind> ParentKind){};
 
   virtual void completeAfterPoundDirective() {};
 
@@ -281,6 +287,8 @@ public:
   void completeForEachPatternBeginning(bool hasTry, bool hasAwait) {};
 
   virtual void completeTypeAttrBeginning() {};
+
+  virtual void completeTypeAttrInheritanceBeginning() {};
 
   virtual void completeOptionalBinding(){};
 

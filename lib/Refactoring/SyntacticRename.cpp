@@ -13,6 +13,7 @@
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/DiagnosticsRefactoring.h"
 #include "swift/AST/SourceFile.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Frontend/PrintingDiagnosticConsumer.h"
 #include "swift/IDE/IDEBridging.h"
 #include "swift/Parse/Lexer.h"
@@ -91,7 +92,7 @@ swift::ide::resolveRenameLocations(ArrayRef<RenameLoc> RenameLocs,
     if (found == resolvedLocsInSourceOrder.end()) {
       resolvedLoc =
           ResolvedLoc(CharSourceRange(),
-                      /*LabelRanges=*/{}, llvm::None, LabelRangeType::None,
+                      /*LabelRanges=*/{}, std::nullopt, LabelRangeType::None,
                       /*IsActive=*/true, ResolvedLocContext::Comment);
     } else {
       resolvedLoc = *found;
